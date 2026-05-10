@@ -1,0 +1,318 @@
+name: 'Backup, Verify & Sync'
+description: 'Syncs ops scripts to server, runs Restic backup, verifies, and optionally syncs production data to staging. Expects ops-scripts/ in caller working dir.'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  sync_staging:
+    description: 'Also sync data to staging? (true/false)'
+    required: false
+    default: 'true'
+  sync_staging_apps_json:
+    description: 'JSON array of app names to sync to staging (from matrix.sync_staging_apps)'
+    required: false
+    default: '[]'
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  restic_repo_b2:
+    description: 'Restic B2 repository URL'
+    required: true
+  restic_password:
+    description: 'Restic encryption password'
+    required: true
+  b2_key_id:
+    description: 'Backblaze B2 key ID'
+    required: true
+  b2_app_key:
+    description: 'Backblaze B2 application key'
+    required: true
+  ops_scripts_path:
+    description: 'Local path containing ops scripts (must include backup.py, verify_backup.py, restore.py)'
+    required: false
+    default: 'ops-scripts'
+  infra_paths_file:
+    description: 'Local infra paths file to bundle alongside ops scripts'
+    required: false
+    default: 'backup/infra_paths.txt'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
+            exit 1
+          fi
+        done
+
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 📋 Bundle infra paths with ops scripts
+      shell: bash
+      env:
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+        INFRA_PATHS_FILE: ${{ inputs.infra_paths_file }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "${OPS_SCRIPTS_PATH}" ]; then
+          echo "❌ ops_scripts_path '${OPS_SCRIPTS_PATH}' not found."
+          exit 1
+        fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/backup.py" ]; then
+          echo "❌ ${OPS_SCRIPTS_PATH}/backup.py missing — webapp-ops-scripts checkout failed?"
+          exit 1
+        fi
+
+        if [ -f "${INFRA_PATHS_FILE}" ]; then
+          cp "${INFRA_PATHS_FILE}" "${OPS_SCRIPTS_PATH}/infra_paths.txt"
+        else
+          touch "${OPS_SCRIPTS_PATH}/infra_paths.txt"
+        fi
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 📂 Sync ops scripts to server
+      id: sync_scripts
+      continue-on-error: true
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+      run: |
+        set -euo pipefail
+        rsync -avz -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+          "${OPS_SCRIPTS_PATH}/" \
+          "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/"
+
+    - name: 💾 Run backup
+      id: run_backup
+      if: steps.sync_scripts.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPO_LOCAL: /srv/backups/restic_v2
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.b2_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPO_LOCAL=$(printf '%q' "$RESTIC_REPO_LOCAL") \
+           RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") \
+           AWS_SECRET_ACCESS_KEY=$(printf '%q' "$AWS_SECRET_ACCESS_KEY") \
+           PYTHONUNBUFFERED=$(printf '%q' "$PYTHONUNBUFFERED") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        python3 /srv/infrastructure/ops-scripts/backup.py
+        EOF
+
+    - name: 🔍 Verify backup (smoke test)
+      id: verify_backup
+      if: steps.run_backup.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           B2_KEY_ID=$(printf '%q' "$B2_KEY_ID") \
+           B2_APP_KEY=$(printf '%q' "$B2_APP_KEY") \
+           PYTHONUNBUFFERED=$(printf '%q' "$PYTHONUNBUFFERED") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        export AWS_ACCESS_KEY_ID="$B2_KEY_ID"
+        export AWS_SECRET_ACCESS_KEY="$B2_APP_KEY"
+        python3 /srv/infrastructure/ops-scripts/verify_backup.py
+        EOF
+
+    - name: 🔄 Sync production data to staging
+      id: sync_staging
+      if: ${{ steps.verify_backup.outcome == 'success' && inputs.sync_staging == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPOSITORY: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.b2_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
+        SYNC_STAGING_APPS_JSON: ${{ inputs.sync_staging_apps_json }}
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPOSITORY=$(printf '%q' "$RESTIC_REPOSITORY") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") \
+           AWS_SECRET_ACCESS_KEY=$(printf '%q' "$AWS_SECRET_ACCESS_KEY") \
+           SYNC_STAGING_APPS_JSON=$(printf '%q' "$SYNC_STAGING_APPS_JSON") \
+           PYTHONUNBUFFERED=$(printf '%q' "$PYTHONUNBUFFERED") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+
+        python3 - <<'PYCODE'
+        import json
+        import os
+        import subprocess
+
+        apps = json.loads(os.environ.get("SYNC_STAGING_APPS_JSON", "[]"))
+        if not apps:
+            print("ℹ️ No staging sync apps configured for this target. Skipping.")
+            raise SystemExit(0)
+
+        print("=== STARTING SYNC TO STAGING ===")
+        failures = []
+        for app in apps:
+            print(f"🔄 Processing {app}...")
+            result = subprocess.run(
+                [
+                    "python3",
+                    "/srv/infrastructure/ops-scripts/restore.py",
+                    "--app",
+                    app,
+                    "--target-env",
+                    "staging",
+                    "--snapshot",
+                    "latest",
+                ],
+                check=False,
+            )
+            if result.returncode == 0:
+                print(f"✅ Restore succeeded for {app}.")
+                continue
+
+            print(f"❌ Restore failed for {app} with exit code {result.returncode}.")
+            failures.append((app, result.returncode))
+
+        print("=== SYNC SUMMARY ===")
+        for app in apps:
+            failed = next((code for failed_app, code in failures if failed_app == app), None)
+            if failed is None:
+                print(f"  - {app}: success")
+            else:
+                print(f"  - {app}: failure (exit code {failed})")
+
+        if failures:
+            print("=== SYNC COMPLETED WITH FAILURES ===")
+            raise SystemExit(1)
+
+        print("=== SYNC COMPLETED SUCCESSFULLY ===")
+        PYCODE
+        EOF
+
+    - name: 🧾 Summarize target result
+      if: always()
+      shell: bash
+      env:
+        TARGET_NAME: ${{ inputs.target }}
+        SYNC_SCRIPTS_OUTCOME: ${{ steps.sync_scripts.outcome }}
+        RUN_BACKUP_OUTCOME: ${{ steps.run_backup.outcome }}
+        VERIFY_BACKUP_OUTCOME: ${{ steps.verify_backup.outcome }}
+        SYNC_STAGING_OUTCOME: ${{ steps.sync_staging.outcome }}
+      run: |
+        set -euo pipefail
+
+        final_status="success"
+        if [ "$SYNC_SCRIPTS_OUTCOME" = "failure" ] || \
+           [ "$RUN_BACKUP_OUTCOME" = "failure" ] || \
+           [ "$VERIFY_BACKUP_OUTCOME" = "failure" ] || \
+           [ "$SYNC_STAGING_OUTCOME" = "failure" ]; then
+          final_status="failure"
+        fi
+
+        {
+          echo "## Backup target: ${TARGET_NAME}"
+          echo
+          echo "- Final status: \`${final_status}\`"
+          echo "- Sync Scripts: \`${SYNC_SCRIPTS_OUTCOME}\`"
+          echo "- Run Backup: \`${RUN_BACKUP_OUTCOME}\`"
+          echo "- Verify Backup: \`${VERIFY_BACKUP_OUTCOME}\`"
+          echo "- Sync to Staging: \`${SYNC_STAGING_OUTCOME}\`"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: 🚨 Fail target at end if needed
+      if: always()
+      shell: bash
+      env:
+        TARGET_NAME: ${{ inputs.target }}
+        SYNC_SCRIPTS_OUTCOME: ${{ steps.sync_scripts.outcome }}
+        RUN_BACKUP_OUTCOME: ${{ steps.run_backup.outcome }}
+        VERIFY_BACKUP_OUTCOME: ${{ steps.verify_backup.outcome }}
+        SYNC_STAGING_OUTCOME: ${{ steps.sync_staging.outcome }}
+      run: |
+        set -euo pipefail
+
+        if [ "$SYNC_SCRIPTS_OUTCOME" = "failure" ] || \
+           [ "$RUN_BACKUP_OUTCOME" = "failure" ] || \
+           [ "$VERIFY_BACKUP_OUTCOME" = "failure" ] || \
+           [ "$SYNC_STAGING_OUTCOME" = "failure" ]; then
+          echo "❌ Backup workflow failed for target ${TARGET_NAME}."
+          exit 1
+        fi
+
+        echo "✅ Backup workflow completed successfully for target ${TARGET_NAME}."

@@ -1,0 +1,187 @@
+name: 'Provision Server (bootstrap base)'
+description: 'Bootstraps a server (packages, Docker, deploy user, dirs, firewall, fail2ban). Does NOT sync access keys — call the sync-ssh-access composite separately.'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  target_host:
+    description: 'Server host address (overrides ssh_host if provided)'
+    required: false
+    default: ''
+  ssh_host:
+    description: 'SSH host address (used if target_host is empty)'
+    required: true
+  ssh_private_key_root:
+    description: 'Root SSH private key (PEM contents) — used to log in as root during initial bootstrap'
+    required: true
+  deploy_user:
+    description: 'Deploy user to create / configure'
+    required: true
+  infra_public_key:
+    description: 'Optional single-line OpenSSH public key to add to the deploy user'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_DEPLOY_USER: ${{ inputs.deploy_user }}
+        INPUT_TARGET_HOST: ${{ inputs.target_host }}
+        INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
+        SSH_PRIVATE_KEY_ROOT: ${{ inputs.ssh_private_key_root }}
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+
+        if ! printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+          echo "❌ Invalid 'target' input"
+          exit 1
+        fi
+        if ! printf '%s' "$INPUT_DEPLOY_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$'; then
+          echo "❌ Invalid 'deploy_user' input — must be a valid POSIX username"
+          exit 1
+        fi
+        if [ -n "${INPUT_TARGET_HOST:-}" ] && ! printf '%s' "$INPUT_TARGET_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
+          echo "❌ Invalid 'target_host' input"
+          exit 1
+        fi
+        if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
+          line_count=$(printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | wc -l)
+          if [ "$line_count" -gt 0 ]; then
+            echo "❌ infra_public_key must be a single line (no newlines)"
+            exit 1
+          fi
+          if ! printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]]+\S+)?$'; then
+            echo "❌ infra_public_key does not match expected OpenSSH key format"
+            exit 1
+          fi
+        fi
+        if [ -z "$SSH_PRIVATE_KEY_ROOT" ]; then
+          echo "❌ ssh_private_key_root is required (root login key)"
+          exit 1
+        fi
+        if [ -z "$SSH_HOST" ] && [ -z "$INPUT_TARGET_HOST" ]; then
+          echo "❌ Either ssh_host or target_host must be set"
+          exit 1
+        fi
+        echo "✅ Inputs validated."
+
+    - name: Resolve target host
+      shell: bash
+      env:
+        TARGET_HOST_INPUT: ${{ inputs.target_host }}
+        SSH_HOST_INPUT: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        TARGET_HOST="${TARGET_HOST_INPUT}"
+        if [ -z "$TARGET_HOST" ]; then
+          TARGET_HOST="${SSH_HOST_INPUT}"
+        fi
+        echo "TARGET_HOST=$TARGET_HOST" >> "$GITHUB_ENV"
+
+    - name: 🧱 Bootstrap base server and app platform
+      uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+      env:
+        DEPLOY_USER: ${{ inputs.deploy_user }}
+        INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
+        TARGET_HOST_ENV: ${{ env.TARGET_HOST }}
+      with:
+        host: ${{ env.TARGET_HOST }}
+        username: root
+        key: ${{ inputs.ssh_private_key_root }}
+        envs: DEPLOY_USER,INPUT_INFRA_PUBLIC_KEY,TARGET_HOST_ENV
+        script: |
+          set -euo pipefail
+
+          echo "🚀 Starting provisioning for ${DEPLOY_USER} on ${TARGET_HOST_ENV}"
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get upgrade -y
+          apt-get install -y curl git ufw fail2ban htop ncdu rsync acl restic
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "🐳 Installing Docker..."
+            curl -fsSL https://get.docker.com | sh
+          else
+            echo "✅ Docker already installed."
+          fi
+
+          if id "${DEPLOY_USER}" >/dev/null 2>&1; then
+            echo "✅ User ${DEPLOY_USER} already exists."
+          else
+            adduser --disabled-password --gecos "" "${DEPLOY_USER}"
+          fi
+
+          usermod -aG docker "${DEPLOY_USER}" || true
+          usermod -aG sudo "${DEPLOY_USER}" || true
+
+          cat <<EOF >/etc/sudoers.d/90-webapp-maintenance
+          ${DEPLOY_USER} ALL=(ALL) NOPASSWD:SETENV: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl reboot, /usr/sbin/reboot
+          EOF
+          chmod 440 /etc/sudoers.d/90-webapp-maintenance
+          visudo -cf /etc/sudoers.d/90-webapp-maintenance
+
+          mkdir -p /home/${DEPLOY_USER}/.ssh
+          if [ -f /root/.ssh/authorized_keys ]; then
+            cat /root/.ssh/authorized_keys >> /home/${DEPLOY_USER}/.ssh/authorized_keys
+            sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
+          fi
+          if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
+            # Format already validated upstream.
+            printf '%s\n' "${INPUT_INFRA_PUBLIC_KEY}" >> /home/${DEPLOY_USER}/.ssh/authorized_keys
+            sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
+          fi
+          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /home/${DEPLOY_USER}/.ssh
+          chmod 700 /home/${DEPLOY_USER}/.ssh
+          [ -f /home/${DEPLOY_USER}/.ssh/authorized_keys ] && chmod 600 /home/${DEPLOY_USER}/.ssh/authorized_keys || true
+
+          mkdir -p /srv/apps
+          chown root:"${DEPLOY_USER}" /srv/apps
+          chmod 2775 /srv/apps
+          setfacl -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+          setfacl -d -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+
+          mkdir -p /srv/infrastructure/webapp-management
+          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management
+          chmod 2775 /srv/infrastructure/webapp-management
+
+          mkdir -p /srv/infrastructure/ops-scripts
+          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/ops-scripts
+
+          mkdir -p /srv/backups/db-dumps /srv/backups/restic_v2
+          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/backups
+          chmod 0755 /srv/backups
+          chmod 0700 /srv/backups/db-dumps /srv/backups/restic_v2
+
+          ufw default deny incoming
+          ufw default allow outgoing
+          sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+          ufw allow 22/tcp
+          ufw allow 80/tcp
+          ufw allow 443/tcp
+          echo "y" | ufw enable
+
+          cat <<'EOF' >/etc/fail2ban/jail.local
+          [DEFAULT]
+          bantime  = 1h
+          findtime = 10m
+          maxretry = 5
+          ignoreip = 127.0.0.1/8 ::1
+
+          [sshd]
+          enabled = true
+          port    = ssh
+          EOF
+
+          systemctl restart docker
+          systemctl restart fail2ban
+
+          echo "✅ Provisioning finished."
+          id "${DEPLOY_USER}"
+          ls -ld /srv/apps /srv/backups /srv/infrastructure/webapp-management /srv/infrastructure/ops-scripts
