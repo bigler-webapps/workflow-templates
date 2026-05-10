@@ -20,7 +20,7 @@ jobs:
 | `backup.yml` | `workflow_call` | Backup + verify + optional staging sync |
 | `restore.yml` | `workflow_call` | Restore app DB to staging from Restic |
 | `deploy-app.yml` | `workflow_call` | Deploy a Django/React app via rsync + Docker |
-| `deploy-traefik.yml` | `workflow_call` | Deploy Traefik infrastructure config |
+| `actions/deploy-traefik` | composite action | Deploy Traefik infrastructure stack (called from a job with `environment:`) |
 | `sync-ssh-access.yml` | `workflow_call` | Sync SSH authorized_keys from `access/` |
 | `provision-server.yml` | `workflow_call` | Full server provisioning (users, Docker, firewall) |
 | `maintenance.yml` | `workflow_call` | Weekly apt updates + conditional reboot |

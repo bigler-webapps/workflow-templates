@@ -1,0 +1,131 @@
+name: 'Deploy Traefik Infrastructure'
+description: 'Deploys Traefik + supporting infrastructure stack to a server via rsync + docker compose'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  target_environment:
+    description: 'Target environment (production / staging)'
+    required: false
+    default: 'production'
+  remote_path:
+    description: 'Remote deployment path on the server'
+    required: false
+    default: '/srv/infrastructure/webapp-management'
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  secrets_context_json:
+    description: 'JSON-serialized secrets context (toJson(secrets)) for generate-env'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}' for target '${{ inputs.target }}'."
+            exit 1
+          fi
+        done
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Install dependencies
+      shell: bash
+      run: |
+        pip install PyYAML
+        pip install "django-core-micha>=1.2.3"
+
+    - name: 🔐 Generate .env
+      shell: bash
+      env:
+        SECRETS_CONTEXT: ${{ inputs.secrets_context_json }}
+      run: |
+        generate-env --env ${{ inputs.target_environment }} --config project.yaml
+
+    - name: 📂 Rsync project to server
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_PATH: ${{ inputs.remote_path }}
+      run: |
+        set -euo pipefail
+        rsync -rlvz \
+          --delete --delete-delay \
+          --partial --delay-updates \
+          --no-owner --no-group --no-perms --omit-dir-times \
+          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
+          --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
+          -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+          --exclude '.git' \
+          --exclude '.github' \
+          --exclude 'acme.json' \
+          --exclude 'uptime-kuma-data' \
+          --exclude 'certs-export' \
+          --exclude 'backup' \
+          --exclude 'wireguard' \
+          ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_PATH}"
+
+    - name: 🚀 Start containers
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'EOF'
+        set -euo pipefail
+        cd "${{ inputs.remote_path }}"
+
+        if [ ! -f .env ]; then echo "❌ .env missing"; exit 1; fi
+
+        DOCKER="docker"
+        if ! docker info >/dev/null 2>&1; then
+          DOCKER="sudo -n docker"
+        fi
+
+        if [ ! -f acme.json ]; then touch acme.json; chmod 600 acme.json; fi
+        $DOCKER network inspect traefik_proxy >/dev/null 2>&1 || $DOCKER network create traefik_proxy
+
+        echo "🚀 Starting stack..."
+        $DOCKER compose --env-file .env up -d --remove-orphans
+        EOF
