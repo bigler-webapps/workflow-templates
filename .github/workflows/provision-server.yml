@@ -1,0 +1,229 @@
+name: Provision Server
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      server_ip:
+        required: false
+        type: string
+      deploy_user:
+        required: false
+        type: string
+      infra_public_key:
+        required: false
+        type: string
+      sync_access_keys:
+        required: false
+        type: boolean
+        default: true
+
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "GitHub environment / inventory target for this server."
+        required: true
+        type: environment
+      server_ip:
+        description: "Optional host override. Uses target environment SSH_HOST when empty."
+        required: false
+        type: string
+      deploy_user:
+        description: "User that will own app deployments"
+        required: false
+        type: string
+      infra_public_key:
+        description: "Optional infrastructure public key written directly to the deploy user."
+        required: false
+        type: string
+      sync_access_keys:
+        description: "Sync managed public keys after the base bootstrap finished"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  prepare_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧮 Resolve inventory target
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}")"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    needs: prepare_targets
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
+    environment: ${{ matrix.github_environment }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET_HOST: ${{ inputs.server_ip != '' && inputs.server_ip || secrets.SSH_HOST }}
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧱 Bootstrap base server and app platform
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.TARGET_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY_ROOT }}
+          script: |
+            set -euo pipefail
+
+            DEPLOY_USER="${{ inputs.deploy_user }}"
+            if [ -z "${DEPLOY_USER}" ]; then
+              DEPLOY_USER="${{ matrix.deploy_user }}"
+            fi
+            SYNC_USER="certfetcher"
+            SYNC_GROUP="syncers"
+            SYNC_GID="2233"
+            CERT_GROUP="certreaders"
+
+            echo "🚀 Starting provisioning for ${DEPLOY_USER} on ${{ env.TARGET_HOST }}"
+
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get upgrade -y
+            apt-get install -y curl git ufw fail2ban htop ncdu rsync acl restic
+
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "🐳 Installing Docker..."
+              curl -fsSL https://get.docker.com | sh
+            else
+              echo "✅ Docker already installed."
+            fi
+
+            if id "${DEPLOY_USER}" >/dev/null 2>&1; then
+              echo "✅ User ${DEPLOY_USER} already exists."
+            else
+              adduser --disabled-password --gecos "" "${DEPLOY_USER}"
+            fi
+
+            usermod -aG docker "${DEPLOY_USER}" || true
+            usermod -aG sudo "${DEPLOY_USER}" || true
+
+            cat <<EOF >/etc/sudoers.d/90-webapp-maintenance
+            ${DEPLOY_USER} ALL=(ALL) NOPASSWD:SETENV: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl reboot, /usr/sbin/reboot
+            EOF
+            chmod 440 /etc/sudoers.d/90-webapp-maintenance
+            visudo -cf /etc/sudoers.d/90-webapp-maintenance
+
+            if getent group "${SYNC_GROUP}" >/dev/null; then
+              EXISTING_GID="$(getent group "${SYNC_GROUP}" | cut -d: -f3)"
+              if [ "${EXISTING_GID}" != "${SYNC_GID}" ]; then
+                echo "❌ Group ${SYNC_GROUP} exists with GID=${EXISTING_GID}, expected ${SYNC_GID}."
+                exit 1
+              fi
+            else
+              groupadd --gid "${SYNC_GID}" "${SYNC_GROUP}"
+            fi
+
+            getent group "${CERT_GROUP}" >/dev/null || groupadd "${CERT_GROUP}"
+
+            if ! id "${SYNC_USER}" >/dev/null 2>&1; then
+              useradd -m -s /bin/bash "${SYNC_USER}"
+            fi
+
+            usermod -aG "${SYNC_GROUP}" "${SYNC_USER}"
+            usermod -aG "${CERT_GROUP}" "${SYNC_USER}" || true
+
+            mkdir -p /home/${DEPLOY_USER}/.ssh
+            if [ -f /root/.ssh/authorized_keys ]; then
+              cat /root/.ssh/authorized_keys >> /home/${DEPLOY_USER}/.ssh/authorized_keys
+              sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
+            fi
+            if [ -n "${{ inputs.infra_public_key }}" ]; then
+              printf '%s\n' "${{ inputs.infra_public_key }}" >> /home/${DEPLOY_USER}/.ssh/authorized_keys
+              sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
+            fi
+            chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /home/${DEPLOY_USER}/.ssh
+            chmod 700 /home/${DEPLOY_USER}/.ssh
+            [ -f /home/${DEPLOY_USER}/.ssh/authorized_keys ] && chmod 600 /home/${DEPLOY_USER}/.ssh/authorized_keys || true
+
+            mkdir -p /srv/apps
+            chown root:"${DEPLOY_USER}" /srv/apps
+            chmod 2775 /srv/apps
+            setfacl -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+            setfacl -d -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+
+            mkdir -p /srv/infrastructure/webapp-management
+            chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management
+            chmod 2775 /srv/infrastructure/webapp-management
+
+            mkdir -p /srv/infrastructure/ops-scripts
+            chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/ops-scripts
+
+            mkdir -p /srv/backups/db-dumps /srv/backups/restic_v2
+            chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/backups
+            chmod 0755 /srv/backups
+            chmod 0700 /srv/backups/db-dumps /srv/backups/restic_v2
+
+            mkdir -p /srv/infrastructure/webapp-management/certs-export
+            chown -R root:"${CERT_GROUP}" /srv/infrastructure/webapp-management/certs-export
+            find /srv/infrastructure/webapp-management/certs-export -type d -exec chmod 2750 {} +
+            find /srv/infrastructure/webapp-management/certs-export -type f -exec chmod 0640 {} + || true
+            setfacl -R -m g:"${CERT_GROUP}":rx /srv/infrastructure/webapp-management/certs-export || true
+            setfacl -R -d -m g:"${CERT_GROUP}":r /srv/infrastructure/webapp-management/certs-export || true
+
+            mkdir -p /srv/sync-export/media /srv/sync-export/excels
+            mkdir -p /srv/sync-incoming/excels
+            chown -R root:"${SYNC_GROUP}" /srv/sync-export /srv/sync-incoming
+            find /srv/sync-export -type d -exec chmod 2770 {} +
+            find /srv/sync-export -type f -exec chmod 0660 {} + || true
+            find /srv/sync-incoming -type d -exec chmod 2770 {} +
+            find /srv/sync-incoming -type f -exec chmod 0660 {} + || true
+            setfacl -R -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
+            setfacl -R -d -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
+
+            ufw default deny incoming
+            ufw default allow outgoing
+            sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+            ufw allow 22/tcp
+            ufw allow 80/tcp
+            ufw allow 443/tcp
+            echo "y" | ufw enable
+
+            cat <<'EOF' >/etc/fail2ban/jail.local
+            [DEFAULT]
+            bantime  = 1h
+            findtime = 10m
+            maxretry = 5
+            ignoreip = 127.0.0.1/8 ::1
+
+            [sshd]
+            enabled = true
+            port    = ssh
+            EOF
+
+            systemctl restart docker
+            systemctl restart fail2ban
+
+            echo "✅ Provisioning finished."
+            id "${DEPLOY_USER}"
+            id "${SYNC_USER}" || true
+            ls -ld /srv/apps /srv/backups /srv/infrastructure/webapp-management /srv/infrastructure/ops-scripts /srv/sync-export /srv/sync-incoming
+
+  sync-access:
+    needs: bootstrap
+    if: ${{ inputs.sync_access_keys }}
+    uses: ./.github/workflows/sync-ssh-access.yml
+    with:
+      target: ${{ inputs.target }}
+      server_ip: ${{ inputs.server_ip }}
+      deploy_user: ${{ inputs.deploy_user }}
+      extra_deploy_public_key: ${{ inputs.infra_public_key }}
+      preserve_existing_root_keys: true
+    secrets:
+      SSH_PRIVATE_KEY_SYNC: ${{ secrets.SSH_PRIVATE_KEY_ROOT }}

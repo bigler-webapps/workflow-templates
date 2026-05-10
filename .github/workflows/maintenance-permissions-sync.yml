@@ -1,0 +1,166 @@
+name: Maintenance - Fix Cert + Sync Export/Incoming Permissions
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'GitHub environment / inventory target'
+        required: false
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "GitHub environment / inventory target for manual runs"
+        required: true
+        type: environment
+
+concurrency:
+  group: maintenance-fix-cert-sync
+  cancel-in-progress: true
+
+jobs:
+  prepare_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🧮 Resolve permission sync targets
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.target }}" ]; then
+            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}" --require-role permissions_sync)"
+          else
+            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --role permissions_sync)"
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  fix-permissions:
+    needs: prepare_targets
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.github_environment }}
+    steps:
+      - name: 🔧 Fix Cert + Sync permissions via SSH
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+              SUDO="sudo -n"
+            fi
+
+            BASE_DIR="/srv/infrastructure/webapp-management"
+            CERT_EXPORT_DIR="${BASE_DIR}/certs-export"
+
+            APP_ENV_FILE="${{ matrix.permissions_sync_app_env_file }}"
+
+            SYNC_USER="certfetcher"
+            CERT_GROUP="certreaders"
+            SYNC_GROUP="syncers"
+
+            SYNC_EXPORT_BASE="/srv/sync-export"
+            SYNC_EXPORT_MEDIA="${SYNC_EXPORT_BASE}/media"
+            SYNC_EXPORT_EXCELS="${SYNC_EXPORT_BASE}/excels"
+            SYNC_INCOMING_BASE="/srv/sync-incoming"
+            SYNC_INCOMING_EXCELS="${SYNC_INCOMING_BASE}/excels"
+
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq acl
+
+            if ! getent group "${CERT_GROUP}" >/dev/null; then
+              $SUDO groupadd "${CERT_GROUP}"
+            fi
+
+            if ! getent group "${SYNC_GROUP}" >/dev/null; then
+              $SUDO groupadd "${SYNC_GROUP}"
+            fi
+
+            if ! id "${SYNC_USER}" >/dev/null 2>&1; then
+              $SUDO useradd -m -s /bin/bash "${SYNC_USER}"
+            fi
+
+            $SUDO usermod -aG "${CERT_GROUP}" "${SYNC_USER}"
+            $SUDO usermod -aG "${SYNC_GROUP}" "${SYNC_USER}"
+
+            if [ -d "${CERT_EXPORT_DIR}" ]; then
+              $SUDO chown -R root:"${CERT_GROUP}" "${CERT_EXPORT_DIR}"
+              $SUDO find "${CERT_EXPORT_DIR}" -type d -exec chmod 2750 {} +
+              $SUDO find "${CERT_EXPORT_DIR}" -type f -exec chmod 0640 {} +
+              $SUDO setfacl -R -m g:"${CERT_GROUP}":rx "${CERT_EXPORT_DIR}" || true
+              $SUDO setfacl -R -d -m g:"${CERT_GROUP}":r "${CERT_EXPORT_DIR}" || true
+            fi
+
+            $SUDO mkdir -p "${SYNC_EXPORT_MEDIA}" "${SYNC_EXPORT_EXCELS}" "${SYNC_INCOMING_EXCELS}"
+            $SUDO chown -R root:"${SYNC_GROUP}" "${SYNC_EXPORT_BASE}" "${SYNC_INCOMING_BASE}"
+
+            $SUDO find "${SYNC_EXPORT_BASE}" -type d -exec chmod 2770 {} +
+            $SUDO find "${SYNC_EXPORT_BASE}" -type f -exec chmod 0660 {} + || true
+
+            $SUDO find "${SYNC_INCOMING_BASE}" -type d -exec chmod 2770 {} +
+            $SUDO find "${SYNC_INCOMING_BASE}" -type f -exec chmod 0660 {} + || true
+
+            $SUDO setfacl -R -m g:"${SYNC_GROUP}":rwx "${SYNC_EXPORT_BASE}" "${SYNC_INCOMING_BASE}" || true
+            $SUDO setfacl -R -d -m g:"${SYNC_GROUP}":rwx "${SYNC_EXPORT_BASE}" "${SYNC_INCOMING_BASE}" || true
+
+            if [ ! -f "${APP_ENV_FILE}" ]; then
+              echo "❌ APP_ENV_FILE not found: ${APP_ENV_FILE}"
+              exit 1
+            fi
+
+            MEDIA_VOL="$(grep '^MEDIA_VOLUME_NAME=' "${APP_ENV_FILE}" | head -n 1 | cut -d '=' -f2- | tr -d '\r')"
+            EXCEL_VOL="$(grep '^EXCEL_VOLUME_NAME=' "${APP_ENV_FILE}" | head -n 1 | cut -d '=' -f2- | tr -d '\r')"
+
+            if [ -z "${MEDIA_VOL}" ] || [ -z "${EXCEL_VOL}" ]; then
+              echo "❌ MEDIA_VOLUME_NAME/EXCEL_VOLUME_NAME missing in ${APP_ENV_FILE}"
+              exit 1
+            fi
+
+            echo "📦 MEDIA_VOLUME_NAME=${MEDIA_VOL}"
+            echo "📦 EXCEL_VOLUME_NAME=${EXCEL_VOL}"
+
+            echo "📤 Refreshing /srv/sync-export from Docker volumes (guarded)..."
+
+            $SUDO docker run --rm \
+              -v "${MEDIA_VOL}":/src:ro \
+              -v "${SYNC_EXPORT_MEDIA}":/dst \
+              alpine:3.20 sh -lc '
+                set -e
+                apk add --no-cache rsync >/dev/null
+                if [ -z "$(ls -A /src 2>/dev/null || true)" ]; then
+                  echo "⚠️ MEDIA volume is empty. Skipping sync."
+                  exit 0
+                fi
+                rsync -rt --delete --omit-dir-times --no-perms --no-owner --no-group /src/ /dst/
+              '
+
+            $SUDO docker run --rm \
+              -v "${EXCEL_VOL}":/src:ro \
+              -v "${SYNC_EXPORT_EXCELS}":/dst \
+              alpine:3.20 sh -lc '
+                set -e
+                apk add --no-cache rsync >/dev/null
+                if [ -z "$(ls -A /src 2>/dev/null || true)" ]; then
+                  echo "⚠️ EXCEL volume is empty. Skipping sync."
+                  exit 0
+                fi
+                rsync -rt --delete --omit-dir-times --no-perms --no-owner --no-group /src/ /dst/
+              '
+
+            $SUDO chown -R root:"${SYNC_GROUP}" "${SYNC_EXPORT_BASE}"
+            $SUDO find "${SYNC_EXPORT_BASE}" -type d -exec chmod 2770 {} +
+            $SUDO find "${SYNC_EXPORT_BASE}" -type f -exec chmod 0660 {} + || true
+
+            echo "✅ Maintenance completed."

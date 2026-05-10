@@ -1,0 +1,171 @@
+name: Sync SSH Access
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "GitHub environment / inventory target to sync."
+        required: true
+        type: environment
+      server_ip:
+        description: "Optional host override. Uses target environment SSH_HOST when empty."
+        required: false
+        type: string
+      deploy_user:
+        description: "Deploy user whose authorized_keys should be managed."
+        required: false
+        type: string
+      extra_deploy_public_key:
+        description: "Optional single public key appended directly to deploy authorized_keys."
+        required: false
+        type: string
+      preserve_existing_root_keys:
+        description: "Append managed root keys instead of replacing the current root authorized_keys."
+        required: true
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      server_ip:
+        required: false
+        type: string
+      deploy_user:
+        required: false
+        type: string
+      extra_deploy_public_key:
+        required: false
+        type: string
+      preserve_existing_root_keys:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SSH_PRIVATE_KEY_SYNC:
+        required: false
+
+jobs:
+  prepare_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧮 Resolve inventory target
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}" --require-role ssh_sync)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  sync:
+    needs: prepare_targets
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
+    environment: ${{ matrix.github_environment }}
+    runs-on: ubuntu-latest
+    env:
+      SSH_PRIVATE_KEY_RAW: ${{ secrets.SSH_PRIVATE_KEY_SYNC != '' && secrets.SSH_PRIVATE_KEY_SYNC || secrets.SSH_PRIVATE_KEY_ROOT }}
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧮 Resolve target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_HOST="${{ inputs.server_ip }}"
+          if [ -z "$TARGET_HOST" ]; then
+            TARGET_HOST="${{ secrets.SSH_HOST }}"
+          fi
+
+          if [ -z "$TARGET_HOST" ]; then
+            echo "❌ No target host provided and SSH_HOST secret is empty."
+            exit 1
+          fi
+
+          DEPLOY_USER="${{ inputs.deploy_user }}"
+          if [ -z "$DEPLOY_USER" ]; then
+            DEPLOY_USER="${{ matrix.deploy_user }}"
+          fi
+
+          echo "TARGET_HOST=$TARGET_HOST" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER=$DEPLOY_USER" >> "$GITHUB_ENV"
+          echo "PRESERVE_ROOT=${{ inputs.preserve_existing_root_keys }}" >> "$GITHUB_ENV"
+
+      - name: 🔑 Write SSH Key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SSH_PRIVATE_KEY_RAW" ]; then
+            echo "❌ No root-capable SSH private key secret available for sync."
+            echo "   Expected SSH_PRIVATE_KEY_SYNC or SSH_PRIVATE_KEY_ROOT."
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY_RAW" | tr -d '\r' > ~/.ssh/id_sync
+          chmod 600 ~/.ssh/id_sync
+
+      - name: ⚙️ Add Known Hosts
+        shell: bash
+        run: ssh-keyscan -H "$TARGET_HOST" >> ~/.ssh/known_hosts
+
+      - name: 🔐 Sync SSH Access Keys
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Preparing keys..."
+          mkdir -p generated_keys
+          bash -c "shopt -s nullglob; cat access/root/*.pub > generated_keys/root_keys || true; [ -s generated_keys/root_keys ] || touch generated_keys/root_keys"
+          bash -c "shopt -s nullglob; cat access/deploy/*.pub access/infrastructure/*.pub > generated_keys/deploy_keys || true; [ -s generated_keys/deploy_keys ] || touch generated_keys/deploy_keys"
+          bash -c "shopt -s nullglob; cat access/certfetcher/*.pub > generated_keys/certfetcher_keys || true; [ -s generated_keys/certfetcher_keys ] || touch generated_keys/certfetcher_keys"
+
+          if [ -n "${{ inputs.extra_deploy_public_key }}" ]; then
+            printf '%s\n' "${{ inputs.extra_deploy_public_key }}" >> generated_keys/deploy_keys
+            sort -u generated_keys/deploy_keys -o generated_keys/deploy_keys
+          fi
+
+          echo "Uploading keys..."
+          scp -i ~/.ssh/id_sync -o IdentitiesOnly=yes generated_keys/* "root@$TARGET_HOST:/tmp/"
+
+          echo "Applying keys on server..."
+          ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "root@$TARGET_HOST" "bash -lc '
+            set -euo pipefail
+
+            mkdir -p /root/.ssh
+            touch /root/.ssh/authorized_keys
+
+            if [ \"$PRESERVE_ROOT\" = \"true\" ]; then
+              cat /tmp/root_keys >> /root/.ssh/authorized_keys
+              sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys
+              rm -f /tmp/root_keys
+            else
+              mv /tmp/root_keys /root/.ssh/authorized_keys
+            fi
+
+            chmod 600 /root/.ssh/authorized_keys
+            chown root:root /root/.ssh/authorized_keys
+
+            mkdir -p /home/$DEPLOY_USER/.ssh
+            mv /tmp/deploy_keys /home/$DEPLOY_USER/.ssh/authorized_keys
+            chmod 600 /home/$DEPLOY_USER/.ssh/authorized_keys
+            chown $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh/authorized_keys
+
+            if id certfetcher >/dev/null 2>&1; then
+              mkdir -p /home/certfetcher/.ssh
+              mv /tmp/certfetcher_keys /home/certfetcher/.ssh/authorized_keys
+              chmod 600 /home/certfetcher/.ssh/authorized_keys
+              chown certfetcher:certfetcher /home/certfetcher/.ssh/authorized_keys
+            else
+              rm -f /tmp/certfetcher_keys || true
+            fi
+          '"

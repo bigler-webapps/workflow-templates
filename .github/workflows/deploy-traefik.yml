@@ -1,0 +1,170 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'GitHub environment / inventory target'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (production / staging)'
+        required: false
+        type: string
+        default: 'production'
+
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'GitHub environment / inventory target for manual runs'
+        required: true
+        type: environment
+      environment:
+        description: 'Target Environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+
+jobs:
+  prepare_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧮 Resolve traefik targets
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.target }}" ]; then
+            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}" --require-role traefik)"
+          else
+            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --role traefik)"
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: prepare_targets
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
+    environment: ${{ matrix.github_environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate target SSH secrets
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name}" ]; then
+              echo "❌ Missing required secret '${var_name}' for environment '${{ matrix.github_environment }}'."
+              exit 1
+            fi
+          done
+
+      - name: 🔑 Write SSH Key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+          chmod 600 ~/.ssh/id_sync
+
+      - name: ⚙️ Add Known Hosts
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Determine Target Environment
+        run: |
+          TARGET_ENV="${{ inputs.environment }}"
+          if [ -z "$TARGET_ENV" ]; then
+            TARGET_ENV="production"
+          fi
+          echo "TARGET_ENV=$TARGET_ENV" >> $GITHUB_ENV
+          echo "REMOTE_PATH=/srv/infrastructure/webapp-management" >> $GITHUB_ENV
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install PyYAML
+          pip install "django-core-micha>=1.2.3"
+
+      - name: Generate .env
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        run: |
+          generate-env --env ${{ env.TARGET_ENV }} --config project.yaml
+
+      - name: 📂 Rsync project to server
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          rsync -rlvz \
+            --delete --delete-delay \
+            --partial --delay-updates \
+            --no-owner --no-group --no-perms --omit-dir-times \
+            --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
+            --rsync-path="mkdir -p ${{ env.REMOTE_PATH }} && rsync" \
+            -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'acme.json' \
+            --exclude 'uptime-kuma-data' \
+            --exclude 'certs-export' \
+            --exclude 'backup' \
+            --exclude 'wireguard' \
+            ./ ${SSH_USER}@${SSH_HOST}:${{ env.REMOTE_PATH }}
+
+      - name: Start containers
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'EOF'
+          set -euo pipefail
+          cd ${{ env.REMOTE_PATH }}
+
+          if [ ! -f .env ]; then echo "❌ .env missing"; exit 1; fi
+
+          DOCKER="docker"
+          if ! docker info >/dev/null 2>&1; then
+            DOCKER="sudo -n docker"
+          fi
+
+          if [ ! -f acme.json ]; then touch acme.json; chmod 600 acme.json; fi
+          $DOCKER network inspect traefik_proxy >/dev/null 2>&1 || $DOCKER network create traefik_proxy
+
+          echo "🚀 Starting stack..."
+          $DOCKER compose --env-file .env up -d --remove-orphans
+          EOF

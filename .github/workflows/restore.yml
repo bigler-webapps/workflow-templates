@@ -1,0 +1,126 @@
+name: Restore / Sync Data
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'GitHub environment / backup target'
+        required: true
+        type: string
+      app_name:
+        description: 'App name (e.g. hram, jg, survey_app)'
+        required: true
+        type: string
+      target_env:
+        description: 'Where should the data go? (staging, zip-file, production)'
+        required: true
+        type: string
+      snapshot_id:
+        description: 'Snapshot ID (default: latest)'
+        required: false
+        type: string
+        default: 'latest'
+
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'GitHub environment / backup target'
+        required: true
+        type: environment
+      app_name:
+        description: 'App name (e.g. hram, jg, queue, survey_app)'
+        required: true
+        type: string
+      target_env:
+        description: 'Where should the data go?'
+        required: true
+        type: string
+        default: 'staging'
+      snapshot_id:
+        description: 'Snapshot ID (default: latest)'
+        required: true
+        default: 'latest'
+
+jobs:
+  prepare_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🧮 Resolve restore target
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}" --require-role restore)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  restore-process:
+    needs: prepare_targets
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.github_environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ⬇️ Checkout webapp-ops-scripts
+        uses: actions/checkout@v4
+        with:
+          repository: bigler-webapps/webapp-ops-scripts
+          path: ops-scripts
+
+      # 1. Upload scripts to server
+      - name: Copy ops scripts
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "ops-scripts/*.py,ops-scripts/*.sh"
+          target: "/srv/infrastructure/ops-scripts/"
+          strip_components: 1
+
+      # 2. Run restore
+      - name: Run Smart Restore
+        uses: appleboy/ssh-action@v1
+        env:
+          RESTIC_REPO_B2: ${{ secrets.RESTIC_REPO_B2 }}
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+          APP_NAME: ${{ inputs.app_name }}
+          TARGET_ENV: ${{ inputs.target_env }}
+          SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: RESTIC_REPO_B2,RESTIC_PASSWORD,B2_KEY_ID,B2_APP_KEY,APP_NAME,TARGET_ENV,SNAPSHOT_ID
+          script: |
+            export PATH=$PATH:/usr/local/bin
+            python3 /srv/infrastructure/ops-scripts/restore.py \
+              --app "$APP_NAME" \
+              --target-env "$TARGET_ENV" \
+              --snapshot "$SNAPSHOT_ID"
+
+      # 3. Download artifact if zip mode
+      - name: Download Artifact (if Zip mode)
+        if: ${{ inputs.target_env == 'zip-file' }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "/tmp/restore_artifact/*"
+          target: "./restored_dumps"
+
+      - name: Upload to GitHub
+        if: ${{ inputs.target_env == 'zip-file' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-dump-${{ inputs.app_name }}
+          path: ./restored_dumps/*
+          retention-days: 1

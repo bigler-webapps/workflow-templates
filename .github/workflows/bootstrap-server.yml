@@ -1,0 +1,106 @@
+name: Bootstrap Server (deploy + sync)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧱 Bootstrap server (users, groups, directories, perms)
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            DEPLOY_USER="deploy"
+            SYNC_USER="certfetcher"
+            SYNC_GROUP="syncers"
+            SYNC_GID="2233"
+            CERT_GROUP="certreaders"
+
+            # ACL tooling
+            apt-get update -qq
+            apt-get install -y -qq acl
+
+            # --- Groups (with stable GID) ---
+            if getent group "${SYNC_GROUP}" >/dev/null; then
+              EXISTING_GID="$(getent group "${SYNC_GROUP}" | cut -d: -f3)"
+              if [ "${EXISTING_GID}" != "${SYNC_GID}" ]; then
+                echo "❌ Group ${SYNC_GROUP} exists with GID=${EXISTING_GID}, expected ${SYNC_GID}."
+                echo "   Fix this mismatch before continuing (otherwise container gid mapping breaks)."
+                exit 1
+              fi
+            else
+              groupadd --gid "${SYNC_GID}" "${SYNC_GROUP}"
+            fi
+
+            getent group "${CERT_GROUP}" >/dev/null || groupadd "${CERT_GROUP}"
+
+            # --- Sync user ---
+            if ! id "${SYNC_USER}" >/dev/null 2>&1; then
+              useradd -m -s /bin/bash "${SYNC_USER}"
+            fi
+
+            usermod -aG "${SYNC_GROUP}" "${SYNC_USER}"
+            usermod -aG "${CERT_GROUP}" "${SYNC_USER}" || true
+
+            # Docker access for deploy (optional, only if you want no sudo for docker)
+            if getent group docker >/dev/null 2>&1; then
+              usermod -aG docker "${DEPLOY_USER}" || true
+            fi
+
+            # Allow maintenance workflow to update packages and reboot without a password prompt
+            cat <<EOF >/etc/sudoers.d/90-webapp-maintenance
+            ${DEPLOY_USER} ALL=(ALL) NOPASSWD:SETENV: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/systemctl reboot, /usr/sbin/reboot
+            EOF
+            chmod 440 /etc/sudoers.d/90-webapp-maintenance
+            visudo -cf /etc/sudoers.d/90-webapp-maintenance
+
+            # --- /srv/apps for deploy (rsync target) ---
+            mkdir -p /srv/apps
+            chown root:"${DEPLOY_USER}" /srv/apps
+            chmod 2775 /srv/apps
+            setfacl -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+            setfacl -d -m g:"${DEPLOY_USER}":rwx /srv/apps || true
+
+            # --- Infra path (code) ---
+            mkdir -p /srv/infrastructure/webapp-management
+            chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management
+            chmod 2775 /srv/infrastructure/webapp-management
+
+            # Runtime dir: certs-export (read for certreaders)
+            mkdir -p /srv/infrastructure/webapp-management/certs-export
+            chown -R root:"${CERT_GROUP}" /srv/infrastructure/webapp-management/certs-export
+            find /srv/infrastructure/webapp-management/certs-export -type d -exec chmod 2750 {} +
+            find /srv/infrastructure/webapp-management/certs-export -type f -exec chmod 0640 {} + || true
+            setfacl -R -m g:"${CERT_GROUP}":rx /srv/infrastructure/webapp-management/certs-export || true
+            setfacl -R -d -m g:"${CERT_GROUP}":r /srv/infrastructure/webapp-management/certs-export || true
+
+            # --- Sync export/incoming dirs ---
+            mkdir -p /srv/sync-export/media /srv/sync-export/excels
+            mkdir -p /srv/sync-incoming/excels
+            chown -R root:"${SYNC_GROUP}" /srv/sync-export /srv/sync-incoming
+
+            # IMPORTANT:
+            # If you run sync-exporter/importer containers that write into /srv/sync-export,
+            # export must be group-writable:
+            find /srv/sync-export -type d -exec chmod 2770 {} +
+            find /srv/sync-export -type f -exec chmod 0660 {} + || true
+
+            # Incoming is writable for sync group
+            find /srv/sync-incoming -type d -exec chmod 2770 {} +
+            find /srv/sync-incoming -type f -exec chmod 0660 {} + || true
+
+            # Default ACLs to keep group access stable for new files
+            setfacl -R -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
+            setfacl -R -d -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
+
+            echo "✅ Bootstrap done."
+            getent group "${SYNC_GROUP}"
+            id "${DEPLOY_USER}" || true
+            id "${SYNC_USER}" || true
+            ls -ld /srv/apps /srv/sync-export /srv/sync-incoming /srv/infrastructure/webapp-management
