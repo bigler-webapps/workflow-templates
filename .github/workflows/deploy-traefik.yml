@@ -4,9 +4,10 @@ on:
   workflow_call:
     inputs:
       target:
-        description: 'GitHub environment / inventory target'
-        required: true
+        description: 'GitHub environment / inventory target (empty = all traefik targets)'
+        required: false
         type: string
+        default: ''
       environment:
         description: 'Target environment (production / staging)'
         required: false

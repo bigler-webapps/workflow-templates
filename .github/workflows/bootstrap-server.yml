@@ -1,6 +1,7 @@
 name: Bootstrap Server (deploy + sync)
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 jobs:

@@ -1,6 +1,16 @@
 name: 🚀 Initial Server Setup (Bootstrap)
 
 on:
+  workflow_call:
+    inputs:
+      server_ip:
+        required: true
+        type: string
+      deploy_user:
+        required: false
+        type: string
+        default: 'deploy'
+
   workflow_dispatch:
     inputs:
       server_ip:
