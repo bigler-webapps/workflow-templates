@@ -50,6 +50,10 @@ inputs:
     description: 'Content of optional file secret 2'
     required: false
     default: ''
+  debug:
+    description: 'Enable verbose debug output in rsync action (diagnostic only)'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -164,6 +168,7 @@ runs:
           --exclude=backups
         path: "./"
         remote_path: ${{ env.REMOTE_PATH }}
+        debug: ${{ inputs.debug == 'true' }}
 
     - name: 🔐 Provision optional file secrets
       if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
