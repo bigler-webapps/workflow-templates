@@ -4,10 +4,9 @@ on:
   workflow_call:
     inputs:
       target:
-        description: 'GitHub environment / inventory target (empty = all traefik targets)'
-        required: false
+        description: 'Inventory target / GitHub environment name'
+        required: true
         type: string
-        default: ''
       environment:
         description: 'Target environment (production / staging)'
         required: false
@@ -17,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'GitHub environment / inventory target for manual runs'
+        description: 'GitHub environment / inventory target'
         required: true
         type: environment
       environment:
@@ -29,33 +28,7 @@ on:
           - production
 
 jobs:
-  prepare_targets:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.resolve.outputs.matrix }}
-    steps:
-      - name: ⬇️ Checkout code
-        uses: actions/checkout@v4
-
-      - name: 🧮 Resolve traefik targets
-        id: resolve
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -n "${{ inputs.target }}" ]; then
-            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}" --require-role traefik)"
-          else
-            MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --role traefik)"
-          fi
-
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-
   deploy:
-    needs: prepare_targets
-    strategy:
-      matrix: ${{ fromJson(needs.prepare_targets.outputs.matrix) }}
-    environment: ${{ matrix.github_environment }}
     runs-on: ubuntu-latest
     steps:
       - name: ⬇️ Checkout code
@@ -73,7 +46,7 @@ jobs:
           required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
           for var_name in "${required_vars[@]}"; do
             if [ -z "${!var_name}" ]; then
-              echo "❌ Missing required secret '${var_name}' for environment '${{ matrix.github_environment }}'."
+              echo "❌ Missing required secret '${var_name}' for environment '${{ inputs.target }}'."
               exit 1
             fi
           done
