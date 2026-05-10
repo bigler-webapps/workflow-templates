@@ -1,0 +1,213 @@
+name: 'Maintenance — Reboot if needed'
+description: 'Installs apt updates, decides whether reboot is needed, reboots and waits for host, then checks containers.'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  apply_updates:
+    description: 'Install apt updates before reboot decision'
+    required: false
+    default: 'true'
+  force_reboot:
+    description: 'Force reboot even if /var/run/reboot-required is absent'
+    required: false
+    default: 'false'
+  expected_container_tokens_json:
+    description: 'JSON-array of substrings expected in running container names after reboot'
+    required: false
+    default: '[]'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
+            exit 1
+          fi
+        done
+
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 🛠️ Install system updates
+      if: ${{ inputs.apply_updates == 'true' }}
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'bash -s' << "EOF"
+        set -euo pipefail
+
+        SUDO=""
+        if [ "$(id -u)" -ne 0 ]; then
+          SUDO="sudo -n"
+        fi
+
+        echo "Refreshing apt index..."
+        $SUDO apt-get update -y
+
+        BEFORE_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
+        echo "Upgradable packages before upgrade: ${BEFORE_COUNT}"
+
+        if [ "${BEFORE_COUNT}" -gt 0 ]; then
+          echo "Installing upgrades..."
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove
+          $SUDO apt-get -y autoclean
+        else
+          echo "No package upgrades required."
+        fi
+
+        AFTER_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
+        echo "Upgradable packages after upgrade: ${AFTER_COUNT}"
+
+        if [ -f /var/run/reboot-required ]; then
+          echo "reboot_required=yes"
+        else
+          echo "reboot_required=no"
+        fi
+        EOF
+
+    - name: 🤔 Decide whether reboot is needed
+      id: decision
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        FORCE_REBOOT: ${{ inputs.force_reboot }}
+      run: |
+        set -euo pipefail
+
+        NEED_REBOOT="no"
+        REASON="none"
+
+        if [ "$FORCE_REBOOT" = "true" ]; then
+          NEED_REBOOT="yes"
+          REASON="forced"
+        elif ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "test -f /var/run/reboot-required"; then
+          NEED_REBOOT="yes"
+          REASON="reboot-required"
+        fi
+
+        echo "need_reboot=$NEED_REBOOT" >> "$GITHUB_OUTPUT"
+        echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+
+        echo "Decision: need_reboot=$NEED_REBOOT (reason=$REASON)"
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uname -a; uptime"
+
+    - name: ⏭️ Skip reboot
+      if: steps.decision.outputs.need_reboot != 'yes'
+      shell: bash
+      run: echo "No reboot required. Finishing maintenance run."
+
+    - name: 🔁 Trigger reboot
+      if: steps.decision.outputs.need_reboot == 'yes'
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "sudo -n systemctl reboot || sudo -n reboot || reboot" || true
+        echo "Reboot command sent."
+
+    - name: ⏳ Wait for host to come back
+      if: steps.decision.outputs.need_reboot == 'yes'
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        echo "Waiting for SSH to become reachable again..."
+        sleep 15
+
+        for i in $(seq 1 60); do
+          if ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=5 "${SSH_USER}@${SSH_HOST}" "echo online" >/dev/null 2>&1; then
+            echo "Host is reachable again."
+            exit 0
+          fi
+          sleep 10
+        done
+
+        echo "::error::Host did not come back within timeout."
+        exit 1
+
+    - name: 🔍 Post-check containers
+      if: steps.decision.outputs.need_reboot == 'yes'
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        EXPECTED_CONTAINER_TOKENS_JSON: ${{ inputs.expected_container_tokens_json }}
+      run: |
+        set -euo pipefail
+
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uptime"
+        echo
+
+        echo "Running containers:"
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "table {{.Names}}\t{{.Status}}"'
+        echo
+
+        CONTAINER_NAMES="$(ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "{{.Names}}"')"
+        export CONTAINER_NAMES
+
+        python3 - <<'PYCODE'
+        import json
+        import os
+
+        names = os.environ.get("CONTAINER_NAMES", "").splitlines()
+        expected = json.loads(os.environ.get("EXPECTED_CONTAINER_TOKENS_JSON", "[]"))
+        missing = [token for token in expected if not any(token in name for name in names)]
+        if missing:
+            print("Missing expected container token(s):", ", ".join(missing))
+            raise SystemExit(1)
+
+        print("All expected app/infrastructure container groups are present.")
+        PYCODE

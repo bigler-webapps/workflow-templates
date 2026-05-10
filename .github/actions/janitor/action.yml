@@ -1,0 +1,93 @@
+name: 'Janitor (Docker prune + disk report)'
+description: 'Syncs ops scripts to the server and runs janitor.sh. Expects ops-scripts/ in the caller working dir.'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  ops_scripts_path:
+    description: 'Local path containing ops scripts to sync to the server'
+    required: false
+    default: 'ops-scripts'
+  remote_scripts_path:
+    description: 'Remote target directory for ops scripts'
+    required: false
+    default: '/srv/infrastructure/ops-scripts'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
+            exit 1
+          fi
+        done
+
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 📂 Sync ops scripts to server
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+        REMOTE_SCRIPTS_PATH: ${{ inputs.remote_scripts_path }}
+      run: |
+        set -euo pipefail
+        rsync -avz -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+          "${OPS_SCRIPTS_PATH}/" \
+          "${SSH_USER}@${SSH_HOST}:${REMOTE_SCRIPTS_PATH}/"
+
+    - name: 🧹 Run janitor on server
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_SCRIPTS_PATH: ${{ inputs.remote_scripts_path }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "bash ${REMOTE_SCRIPTS_PATH}/janitor.sh"

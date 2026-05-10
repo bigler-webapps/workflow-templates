@@ -18,13 +18,13 @@ jobs:
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `backup.yml` | `workflow_call` | Backup + verify + optional staging sync |
-| `restore.yml` | `workflow_call` | Restore app DB to staging from Restic |
-| `deploy-app.yml` | `workflow_call` | Deploy a Django/React app via rsync + Docker |
+| `actions/restore` | composite action | Restore app DB to staging from Restic (called from a job with `environment:`) |
+| `actions/deploy-app` | composite action | Deploy a Django/React app via rsync + Docker (called from a job with `environment:`) |
 | `actions/deploy-traefik` | composite action | Deploy Traefik infrastructure stack (called from a job with `environment:`) |
-| `sync-ssh-access.yml` | `workflow_call` | Sync SSH authorized_keys from `access/` |
+| `actions/sync-ssh-access` | composite action | Sync SSH authorized_keys from `access/` (called from a job with `environment:`) |
 | `provision-server.yml` | `workflow_call` | Full server provisioning (users, Docker, firewall) |
-| `maintenance.yml` | `workflow_call` | Weekly apt updates + conditional reboot |
-| `janitor.yml` | `workflow_call` | Monthly Docker prune + disk report |
+| `actions/maintenance` | composite action | Weekly apt updates + conditional reboot (called from a job with `environment:`) |
+| `actions/janitor` | composite action | Monthly Docker prune + disk report (called from a job with `environment:`) |
 
 ## Calling repo requirements
 

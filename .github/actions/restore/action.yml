@@ -1,0 +1,174 @@
+name: 'Restore / Sync Data'
+description: 'Restores an app database from a Restic snapshot. Expects ops-scripts/ in the caller working dir.'
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  app_name:
+    description: 'App name (e.g. hram, jg, survey_app)'
+    required: true
+  target_env:
+    description: 'Where should the data go? (staging, zip-file, production)'
+    required: true
+  snapshot_id:
+    description: 'Snapshot ID'
+    required: false
+    default: 'latest'
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  restic_repo_b2:
+    description: 'Restic B2 repository URL'
+    required: true
+  restic_password:
+    description: 'Restic encryption password'
+    required: true
+  b2_key_id:
+    description: 'Backblaze B2 key ID'
+    required: true
+  b2_app_key:
+    description: 'Backblaze B2 application key'
+    required: true
+  ops_scripts_path:
+    description: 'Local path containing ops scripts (must include restore.py)'
+    required: false
+    default: 'ops-scripts'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_APP_NAME: ${{ inputs.app_name }}
+        INPUT_TARGET_ENV: ${{ inputs.target_env }}
+        INPUT_SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
+            exit 1
+          fi
+        done
+
+        # Format checks for free-form inputs that flow into shell commands or filenames.
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+        printf '%s' "$INPUT_APP_NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'app_name' input"; exit 1; }
+        printf '%s' "$INPUT_TARGET_ENV" | grep -qE '^(staging|production|zip-file)$' || { echo "❌ Invalid 'target_env' input"; exit 1; }
+        printf '%s' "$INPUT_SNAPSHOT_ID" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'snapshot_id' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 📂 Upload ops scripts to server
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "${OPS_SCRIPTS_PATH}" ]; then
+          echo "❌ ops_scripts_path '${OPS_SCRIPTS_PATH}' not found."
+          exit 1
+        fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/restore.py" ]; then
+          echo "❌ ${OPS_SCRIPTS_PATH}/restore.py missing — webapp-ops-scripts checkout failed?"
+          exit 1
+        fi
+
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "mkdir -p /srv/infrastructure/ops-scripts"
+        scp -i ~/.ssh/id_sync -o IdentitiesOnly=yes \
+          "${OPS_SCRIPTS_PATH}"/*.py "${OPS_SCRIPTS_PATH}"/*.sh \
+          "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/"
+
+    - name: 🔄 Run Smart Restore
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        APP_NAME: ${{ inputs.app_name }}
+        TARGET_ENV: ${{ inputs.target_env }}
+        SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           B2_KEY_ID=$(printf '%q' "$B2_KEY_ID") \
+           B2_APP_KEY=$(printf '%q' "$B2_APP_KEY") \
+           APP_NAME=$(printf '%q' "$APP_NAME") \
+           TARGET_ENV=$(printf '%q' "$TARGET_ENV") \
+           SNAPSHOT_ID=$(printf '%q' "$SNAPSHOT_ID") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        export PATH=$PATH:/usr/local/bin
+        python3 /srv/infrastructure/ops-scripts/restore.py \
+          --app "$APP_NAME" \
+          --target-env "$TARGET_ENV" \
+          --snapshot "$SNAPSHOT_ID"
+        EOF
+
+    - name: 📥 Download Artifact (if Zip mode)
+      if: ${{ inputs.target_env == 'zip-file' }}
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        mkdir -p ./restored_dumps
+        scp -i ~/.ssh/id_sync -o IdentitiesOnly=yes \
+          "${SSH_USER}@${SSH_HOST}:/tmp/restore_artifact/*" \
+          ./restored_dumps/
+
+    - name: 📤 Upload to GitHub Artifact
+      if: ${{ inputs.target_env == 'zip-file' }}
+      uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+      with:
+        name: db-dump-${{ inputs.app_name }}
+        path: ./restored_dumps/*
+        retention-days: 1

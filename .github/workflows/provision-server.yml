@@ -45,20 +45,73 @@ on:
         type: boolean
 
 jobs:
+  validate_inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔎 Validate workflow inputs
+        shell: bash
+        env:
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_DEPLOY_USER: ${{ inputs.deploy_user }}
+          INPUT_SERVER_IP: ${{ inputs.server_ip }}
+          INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
+        run: |
+          set -euo pipefail
+
+          # target: must be a safe environment identifier
+          if ! printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+            echo "❌ Invalid 'target' input — must match [a-zA-Z0-9_-]+"
+            exit 1
+          fi
+
+          # deploy_user: optional; if set must be a valid POSIX username
+          if [ -n "${INPUT_DEPLOY_USER:-}" ]; then
+            if ! printf '%s' "$INPUT_DEPLOY_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$'; then
+              echo "❌ Invalid 'deploy_user' input — must be a valid POSIX username"
+              exit 1
+            fi
+          fi
+
+          # server_ip: optional; if set must be IPv4/IPv6/hostname (no shell metas)
+          if [ -n "${INPUT_SERVER_IP:-}" ]; then
+            if ! printf '%s' "$INPUT_SERVER_IP" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
+              echo "❌ Invalid 'server_ip' input"
+              exit 1
+            fi
+          fi
+
+          # infra_public_key: optional; if set must be exactly one OpenSSH key on one line
+          if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
+            line_count=$(printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | wc -l)
+            if [ "$line_count" -gt 0 ]; then
+              echo "❌ infra_public_key must be a single line (no newlines)"
+              exit 1
+            fi
+            if ! printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]]+\S+)?$'; then
+              echo "❌ infra_public_key does not match expected OpenSSH key format"
+              exit 1
+            fi
+          fi
+
+          echo "✅ Inputs validated."
+
   prepare_targets:
+    needs: validate_inputs
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - name: ⬇️ Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: 🧮 Resolve inventory target
         id: resolve
         shell: bash
+        env:
+          INPUT_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "${{ inputs.target }}")"
+          MATRIX="$(python3 .github/scripts/resolve_inventory_targets.py --target "$INPUT_TARGET")"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   bootstrap:
@@ -71,23 +124,29 @@ jobs:
       TARGET_HOST: ${{ inputs.server_ip != '' && inputs.server_ip || secrets.SSH_HOST }}
     steps:
       - name: ⬇️ Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: 🧱 Bootstrap base server and app platform
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+        env:
+          INPUT_DEPLOY_USER: ${{ inputs.deploy_user }}
+          MATRIX_DEPLOY_USER: ${{ matrix.deploy_user }}
+          INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
+          TARGET_HOST: ${{ env.TARGET_HOST }}
         with:
           host: ${{ env.TARGET_HOST }}
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY_ROOT }}
+          envs: INPUT_DEPLOY_USER,MATRIX_DEPLOY_USER,INPUT_INFRA_PUBLIC_KEY,TARGET_HOST
           script: |
             set -euo pipefail
 
-            DEPLOY_USER="${{ inputs.deploy_user }}"
+            DEPLOY_USER="${INPUT_DEPLOY_USER}"
             if [ -z "${DEPLOY_USER}" ]; then
-              DEPLOY_USER="${{ matrix.deploy_user }}"
+              DEPLOY_USER="${MATRIX_DEPLOY_USER}"
             fi
 
-            echo "🚀 Starting provisioning for ${DEPLOY_USER} on ${{ env.TARGET_HOST }}"
+            echo "🚀 Starting provisioning for ${DEPLOY_USER} on ${TARGET_HOST}"
 
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -121,8 +180,9 @@ jobs:
               cat /root/.ssh/authorized_keys >> /home/${DEPLOY_USER}/.ssh/authorized_keys
               sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
             fi
-            if [ -n "${{ inputs.infra_public_key }}" ]; then
-              printf '%s\n' "${{ inputs.infra_public_key }}" >> /home/${DEPLOY_USER}/.ssh/authorized_keys
+            if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
+              # Format already validated upstream (validate_inputs job).
+              printf '%s\n' "${INPUT_INFRA_PUBLIC_KEY}" >> /home/${DEPLOY_USER}/.ssh/authorized_keys
               sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
             fi
             chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /home/${DEPLOY_USER}/.ssh

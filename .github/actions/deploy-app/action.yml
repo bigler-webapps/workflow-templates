@@ -1,0 +1,235 @@
+name: 'Deploy App'
+description: 'Deploys a Django/React app to the server via rsync + Docker Compose.'
+
+inputs:
+  environment:
+    description: 'Target environment (staging or production)'
+    required: true
+    default: 'staging'
+  ssh_host:
+    description: 'SSH host address'
+    required: true
+  ssh_user:
+    description: 'SSH user'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents)'
+    required: true
+  secrets_context_json:
+    description: 'JSON-serialized secrets context (toJson(secrets)) for generate-env'
+    required: true
+  provision_file_secrets:
+    description: 'Whether optional file secrets should be provisioned on the target server'
+    required: false
+    default: 'false'
+  file_secret_target_subdir:
+    description: 'Target subdirectory under REMOTE_PATH for optional file secrets'
+    required: false
+    default: '.ssh'
+  file_secret_1_name:
+    description: 'Target filename for optional file secret 1'
+    required: false
+    default: ''
+  file_secret_1_mode:
+    description: 'File mode for optional file secret 1'
+    required: false
+    default: '600'
+  file_secret_1_content:
+    description: 'Content of optional file secret 1'
+    required: false
+    default: ''
+  file_secret_2_name:
+    description: 'Target filename for optional file secret 2'
+    required: false
+    default: ''
+  file_secret_2_mode:
+    description: 'File mode for optional file secret 2'
+    required: false
+    default: '600'
+  file_secret_2_content:
+    description: 'Content of optional file secret 2'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_ENV: ${{ inputs.environment }}
+        INPUT_SUBDIR: ${{ inputs.file_secret_target_subdir }}
+        INPUT_F1_NAME: ${{ inputs.file_secret_1_name }}
+        INPUT_F1_MODE: ${{ inputs.file_secret_1_mode }}
+        INPUT_F2_NAME: ${{ inputs.file_secret_2_name }}
+        INPUT_F2_MODE: ${{ inputs.file_secret_2_mode }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        printf '%s' "$INPUT_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid environment"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid ssh_user"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid ssh_host"; exit 1; }
+        for var_name in INPUT_SUBDIR INPUT_F1_NAME INPUT_F2_NAME; do
+          value="${!var_name:-}"
+          [ -z "$value" ] && continue
+          if printf '%s' "$value" | grep -qE '\.\.|/|[[:space:]]|[;&|`$]'; then
+            echo "❌ Invalid $var_name (no path traversal or shell metas)"
+            exit 1
+          fi
+        done
+        for var_name in INPUT_F1_MODE INPUT_F2_MODE; do
+          value="${!var_name:-}"
+          [ -z "$value" ] && continue
+          printf '%s' "$value" | grep -qE '^[0-7]{3,4}$' || { echo "❌ Invalid $var_name (octal file mode)"; exit 1; }
+        done
+        echo "✅ Inputs validated."
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v4.8.0
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Install tooling
+      shell: bash
+      run: |
+        pip install "django-core-micha==1.2.3" "PyYAML==6.0.2"
+
+    - name: 🧮 Calculate configuration
+      id: config
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+      run: |
+        python3 - <<'PYCODE'
+        import os
+        import yaml
+
+        target_env = os.environ["TARGET_ENV"]
+
+        try:
+            with open("project.yaml") as f:
+                config = yaml.safe_load(f)
+            project_name = config["project_name"]
+        except FileNotFoundError:
+            print("❌ Error: project.yaml not found!")
+            raise SystemExit(1)
+
+        suffix = "_stage" if target_env == "staging" else ""
+        remote_path = f"/srv/apps/{project_name}{suffix}"
+
+        print(f"✅ Environment: {target_env}")
+        print(f"✅ Project:     {project_name}")
+        print(f"✅ Remote Path: {remote_path}")
+
+        with open(os.environ["GITHUB_ENV"], "a") as f:
+            f.write(f"TARGET_ENV={target_env}\n")
+            f.write(f"REMOTE_PATH={remote_path}\n")
+            f.write(f"PROJECT_NAME={project_name}\n")
+        PYCODE
+
+    - name: 🔐 Generate .env file
+      shell: bash
+      env:
+        SECRETS_CONTEXT: ${{ inputs.secrets_context_json }}
+      run: |
+        echo "Generating .env for env: ${TARGET_ENV}"
+        generate-env --env "${TARGET_ENV}"
+
+    - name: 🚀 Rsync project to server
+      uses: burnett01/rsync-deployments@05a269aeea3e70e1e8fe77064e475a5cb2c80b20  # v8.0.0
+      with:
+        remote_host: ${{ inputs.ssh_host }}
+        remote_user: ${{ inputs.ssh_user }}
+        remote_key:  ${{ inputs.ssh_private_key }}
+        switches: >-
+          -rlvz
+          --delete --delete-delay
+          --partial --delay-updates
+          --no-owner --no-group --no-perms --omit-dir-times
+          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r
+          --rsync-path="mkdir -p ${{ env.REMOTE_PATH }} && rsync"
+          --exclude=certbot/letsencrypt
+          --exclude=docker-compose.override.yml
+          --exclude=.git
+          --exclude=.github
+          --exclude=frontend/node_modules
+          --exclude=frontend/build
+          --exclude=frontend/build_current
+          --exclude=backend/media
+          --exclude='**/__pycache__/'
+          --exclude=*.pyc
+          --exclude='model/.$*.drawio.dtmp'
+          --exclude='model/.$*.drawio.bkp'
+          --exclude=backups
+        path: "./"
+        remote_path: ${{ env.REMOTE_PATH }}
+
+    - name: 🔐 Provision optional file secrets
+      if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
+      uses: appleboy/ssh-action@334f9259f2f8eb3376d33fa4c684fff373f2c2a6  # v0.1.10
+      env:
+        OPTIONAL_FILE_SECRET_1_CONTENT: ${{ inputs.file_secret_1_content }}
+        OPTIONAL_FILE_SECRET_2_CONTENT: ${{ inputs.file_secret_2_content }}
+        REMOTE_PATH: ${{ env.REMOTE_PATH }}
+        TARGET_SUBDIR: ${{ inputs.file_secret_target_subdir }}
+        F1_NAME: ${{ inputs.file_secret_1_name }}
+        F1_MODE: ${{ inputs.file_secret_1_mode }}
+        F2_NAME: ${{ inputs.file_secret_2_name }}
+        F2_MODE: ${{ inputs.file_secret_2_mode }}
+      with:
+        host: ${{ inputs.ssh_host }}
+        username: ${{ inputs.ssh_user }}
+        key: ${{ inputs.ssh_private_key }}
+        envs: OPTIONAL_FILE_SECRET_1_CONTENT,OPTIONAL_FILE_SECRET_2_CONTENT,REMOTE_PATH,TARGET_SUBDIR,F1_NAME,F1_MODE,F2_NAME,F2_MODE
+        script: |
+          set -euo pipefail
+          TARGET_DIR="${REMOTE_PATH}/${TARGET_SUBDIR}"
+
+          mkdir -p "$TARGET_DIR"
+          chmod 700 "$TARGET_DIR"
+
+          if [ -n "${OPTIONAL_FILE_SECRET_1_CONTENT:-}" ] && [ -n "${F1_NAME:-}" ]; then
+            printf '%s\n' "$OPTIONAL_FILE_SECRET_1_CONTENT" | tr -d '\r' > "$TARGET_DIR/$F1_NAME"
+            chmod "$F1_MODE" "$TARGET_DIR/$F1_NAME"
+          fi
+
+          if [ -n "${OPTIONAL_FILE_SECRET_2_CONTENT:-}" ] && [ -n "${F2_NAME:-}" ]; then
+            printf '%s\n' "$OPTIONAL_FILE_SECRET_2_CONTENT" | tr -d '\r' > "$TARGET_DIR/$F2_NAME"
+            chmod "$F2_MODE" "$TARGET_DIR/$F2_NAME"
+          fi
+
+    - name: 🐳 Build, restart & migrate
+      uses: appleboy/ssh-action@334f9259f2f8eb3376d33fa4c684fff373f2c2a6  # v0.1.10
+      env:
+        REMOTE_PATH: ${{ env.REMOTE_PATH }}
+      with:
+        host: ${{ inputs.ssh_host }}
+        username: ${{ inputs.ssh_user }}
+        key: ${{ inputs.ssh_private_key }}
+        envs: REMOTE_PATH
+        script: |
+          set -euo pipefail
+          cd "$REMOTE_PATH"
+
+          DOCKER="docker"
+          if ! docker info >/dev/null 2>&1; then
+            DOCKER="sudo -n docker"
+          fi
+
+          export DOCKER_BUILDKIT=1
+          COMPOSE_FILES="-f docker-compose.yml"
+
+          echo "🚀 Starting Deployment..."
+          $DOCKER image prune -f
+
+          echo "🔥 Recreating containers..."
+          $DOCKER compose $COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
+
+          echo "⏳ Waiting for backend to initialize..."
+          sleep 3
+
+          echo "🔄 Running migrations..."
+          $DOCKER compose $COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
+
+          echo "✅ Deployment finished successfully!"
