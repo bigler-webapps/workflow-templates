@@ -72,7 +72,7 @@ runs:
       shell: bash
       run: |
         pip install "PyYAML==6.0.2"
-        pip install "django-core-micha==1.2.3"
+        pip install "django-core-micha>=2.4.0"
 
     - name: 🔐 Generate .env
       shell: bash

@@ -93,7 +93,7 @@ runs:
     - name: 📦 Install tooling
       shell: bash
       run: |
-        pip install "django-core-micha==1.2.3" "PyYAML==6.0.2"
+        pip install "django-core-micha>=2.4.0" "PyYAML==6.0.2"
 
     - name: 🧮 Calculate configuration
       id: config
