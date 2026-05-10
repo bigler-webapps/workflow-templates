@@ -37,7 +37,6 @@ def normalize_target(name: str, raw_target: dict) -> dict:
     target.setdefault("roles", [])
     target.setdefault("sync_staging_apps", [])
     target.setdefault("expected_container_tokens", [])
-    target.setdefault("permissions_sync_app_env_file", "")
     return target
 
 

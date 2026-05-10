@@ -127,7 +127,6 @@ jobs:
           mkdir -p generated_keys
           bash -c "shopt -s nullglob; cat access/root/*.pub > generated_keys/root_keys || true; [ -s generated_keys/root_keys ] || touch generated_keys/root_keys"
           bash -c "shopt -s nullglob; cat access/deploy/*.pub access/infrastructure/*.pub > generated_keys/deploy_keys || true; [ -s generated_keys/deploy_keys ] || touch generated_keys/deploy_keys"
-          bash -c "shopt -s nullglob; cat access/certfetcher/*.pub > generated_keys/certfetcher_keys || true; [ -s generated_keys/certfetcher_keys ] || touch generated_keys/certfetcher_keys"
 
           if [ -n "${{ inputs.extra_deploy_public_key }}" ]; then
             printf '%s\n' "${{ inputs.extra_deploy_public_key }}" >> generated_keys/deploy_keys
@@ -159,13 +158,4 @@ jobs:
             mv /tmp/deploy_keys /home/$DEPLOY_USER/.ssh/authorized_keys
             chmod 600 /home/$DEPLOY_USER/.ssh/authorized_keys
             chown $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh/authorized_keys
-
-            if id certfetcher >/dev/null 2>&1; then
-              mkdir -p /home/certfetcher/.ssh
-              mv /tmp/certfetcher_keys /home/certfetcher/.ssh/authorized_keys
-              chmod 600 /home/certfetcher/.ssh/authorized_keys
-              chown certfetcher:certfetcher /home/certfetcher/.ssh/authorized_keys
-            else
-              rm -f /tmp/certfetcher_keys || true
-            fi
           '"

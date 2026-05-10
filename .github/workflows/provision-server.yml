@@ -86,10 +86,6 @@ jobs:
             if [ -z "${DEPLOY_USER}" ]; then
               DEPLOY_USER="${{ matrix.deploy_user }}"
             fi
-            SYNC_USER="certfetcher"
-            SYNC_GROUP="syncers"
-            SYNC_GID="2233"
-            CERT_GROUP="certreaders"
 
             echo "🚀 Starting provisioning for ${DEPLOY_USER} on ${{ env.TARGET_HOST }}"
 
@@ -119,25 +115,6 @@ jobs:
             EOF
             chmod 440 /etc/sudoers.d/90-webapp-maintenance
             visudo -cf /etc/sudoers.d/90-webapp-maintenance
-
-            if getent group "${SYNC_GROUP}" >/dev/null; then
-              EXISTING_GID="$(getent group "${SYNC_GROUP}" | cut -d: -f3)"
-              if [ "${EXISTING_GID}" != "${SYNC_GID}" ]; then
-                echo "❌ Group ${SYNC_GROUP} exists with GID=${EXISTING_GID}, expected ${SYNC_GID}."
-                exit 1
-              fi
-            else
-              groupadd --gid "${SYNC_GID}" "${SYNC_GROUP}"
-            fi
-
-            getent group "${CERT_GROUP}" >/dev/null || groupadd "${CERT_GROUP}"
-
-            if ! id "${SYNC_USER}" >/dev/null 2>&1; then
-              useradd -m -s /bin/bash "${SYNC_USER}"
-            fi
-
-            usermod -aG "${SYNC_GROUP}" "${SYNC_USER}"
-            usermod -aG "${CERT_GROUP}" "${SYNC_USER}" || true
 
             mkdir -p /home/${DEPLOY_USER}/.ssh
             if [ -f /root/.ssh/authorized_keys ]; then
@@ -170,23 +147,6 @@ jobs:
             chmod 0755 /srv/backups
             chmod 0700 /srv/backups/db-dumps /srv/backups/restic_v2
 
-            mkdir -p /srv/infrastructure/webapp-management/certs-export
-            chown -R root:"${CERT_GROUP}" /srv/infrastructure/webapp-management/certs-export
-            find /srv/infrastructure/webapp-management/certs-export -type d -exec chmod 2750 {} +
-            find /srv/infrastructure/webapp-management/certs-export -type f -exec chmod 0640 {} + || true
-            setfacl -R -m g:"${CERT_GROUP}":rx /srv/infrastructure/webapp-management/certs-export || true
-            setfacl -R -d -m g:"${CERT_GROUP}":r /srv/infrastructure/webapp-management/certs-export || true
-
-            mkdir -p /srv/sync-export/media /srv/sync-export/excels
-            mkdir -p /srv/sync-incoming/excels
-            chown -R root:"${SYNC_GROUP}" /srv/sync-export /srv/sync-incoming
-            find /srv/sync-export -type d -exec chmod 2770 {} +
-            find /srv/sync-export -type f -exec chmod 0660 {} + || true
-            find /srv/sync-incoming -type d -exec chmod 2770 {} +
-            find /srv/sync-incoming -type f -exec chmod 0660 {} + || true
-            setfacl -R -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
-            setfacl -R -d -m g:"${SYNC_GROUP}":rwx /srv/sync-export /srv/sync-incoming || true
-
             ufw default deny incoming
             ufw default allow outgoing
             sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
@@ -212,8 +172,7 @@ jobs:
 
             echo "✅ Provisioning finished."
             id "${DEPLOY_USER}"
-            id "${SYNC_USER}" || true
-            ls -ld /srv/apps /srv/backups /srv/infrastructure/webapp-management /srv/infrastructure/ops-scripts /srv/sync-export /srv/sync-incoming
+            ls -ld /srv/apps /srv/backups /srv/infrastructure/webapp-management /srv/infrastructure/ops-scripts
 
   sync-access:
     needs: bootstrap

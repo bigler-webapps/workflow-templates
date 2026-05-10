@@ -24,18 +24,14 @@ jobs:
 | `sync-ssh-access.yml` | `workflow_call` | Sync SSH authorized_keys from `access/` |
 | `provision-server.yml` | `workflow_call` | Full server provisioning (users, Docker, firewall) |
 | `maintenance.yml` | `workflow_call` | Weekly apt updates + conditional reboot |
-| `maintenance-permissions-sync.yml` | `workflow_call` | Fix cert/sync directory permissions |
 | `janitor.yml` | `workflow_call` | Monthly Docker prune + disk report |
-| `show_vpn_qr.yml` | `workflow_call` | Show WireGuard peer QR code |
-| `bootstrap-server.yml` | `workflow_dispatch` | Bootstrap users/groups/dirs on existing server |
-| `setup-server.yml` | `workflow_dispatch` | Legacy initial server setup |
 
 ## Calling repo requirements
 
 Each infra repo that calls these workflows must provide:
 
 - `inventory/inventory.yaml` — server targets and roles
-- `access/` — SSH public keys (`root/`, `deploy/`, `infrastructure/`, `certfetcher/`)
+- `access/` — SSH public keys (`root/`, `deploy/`, `infrastructure/`)
 - `.github/scripts/resolve_inventory_targets.py` — target resolver (copy from this repo)
 - `backup/infra_paths.txt` — static server paths for restic (used by `backup.yml`)
 
