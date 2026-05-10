@@ -50,10 +50,6 @@ inputs:
     description: 'Content of optional file secret 2'
     required: false
     default: ''
-  debug:
-    description: 'Enable verbose debug output in rsync action (diagnostic only)'
-    required: false
-    default: 'false'
 
 runs:
   using: 'composite'
@@ -140,35 +136,54 @@ runs:
         echo "Generating .env for env: ${TARGET_ENV}"
         generate-env --env "${TARGET_ENV}"
 
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
     - name: 🚀 Rsync project to server
-      uses: burnett01/rsync-deployments@05a269aeea3e70e1e8fe77064e475a5cb2c80b20  # v8.0.0
-      with:
-        remote_host: ${{ inputs.ssh_host }}
-        remote_user: ${{ inputs.ssh_user }}
-        remote_key:  ${{ inputs.ssh_private_key }}
-        switches: >-
-          -rlvz
-          --delete --delete-delay
-          --partial --delay-updates
-          --no-owner --no-group --no-perms --omit-dir-times
-          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r
-          --rsync-path="mkdir -p ${{ env.REMOTE_PATH }} && rsync"
-          --exclude=certbot/letsencrypt
-          --exclude=docker-compose.override.yml
-          --exclude=.git
-          --exclude=.github
-          --exclude=frontend/node_modules
-          --exclude=frontend/build
-          --exclude=frontend/build_current
-          --exclude=backend/media
-          --exclude='**/__pycache__/'
-          --exclude=*.pyc
-          --exclude='model/.$*.drawio.dtmp'
-          --exclude='model/.$*.drawio.bkp'
-          --exclude=backups
-        path: "./"
-        remote_path: ${{ env.REMOTE_PATH }}
-        debug: ${{ inputs.debug == 'true' }}
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_PATH: ${{ env.REMOTE_PATH }}
+      run: |
+        set -euo pipefail
+        rsync -rlvz \
+          --delete --delete-delay \
+          --partial --delay-updates \
+          --no-owner --no-group --no-perms --omit-dir-times \
+          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
+          --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
+          -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+          --exclude=certbot/letsencrypt \
+          --exclude=docker-compose.override.yml \
+          --exclude=.git \
+          --exclude=.github \
+          --exclude=frontend/node_modules \
+          --exclude=frontend/build \
+          --exclude=frontend/build_current \
+          --exclude=backend/media \
+          --exclude='**/__pycache__/' \
+          --exclude=*.pyc \
+          --exclude='model/.$*.drawio.dtmp' \
+          --exclude='model/.$*.drawio.bkp' \
+          --exclude=backups \
+          ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_PATH}"
 
     - name: 🔐 Provision optional file secrets
       if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
