@@ -96,8 +96,12 @@ runs:
 
         if [ "${BEFORE_COUNT}" -gt 0 ]; then
           echo "Installing upgrades..."
-          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
-          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y autoremove
+          # Pass DEBIAN_FRONTEND through sudo without wrapping in env(1):
+          # sudo "KEY=VALUE command" sets the env-var for the subprocess and
+          # matches the apt-get NOPASSWD rule in /etc/sudoers.d/90-webapp-maintenance
+          # (requires SETENV: flag in sudoers — provision-server sets it).
+          $SUDO DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+          $SUDO DEBIAN_FRONTEND=noninteractive apt-get -y autoremove
           $SUDO apt-get -y autoclean
         else
           echo "No package upgrades required."
