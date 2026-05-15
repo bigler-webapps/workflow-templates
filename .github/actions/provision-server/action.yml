@@ -30,7 +30,8 @@ runs:
       shell: bash
       env:
         INPUT_TARGET: ${{ inputs.target }}
-        INPUT_DEPLOY_USER: ${{ inputs.deploy_user }}
+        # Default to "deploy" when caller leaves it empty (matches inventory default).
+        INPUT_DEPLOY_USER: ${{ inputs.deploy_user || 'deploy' }}
         INPUT_TARGET_HOST: ${{ inputs.target_host }}
         INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
         SSH_PRIVATE_KEY_ROOT: ${{ inputs.ssh_private_key_root }}
@@ -87,7 +88,7 @@ runs:
     - name: 🧱 Bootstrap base server and app platform
       uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
       env:
-        DEPLOY_USER: ${{ inputs.deploy_user }}
+        DEPLOY_USER: ${{ inputs.deploy_user || 'deploy' }}
         INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
         TARGET_HOST_ENV: ${{ env.TARGET_HOST }}
       with:
