@@ -152,6 +152,11 @@ runs:
           chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management
           chmod 2775 /srv/infrastructure/webapp-management
 
+          # Pre-create subdirs used as docker-compose bind-mount sources so
+          # that Docker can't race the first rsync and create them root-owned.
+          mkdir -p /srv/infrastructure/webapp-management/wireguard
+          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management/wireguard
+
           mkdir -p /srv/infrastructure/ops-scripts
           chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/ops-scripts
 
