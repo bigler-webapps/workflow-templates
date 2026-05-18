@@ -1,13 +1,19 @@
 name: 'Sync Uptime Kuma Notifications'
-description: 'Reads a YAML config and idempotently registers or updates notification channels in Uptime Kuma. Notifications marked default:true are auto-applied to all monitors.'
+description: 'Reads a YAML config and idempotently registers or updates notification channels in Uptime Kuma. Notifications marked default:true are auto-applied to all monitors. Connects via SSH tunnel to the host (Kuma must be bound to 127.0.0.1:3001 there).'
 
 inputs:
   config_path:
     description: 'Path to notifications YAML (relative to repo root).'
     required: false
     default: 'monitoring/notifications.yml'
-  kuma_url:
-    description: 'Uptime Kuma URL (e.g. https://status.example.com).'
+  ssh_host:
+    description: 'SSH host for tunnel into the Kuma server.'
+    required: true
+  ssh_user:
+    description: 'SSH user (typically deploy).'
+    required: true
+  ssh_private_key:
+    description: 'SSH private key (PEM contents).'
     required: true
   kuma_user:
     description: 'Automation user in Kuma.'
@@ -15,6 +21,10 @@ inputs:
   kuma_password:
     description: 'Password for the automation user.'
     required: true
+  kuma_local_port:
+    description: 'Server-side localhost port Kuma listens on (matches docker-compose port binding).'
+    required: false
+    default: '3001'
   discord_webhook_url:
     description: 'Discord webhook URL — exposed to the script via ${DISCORD_WEBHOOK_URL} so the config can reference it.'
     required: false
@@ -36,10 +46,43 @@ runs:
       shell: bash
       run: pip install --quiet "uptime-kuma-api==1.2.1" "PyYAML==6.0.2"
 
+    - name: Configure SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
+        chmod 600 ~/.ssh/id_sync
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+    - name: Open SSH tunnel to Kuma
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        KUMA_PORT: ${{ inputs.kuma_local_port }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
+            -fNL "${KUMA_PORT}:localhost:${KUMA_PORT}" \
+            "${SSH_USER}@${SSH_HOST}"
+        # Give the forwarder a moment to settle.
+        for _ in $(seq 1 10); do
+          if curl -sf "http://localhost:${KUMA_PORT}/" -o /dev/null; then
+            echo "✅ Kuma reachable via tunnel"
+            break
+          fi
+          sleep 1
+        done
+
     - name: Sync notifications
       shell: bash
       env:
-        KUMA_URL: ${{ inputs.kuma_url }}
+        KUMA_URL: http://localhost:${{ inputs.kuma_local_port }}
         KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
         KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
         DISCORD_WEBHOOK_URL: ${{ inputs.discord_webhook_url }}
@@ -53,3 +96,9 @@ runs:
           notifications \
           --config "${{ inputs.config_path }}" \
           ${PRUNE_FLAG}
+
+    - name: Close SSH tunnel
+      if: always()
+      shell: bash
+      run: |
+        pkill -f 'ssh -i .*/id_sync .* -fNL' || true
