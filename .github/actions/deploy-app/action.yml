@@ -232,6 +232,17 @@ runs:
           set -euo pipefail
           cd "$REMOTE_PATH"
 
+          # Server-side serialization: prevent two concurrent docker compose runs
+          # for the same project+environment from racing on container names.
+          # GitHub Actions concurrency (per-workflow) is the primary guard; this
+          # is defense-in-depth for manual triggers or if the workflow guard fails.
+          LOCK_NAME="$(printf '%s' "$REMOTE_PATH" | sed 's|/|_|g; s|^_||')"
+          LOCK_FILE="/tmp/deploy-${LOCK_NAME}.lock"
+          exec 200>"$LOCK_FILE"
+          echo "🔒 Acquiring deploy lock (${LOCK_FILE})..."
+          flock -x 200
+          echo "🔒 Lock acquired."
+
           DOCKER="docker"
           if ! docker info >/dev/null 2>&1; then
             DOCKER="sudo -n docker"
