@@ -102,7 +102,7 @@ runs:
           --exclude 'uptime-kuma-data' \
           --exclude 'certs-export' \
           --exclude 'backup' \
-          --exclude 'wireguard' \
+          --exclude 'wireguard/config' \
           ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_PATH}"
 
     - name: 🚀 Start containers
