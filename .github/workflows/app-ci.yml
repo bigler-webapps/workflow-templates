@@ -92,7 +92,7 @@ jobs:
           DJANGO_SECRET_KEY: ci-dummy-secret
           DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
           DEBUG: 'False'
-          ENV_TYPE: ci
+          ENV_TYPE: local
           TEST_DB_HOST: localhost
           DB_HOST: localhost
           DB_PORT: '5432'
