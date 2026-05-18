@@ -1,0 +1,140 @@
+name: App CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        default: '3.12'
+      node-version:
+        type: string
+        default: '24'
+      pnpm-version:
+        type: string
+        default: '10.11.0'
+      db-image:
+        type: string
+        default: 'postgis/postgis:14-3.1'
+      system-packages:
+        type: string
+        default: 'build-essential libpq-dev gdal-bin libgdal-dev libproj-dev libgeos-dev'
+      django-settings-module:
+        type: string
+        default: 'backend.test_settings'
+      backend-path:
+        type: string
+        default: 'backend'
+      frontend-path:
+        type: string
+        default: 'frontend'
+      pytest-args:
+        type: string
+        default: ''
+      run-backend:
+        type: boolean
+        default: true
+      run-frontend-lint:
+        type: boolean
+        default: true
+      run-frontend-tests:
+        type: boolean
+        default: true
+      run-frontend-build:
+        type: boolean
+        default: true
+    secrets:
+      VITE_APP_MUI_LICENSE_KEY:
+        required: false
+
+jobs:
+  backend:
+    if: ${{ inputs.run-backend }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: ${{ inputs.db-image }}
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ${{ inputs.system-packages }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.backend-path }}/requirements.txt
+
+      - name: Install Python dependencies
+        working-directory: ${{ inputs.backend-path }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-django
+
+      - name: Run pytest
+        working-directory: ${{ inputs.backend-path }}
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ inputs.django-settings-module }}
+          DJANGO_SECRET_KEY: ci-dummy-secret
+          DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+          DEBUG: 'False'
+          ENV_TYPE: ci
+          TEST_DB_HOST: localhost
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: test
+          DB_USER: test
+          DB_PASSWORD: test
+          EMAIL_PORT: '25'
+          EMAIL_USE_TLS: 'False'
+        run: pytest ${{ inputs.pytest-args }}
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.frontend-path }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.frontend-path }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: ${{ inputs.run-frontend-lint }}
+        working-directory: ${{ inputs.frontend-path }}
+        run: pnpm lint
+
+      - name: Test
+        if: ${{ inputs.run-frontend-tests }}
+        working-directory: ${{ inputs.frontend-path }}
+        run: pnpm test
+
+      - name: Build
+        if: ${{ inputs.run-frontend-build }}
+        working-directory: ${{ inputs.frontend-path }}
+        env:
+          VITE_APP_MUI_LICENSE_KEY: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
+        run: pnpm build
