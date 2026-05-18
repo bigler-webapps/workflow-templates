@@ -1,0 +1,55 @@
+name: 'Sync Uptime Kuma Notifications'
+description: 'Reads a YAML config and idempotently registers or updates notification channels in Uptime Kuma. Notifications marked default:true are auto-applied to all monitors.'
+
+inputs:
+  config_path:
+    description: 'Path to notifications YAML (relative to repo root).'
+    required: false
+    default: 'monitoring/notifications.yml'
+  kuma_url:
+    description: 'Uptime Kuma URL (e.g. https://status.example.com).'
+    required: true
+  kuma_user:
+    description: 'Automation user in Kuma.'
+    required: true
+  kuma_password:
+    description: 'Password for the automation user.'
+    required: true
+  discord_webhook_url:
+    description: 'Discord webhook URL — exposed to the script via ${DISCORD_WEBHOOK_URL} so the config can reference it.'
+    required: false
+    default: ''
+  prune:
+    description: 'Set "true" to delete Kuma notifications not present in the config file.'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
+      with:
+        python-version: '3.11'
+
+    - name: Install kuma deps
+      shell: bash
+      run: pip install --quiet "uptime-kuma-api==1.2.1" "PyYAML==6.0.2"
+
+    - name: Sync notifications
+      shell: bash
+      env:
+        KUMA_URL: ${{ inputs.kuma_url }}
+        KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
+        KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
+        DISCORD_WEBHOOK_URL: ${{ inputs.discord_webhook_url }}
+      run: |
+        set -euo pipefail
+        PRUNE_FLAG=""
+        if [ "${{ inputs.prune }}" = "true" ]; then
+          PRUNE_FLAG="--prune"
+        fi
+        python "${GITHUB_ACTION_PATH}/../../../scripts/kuma_sync.py" \
+          notifications \
+          --config "${{ inputs.config_path }}" \
+          ${PRUNE_FLAG}

@@ -1,0 +1,50 @@
+name: 'Register Uptime Kuma Monitors'
+description: 'Reads a per-app YAML config and idempotently registers or updates monitors in Uptime Kuma. Notifications marked default:true (via sync-kuma-notifications) are auto-applied.'
+
+inputs:
+  config_path:
+    description: 'Path to monitor YAML (relative to repo root).'
+    required: false
+    default: 'monitoring/monitor.yml'
+  kuma_url:
+    description: 'Uptime Kuma URL (e.g. https://status.example.com).'
+    required: true
+  kuma_user:
+    description: 'Automation user in Kuma.'
+    required: true
+  kuma_password:
+    description: 'Password for the automation user.'
+    required: true
+  prune:
+    description: 'Set "true" to delete Kuma monitors not present in this config file. WARNING: deletes monitors from OTHER apps too if their names are absent here — only enable in single-source-of-truth setups.'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
+      with:
+        python-version: '3.11'
+
+    - name: Install kuma deps
+      shell: bash
+      run: pip install --quiet "uptime-kuma-api==1.2.1" "PyYAML==6.0.2"
+
+    - name: Sync monitors
+      shell: bash
+      env:
+        KUMA_URL: ${{ inputs.kuma_url }}
+        KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
+        KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
+      run: |
+        set -euo pipefail
+        PRUNE_FLAG=""
+        if [ "${{ inputs.prune }}" = "true" ]; then
+          PRUNE_FLAG="--prune"
+        fi
+        python "${GITHUB_ACTION_PATH}/../../../scripts/kuma_sync.py" \
+          monitors \
+          --config "${{ inputs.config_path }}" \
+          ${PRUNE_FLAG}
