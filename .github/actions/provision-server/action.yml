@@ -18,10 +18,6 @@ inputs:
   deploy_user:
     description: 'Deploy user to create / configure'
     required: true
-  infra_public_key:
-    description: 'Optional single-line OpenSSH public key to add to the deploy user'
-    required: false
-    default: ''
 
 runs:
   using: 'composite'
@@ -33,7 +29,6 @@ runs:
         # Default to "deploy" when caller leaves it empty (matches inventory default).
         INPUT_DEPLOY_USER: ${{ inputs.deploy_user || 'deploy' }}
         INPUT_TARGET_HOST: ${{ inputs.target_host }}
-        INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
         SSH_PRIVATE_KEY_ROOT: ${{ inputs.ssh_private_key_root }}
         SSH_HOST: ${{ inputs.ssh_host }}
       run: |
@@ -50,17 +45,6 @@ runs:
         if [ -n "${INPUT_TARGET_HOST:-}" ] && ! printf '%s' "$INPUT_TARGET_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
           echo "❌ Invalid 'target_host' input"
           exit 1
-        fi
-        if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
-          line_count=$(printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | wc -l)
-          if [ "$line_count" -gt 0 ]; then
-            echo "❌ infra_public_key must be a single line (no newlines)"
-            exit 1
-          fi
-          if ! printf '%s' "$INPUT_INFRA_PUBLIC_KEY" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]]+\S+)?$'; then
-            echo "❌ infra_public_key does not match expected OpenSSH key format"
-            exit 1
-          fi
         fi
         if [ -z "$SSH_PRIVATE_KEY_ROOT" ]; then
           echo "❌ ssh_private_key_root is required (root login key)"
@@ -89,13 +73,12 @@ runs:
       uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
       env:
         DEPLOY_USER: ${{ inputs.deploy_user || 'deploy' }}
-        INPUT_INFRA_PUBLIC_KEY: ${{ inputs.infra_public_key }}
         TARGET_HOST_ENV: ${{ env.TARGET_HOST }}
       with:
         host: ${{ env.TARGET_HOST }}
         username: root
         key: ${{ inputs.ssh_private_key_root }}
-        envs: DEPLOY_USER,INPUT_INFRA_PUBLIC_KEY,TARGET_HOST_ENV
+        envs: DEPLOY_USER,TARGET_HOST_ENV
         script: |
           set -euo pipefail
 
@@ -131,11 +114,6 @@ runs:
           mkdir -p /home/${DEPLOY_USER}/.ssh
           if [ -f /root/.ssh/authorized_keys ]; then
             cat /root/.ssh/authorized_keys >> /home/${DEPLOY_USER}/.ssh/authorized_keys
-            sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
-          fi
-          if [ -n "${INPUT_INFRA_PUBLIC_KEY:-}" ]; then
-            # Format already validated upstream.
-            printf '%s\n' "${INPUT_INFRA_PUBLIC_KEY}" >> /home/${DEPLOY_USER}/.ssh/authorized_keys
             sort -u /home/${DEPLOY_USER}/.ssh/authorized_keys -o /home/${DEPLOY_USER}/.ssh/authorized_keys
           fi
           chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /home/${DEPLOY_USER}/.ssh

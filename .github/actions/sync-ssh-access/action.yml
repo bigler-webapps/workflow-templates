@@ -18,10 +18,6 @@ inputs:
   deploy_user:
     description: 'Deploy user whose authorized_keys should be managed'
     required: true
-  extra_deploy_public_key:
-    description: 'Optional single public key appended to deploy authorized_keys'
-    required: false
-    default: ''
   preserve_existing_root_keys:
     description: 'Append managed root keys instead of replacing current root authorized_keys'
     required: false
@@ -36,7 +32,6 @@ runs:
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_DEPLOY_USER: ${{ inputs.deploy_user }}
         INPUT_TARGET_HOST: ${{ inputs.target_host }}
-        INPUT_EXTRA_KEY: ${{ inputs.extra_deploy_public_key }}
       run: |
         set -euo pipefail
 
@@ -51,17 +46,6 @@ runs:
         if [ -n "${INPUT_TARGET_HOST:-}" ] && ! printf '%s' "$INPUT_TARGET_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
           echo "❌ Invalid 'target_host' input"
           exit 1
-        fi
-        if [ -n "${INPUT_EXTRA_KEY:-}" ]; then
-          line_count=$(printf '%s' "$INPUT_EXTRA_KEY" | wc -l)
-          if [ "$line_count" -gt 0 ]; then
-            echo "❌ extra_deploy_public_key must be a single line (no newlines)"
-            exit 1
-          fi
-          if ! printf '%s' "$INPUT_EXTRA_KEY" | grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]]+\S+)?$'; then
-            echo "❌ extra_deploy_public_key does not match expected OpenSSH key format"
-            exit 1
-          fi
         fi
         echo "✅ Inputs validated."
 
@@ -120,8 +104,6 @@ runs:
 
     - name: 🔐 Sync SSH Access Keys
       shell: bash
-      env:
-        INPUT_EXTRA_KEY: ${{ inputs.extra_deploy_public_key }}
       run: |
         set -euo pipefail
 
@@ -129,12 +111,6 @@ runs:
         mkdir -p generated_keys
         bash -c "shopt -s nullglob; cat access/root/*.pub > generated_keys/root_keys || true; [ -s generated_keys/root_keys ] || touch generated_keys/root_keys"
         bash -c "shopt -s nullglob; cat access/deploy/*.pub access/infrastructure/*.pub > generated_keys/deploy_keys || true; [ -s generated_keys/deploy_keys ] || touch generated_keys/deploy_keys"
-
-        if [ -n "${INPUT_EXTRA_KEY:-}" ]; then
-          # Format already validated in 'Validate inputs' step.
-          printf '%s\n' "$INPUT_EXTRA_KEY" >> generated_keys/deploy_keys
-          sort -u generated_keys/deploy_keys -o generated_keys/deploy_keys
-        fi
 
         echo "Uploading keys..."
         scp -i ~/.ssh/id_sync -o IdentitiesOnly=yes generated_keys/* "root@$TARGET_HOST:/tmp/"
