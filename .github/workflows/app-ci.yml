@@ -3,43 +3,39 @@ name: App CI
 on:
   workflow_call:
     inputs:
-      python-version:
+      # Backend
+      dockerfile:
         type: string
-        default: '3.12'
-      node-version:
+        default: 'backend/Dockerfile'
+      build-context:
         type: string
-        default: '24'
-      pnpm-version:
-        type: string
-        default: '10.11.0'
+        default: '.'
       db-image:
         type: string
         default: 'postgis/postgis:14-3.1'
-      system-packages:
-        type: string
-        default: 'build-essential libpq-dev gdal-bin libgdal-dev libproj-dev libgeos-dev'
       django-settings-module:
         type: string
         default: 'backend.test_settings'
-      backend-path:
-        type: string
-        default: 'backend'
-      frontend-path:
-        type: string
-        default: 'frontend'
       pytest-args:
         type: string
         default: ''
       run-backend:
         type: boolean
         default: true
+      # Frontend
+      node-version:
+        type: string
+        default: '24'
+      pnpm-version:
+        type: string
+        default: '10.11.0'
+      frontend-path:
+        type: string
+        default: 'frontend'
       run-frontend-lint:
         type: boolean
         default: true
       run-frontend-tests:
-        type: boolean
-        default: true
-      run-frontend-build:
         type: boolean
         default: true
     secrets:
@@ -67,41 +63,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ${{ inputs.system-packages }}
+      - uses: docker/setup-buildx-action@v3
 
-      - uses: actions/setup-python@v5
+      - name: Build backend image
+        uses: docker/build-push-action@v6
         with:
-          python-version: ${{ inputs.python-version }}
-          cache: pip
-          cache-dependency-path: ${{ inputs.backend-path }}/requirements.txt
-
-      - name: Install Python dependencies
-        working-directory: ${{ inputs.backend-path }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-django
+          context: ${{ inputs.build-context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          tags: ci-backend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_APP_MUI_LICENSE_KEY=${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
 
       - name: Run pytest
-        working-directory: ${{ inputs.backend-path }}
-        env:
-          DJANGO_SETTINGS_MODULE: ${{ inputs.django-settings-module }}
-          DJANGO_SECRET_KEY: ci-dummy-secret
-          DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-          DEBUG: 'False'
-          ENV_TYPE: local
-          TEST_DB_HOST: localhost
-          DB_HOST: localhost
-          DB_PORT: '5432'
-          DB_NAME: test
-          DB_USER: test
-          DB_PASSWORD: test
-          EMAIL_PORT: '25'
-          EMAIL_USE_TLS: 'False'
-        run: pytest ${{ inputs.pytest-args }}
+        run: |
+          docker run --rm --network host \
+            -e DJANGO_SETTINGS_MODULE='${{ inputs.django-settings-module }}' \
+            -e DJANGO_SECRET_KEY='ci-dummy-secret' \
+            -e DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1' \
+            -e DEBUG='False' \
+            -e ENV_TYPE='local' \
+            -e TEST_DB_HOST='localhost' \
+            -e DB_HOST='localhost' \
+            -e DB_PORT='5432' \
+            -e DB_NAME='test' \
+            -e DB_USER='test' \
+            -e DB_PASSWORD='test' \
+            -e EMAIL_PORT='25' \
+            -e EMAIL_USE_TLS='False' \
+            ci-backend:test \
+            pytest ${{ inputs.pytest-args }}
 
   frontend:
     runs-on: ubuntu-latest
@@ -131,10 +124,3 @@ jobs:
         if: ${{ inputs.run-frontend-tests }}
         working-directory: ${{ inputs.frontend-path }}
         run: pnpm test
-
-      - name: Build
-        if: ${{ inputs.run-frontend-build }}
-        working-directory: ${{ inputs.frontend-path }}
-        env:
-          VITE_APP_MUI_LICENSE_KEY: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
-        run: pnpm build
