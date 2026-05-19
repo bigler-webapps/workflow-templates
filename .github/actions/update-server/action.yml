@@ -1,0 +1,105 @@
+name: 'Update Server (incremental config)'
+description: >-
+  Safe, idempotent re-apply of server tuning and tooling on an already-
+  provisioned host. Does NOT touch firewall, sudoers, fail2ban core config,
+  Docker daemon, or deploy users. Use this to roll out new sysctl tuning,
+  install newly-required base tools, etc. without risking a re-bootstrap.
+  For initial bootstrap of a fresh host, use provision-server instead.
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging)'
+    required: true
+  target_host:
+    description: 'Server host address (overrides ssh_host if provided)'
+    required: false
+    default: ''
+  ssh_host:
+    description: 'SSH host address (used if target_host is empty)'
+    required: true
+  ssh_private_key_root:
+    description: 'Root SSH private key (PEM contents) — sysctl/apt require root'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_TARGET_HOST: ${{ inputs.target_host }}
+        SSH_PRIVATE_KEY_ROOT: ${{ inputs.ssh_private_key_root }}
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+          echo "❌ Invalid 'target' input"
+          exit 1
+        fi
+        if [ -n "${INPUT_TARGET_HOST:-}" ] && ! printf '%s' "$INPUT_TARGET_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
+          echo "❌ Invalid 'target_host' input"
+          exit 1
+        fi
+        if [ -z "$SSH_PRIVATE_KEY_ROOT" ]; then
+          echo "❌ ssh_private_key_root is required"
+          exit 1
+        fi
+        if [ -z "$SSH_HOST" ] && [ -z "$INPUT_TARGET_HOST" ]; then
+          echo "❌ Either ssh_host or target_host must be set"
+          exit 1
+        fi
+        echo "✅ Inputs validated."
+
+    - name: Resolve target host
+      shell: bash
+      env:
+        TARGET_HOST_INPUT: ${{ inputs.target_host }}
+        SSH_HOST_INPUT: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        TARGET_HOST="${TARGET_HOST_INPUT}"
+        if [ -z "$TARGET_HOST" ]; then
+          TARGET_HOST="${SSH_HOST_INPUT}"
+        fi
+        echo "TARGET_HOST=$TARGET_HOST" >> "$GITHUB_ENV"
+
+    - name: 🔧 Apply incremental updates
+      uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+      env:
+        TARGET_HOST_ENV: ${{ env.TARGET_HOST }}
+      with:
+        host: ${{ env.TARGET_HOST }}
+        username: root
+        key: ${{ inputs.ssh_private_key_root }}
+        envs: TARGET_HOST_ENV
+        script: |
+          set -euo pipefail
+          echo "🔧 Updating ${TARGET_HOST_ENV}"
+
+          export DEBIAN_FRONTEND=noninteractive
+
+          # 1. Refresh package metadata only — never upgrade unattended.
+          apt-get update -qq
+
+          # 2. Ensure base tooling is installed. Idempotent: apt-get install
+          # only acts when the package is missing or upgradable to a newer
+          # version explicitly requested. Without versions, this is a no-op
+          # on machines that already have the packages.
+          apt-get install -y --no-upgrade \
+            curl git ufw fail2ban htop ncdu rsync acl restic
+
+          # 3. Persist kernel sysctl tuning. Idempotent: cat > overwrites with
+          # the same content. sysctl --system applies *config files*, never
+          # restarts services.
+          cat <<'EOF' >/etc/sysctl.d/99-webapp-tuning.conf
+          fs.inotify.max_user_instances = 512
+          fs.inotify.max_user_watches   = 524288
+          EOF
+          sysctl --system >/dev/null
+
+          # 4. Report current values for verification.
+          echo "── Active sysctl values ──"
+          sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches
+
+          echo "✅ Server update finished."
