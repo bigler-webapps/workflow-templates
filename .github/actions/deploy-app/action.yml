@@ -131,8 +131,20 @@ runs:
     - name: 🔐 Generate .env file
       shell: bash
       env:
-        SECRETS_CONTEXT: ${{ inputs.secrets_context_json }}
+        SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
       run: |
+        set -euo pipefail
+        # S5/S21 partial mitigation: drop CI-only secret families before
+        # generate-env sees them. Reduces blast radius of any crash/debug
+        # leak inside the generate-env subprocess; the runtime .env is built
+        # only from app-relevant keys anyway (filtered further by generate-env
+        # against the app's secrets.yaml).
+        SECRETS_CONTEXT=$(
+          printf '%s' "$SECRETS_CONTEXT_RAW" \
+            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_)") | not))'
+        )
+        unset SECRETS_CONTEXT_RAW
+        export SECRETS_CONTEXT
         echo "Generating .env for env: ${TARGET_ENV}"
         generate-env --env "${TARGET_ENV}"
 

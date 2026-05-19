@@ -77,8 +77,18 @@ runs:
     - name: 🔐 Generate .env
       shell: bash
       env:
-        SECRETS_CONTEXT: ${{ inputs.secrets_context_json }}
+        SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
       run: |
+        set -euo pipefail
+        # S5/S21 partial mitigation: drop CI-only secret families before
+        # generate-env sees them. Reduces blast radius of any crash/debug
+        # leak inside the generate-env subprocess.
+        SECRETS_CONTEXT=$(
+          printf '%s' "$SECRETS_CONTEXT_RAW" \
+            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_)") | not))'
+        )
+        unset SECRETS_CONTEXT_RAW
+        export SECRETS_CONTEXT
         generate-env --env ${{ inputs.target_environment }} --config project.yaml
 
     - name: 📂 Rsync project to server
