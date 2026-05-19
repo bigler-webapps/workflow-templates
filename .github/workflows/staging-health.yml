@@ -1,0 +1,104 @@
+name: Staging Health Check
+
+on:
+  workflow_call:
+    inputs:
+      staging-domain:
+        description: 'Override staging domain. If empty, reads environments.staging.domains[0] from project.yaml.'
+        type: string
+        default: ''
+      health-path:
+        description: 'Path of the health endpoint relative to the domain.'
+        type: string
+        default: '/api/healthz'
+      max-retries:
+        description: 'Maximum probe attempts before failing.'
+        type: number
+        default: 30
+      retry-interval:
+        description: 'Seconds between probe attempts.'
+        type: number
+        default: 10
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve staging domain
+        id: domain
+        env:
+          OVERRIDE_DOMAIN: ${{ inputs.staging-domain }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE_DOMAIN}" ]; then
+            DOMAIN="${OVERRIDE_DOMAIN}"
+            echo "Using override domain: ${DOMAIN}"
+          else
+            DOMAIN=$(python3 - <<'PY'
+          import sys
+          import yaml
+          with open("project.yaml", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+          try:
+              print(data["environments"]["staging"]["domains"][0])
+          except (KeyError, IndexError, TypeError) as exc:
+              sys.stderr.write(f"Could not read staging domain from project.yaml: {exc}\n")
+              sys.exit(2)
+          PY
+          )
+            echo "Resolved domain from project.yaml: ${DOMAIN}"
+          fi
+          printf 'domain=%s\n' "${DOMAIN}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe /api/healthz
+        env:
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+          MAX_RETRIES: ${{ inputs.max-retries }}
+          RETRY_INTERVAL: ${{ inputs.retry-interval }}
+        run: |
+          set -euo pipefail
+          URL="https://${DOMAIN}${HEALTH_PATH}"
+          echo "Probing: ${URL}"
+          echo "Strategy: up to ${MAX_RETRIES} attempts, ${RETRY_INTERVAL}s between"
+          echo ""
+
+          last_body=""
+          last_code=""
+          for attempt in $(seq 1 "${MAX_RETRIES}"); do
+            printf '── Attempt %s/%s ──\n' "${attempt}" "${MAX_RETRIES}"
+
+            # -m 15: per-request timeout 15s
+            response=$(curl -sS -m 15 -w '\n%{http_code}' "${URL}" || true)
+            last_body=$(printf '%s' "${response}" | sed '$d')
+            last_code=$(printf '%s' "${response}" | tail -n1)
+
+            echo "HTTP ${last_code}"
+            if [ -n "${last_body}" ]; then
+              printf '%s' "${last_body}" | jq . 2>/dev/null || printf '%s\n' "${last_body}"
+            fi
+
+            if [ "${last_code}" = "200" ]; then
+              status=$(printf '%s' "${last_body}" | jq -r '.status // empty' 2>/dev/null || true)
+              if [ "${status}" = "ok" ]; then
+                echo ""
+                echo "✅ Staging is healthy."
+                exit 0
+              fi
+              echo "⚠️ HTTP 200 but status != ok — retrying."
+            fi
+
+            if [ "${attempt}" -lt "${MAX_RETRIES}" ]; then
+              echo "⏳ Waiting ${RETRY_INTERVAL}s..."
+              sleep "${RETRY_INTERVAL}"
+            fi
+          done
+
+          echo ""
+          echo "❌ Staging not healthy after ${MAX_RETRIES} attempts."
+          echo "Last HTTP code: ${last_code}"
+          echo "Last body:"
+          printf '%s\n' "${last_body}"
+          exit 1
