@@ -25,14 +25,6 @@ inputs:
   secrets_context_json:
     description: 'JSON-serialized secrets context (toJson(secrets)) for generate-env'
     required: true
-  origin_cert_bigler_consult_ch:
-    description: 'Multi-SAN Origin Certificate PEM for bigler-consult.ch (mounted in Traefik). Leave empty to skip.'
-    required: false
-    default: ''
-  origin_key_bigler_consult_ch:
-    description: 'Private Key PEM matching origin_cert_bigler_consult_ch. Leave empty to skip.'
-    required: false
-    default: ''
 
 runs:
   using: 'composite'
@@ -99,24 +91,10 @@ runs:
         export SECRETS_CONTEXT
         generate-env --env ${{ inputs.target_environment }} --config project.yaml
 
-    - name: 📜 Write origin certificates (if provided)
-      shell: bash
-      env:
-        ORIGIN_CERT_BIGLER_CONSULT_CH: ${{ inputs.origin_cert_bigler_consult_ch }}
-        ORIGIN_KEY_BIGLER_CONSULT_CH: ${{ inputs.origin_key_bigler_consult_ch }}
-      run: |
-        set -euo pipefail
-        mkdir -p ./certs
-
-        if [ -n "$ORIGIN_CERT_BIGLER_CONSULT_CH" ] && [ -n "$ORIGIN_KEY_BIGLER_CONSULT_CH" ]; then
-          printf '%s\n' "$ORIGIN_CERT_BIGLER_CONSULT_CH" > ./certs/bigler-consult-ch.crt
-          printf '%s\n' "$ORIGIN_KEY_BIGLER_CONSULT_CH" > ./certs/bigler-consult-ch.key
-          chmod 644 ./certs/bigler-consult-ch.crt
-          chmod 600 ./certs/bigler-consult-ch.key
-          echo "✅ Origin cert + key for bigler-consult.ch written"
-        else
-          echo "⏭️  Skipping bigler-consult.ch origin cert (inputs empty)"
-        fi
+    # Note: Any additional file-material (origin certificates, GPG keys, etc.)
+    # that needs to land on the server is the caller's responsibility — write
+    # to ./certs/, ./gpg/, or similar before this action runs. rsync picks
+    # them up automatically.
 
     - name: 📂 Rsync project to server
       shell: bash
