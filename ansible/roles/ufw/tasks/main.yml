@@ -10,11 +10,13 @@
     # /etc/default/ufw contains a duplicate DEFAULT_FORWARD_POLICY setting
     # that survives across reboots. Persist it BEFORE enabling ufw so the
     # forward policy is consistent from the very first activation.
+    # The file expects kernel-level ACCEPT/DROP, while the ufw module
+    # speaks allow/deny/reject — map the two vocabularies here.
     - name: Persist DEFAULT_FORWARD_POLICY in /etc/default/ufw
       ansible.builtin.lineinfile:
         path: /etc/default/ufw
         regexp: '^DEFAULT_FORWARD_POLICY='
-        line: 'DEFAULT_FORWARD_POLICY="{{ ufw_default_policy_forward | upper }}"'
+        line: 'DEFAULT_FORWARD_POLICY="{{ "ACCEPT" if ufw_default_policy_forward == "allow" else "DROP" }}"'
         state: present
 
     - name: Set ufw default input policy

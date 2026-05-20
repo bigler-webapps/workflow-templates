@@ -1,7 +1,10 @@
 ---
 ufw_default_policy_input: deny
 ufw_default_policy_output: allow
-ufw_default_policy_forward: accept
+# ufw module vocabulary: allow|deny|reject. For the FORWARD chain
+# `allow` maps to ACCEPT in /etc/default/ufw (needed by Docker for
+# container NAT). The lineinfile task below performs that mapping.
+ufw_default_policy_forward: allow
 
 # Default-allowed inbound ports. SSH only by default.
 #
