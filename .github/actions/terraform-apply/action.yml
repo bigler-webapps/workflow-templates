@@ -1,0 +1,42 @@
+name: 'Terraform Apply'
+description: 'Runs terraform apply -auto-approve. Use on push to main after PR-reviewed plan.'
+
+inputs:
+  working_directory:
+    description: 'Path containing the Terraform root module'
+    required: false
+    default: 'terraform'
+  terraform_version:
+    description: 'Terraform CLI version'
+    required: false
+    default: '1.9.0'
+  tf_cloud_token:
+    description: 'Terraform Cloud API token (for state backend auth)'
+    required: true
+  cloudflare_api_token:
+    description: 'Cloudflare API token (TF_VAR_cloudflare_api_token)'
+    required: true
+  cloudflare_account_id:
+    description: 'Cloudflare Account ID (TF_VAR_cloudflare_account_id)'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: hashicorp/setup-terraform@v3  # TODO S33: SHA-pin via Renovate
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        cli_config_credentials_token: ${{ inputs.tf_cloud_token }}
+
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: terraform init
+
+    - name: Terraform Apply
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        TF_VAR_cloudflare_api_token: ${{ inputs.cloudflare_api_token }}
+        TF_VAR_cloudflare_account_id: ${{ inputs.cloudflare_account_id }}
+      run: terraform apply -auto-approve
