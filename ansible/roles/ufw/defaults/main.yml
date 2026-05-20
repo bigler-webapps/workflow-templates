@@ -1,0 +1,22 @@
+---
+ufw_default_policy_input: deny
+ufw_default_policy_output: allow
+ufw_default_policy_forward: accept
+
+# Default-allowed inbound ports. SSH only by default.
+#
+# NOTE: This is intentionally narrower than the legacy provision-server
+# composite, which also opened 80/tcp and 443/tcp. The web stack is not
+# in scope of this collection — the consumer is responsible for adding
+# web-stack ports (override or extend ufw_allow_in in the tenant
+# playbook) when deploying Traefik or similar.
+#
+# Tightening (e.g. binding SSH to a VPN interface) is also the
+# consumer's decision and is not implemented here.
+ufw_allow_in:
+  - port: "22"
+    proto: tcp
+    comment: ssh
+
+ufw_enabled: true
+ufw_logging: low

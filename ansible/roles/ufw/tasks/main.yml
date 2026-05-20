@@ -1,0 +1,51 @@
+---
+- name: Configure UFW (requires root)
+  become: true
+  block:
+    - name: Ensure ufw is installed
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    # /etc/default/ufw contains a duplicate DEFAULT_FORWARD_POLICY setting
+    # that survives across reboots. Persist it BEFORE enabling ufw so the
+    # forward policy is consistent from the very first activation.
+    - name: Persist DEFAULT_FORWARD_POLICY in /etc/default/ufw
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="{{ ufw_default_policy_forward | upper }}"'
+        state: present
+
+    - name: Set ufw default input policy
+      community.general.ufw:
+        direction: incoming
+        policy: "{{ ufw_default_policy_input }}"
+
+    - name: Set ufw default output policy
+      community.general.ufw:
+        direction: outgoing
+        policy: "{{ ufw_default_policy_output }}"
+
+    - name: Set ufw default forward policy
+      community.general.ufw:
+        direction: routed
+        policy: "{{ ufw_default_policy_forward }}"
+
+    - name: Allow configured inbound ports
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto | default('tcp') }}"
+        comment: "{{ item.comment | default(omit) }}"
+      loop: "{{ ufw_allow_in }}"
+
+    - name: Set ufw logging level
+      community.general.ufw:
+        logging: "{{ ufw_logging }}"
+      when: ufw_logging is defined
+
+    - name: Enable ufw
+      community.general.ufw:
+        state: enabled
+      when: ufw_enabled | bool

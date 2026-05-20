@@ -1,0 +1,49 @@
+---
+- name: Install Docker (requires root)
+  become: true
+  block:
+    - name: Ensure Docker keyring directory exists
+      ansible.builtin.file:
+        path: "{{ docker_apt_keyring_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Determine APT architecture for Docker repository
+      ansible.builtin.set_fact:
+        docker_apt_arch: >-
+          {{ {'x86_64': 'amd64',
+              'aarch64': 'arm64',
+              'armv7l': 'armhf'}[ansible_architecture] }}
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: "{{ docker_apt_repo_url }}/gpg"
+        dest: "{{ docker_apt_keyring_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ docker_apt_arch }}
+          signed-by={{ docker_apt_keyring_path }}]
+          {{ docker_apt_repo_url }}
+          {{ ansible_distribution_release }} stable
+        filename: "{{ docker_apt_repo_filename }}"
+        state: present
+        update_cache: true
+
+    - name: Install Docker engine and compose plugin
+      ansible.builtin.apt:
+        name: "{{ docker_packages }}"
+        state: present
+
+    - name: Ensure Docker service started and enabled
+      ansible.builtin.systemd:
+        name: docker
+        state: "{{ docker_service_state }}"
+        enabled: "{{ docker_service_enabled }}"

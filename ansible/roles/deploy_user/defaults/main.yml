@@ -1,0 +1,32 @@
+---
+deploy_user_name: deploy
+deploy_user_shell: /bin/bash
+
+# Groups the deploy user is added to (in addition to its primary group).
+# `docker` group exists only after the docker role has run; site playbook
+# must therefore order docker before deploy_user.
+deploy_user_additional_groups:
+  - sudo
+  - docker
+
+# Maintenance commands the deploy user may run via passwordless sudo.
+# Mirrors /etc/sudoers.d/90-webapp-maintenance from the legacy
+# provision-server composite action.
+deploy_user_sudo_commands:
+  - /usr/bin/apt-get
+  - /usr/bin/apt
+  - /usr/bin/systemctl reboot
+  - /usr/sbin/reboot
+deploy_user_sudoers_filename: 90-webapp-maintenance
+
+# Override per-host. List of complete public-key strings (e.g.
+# "ssh-ed25519 AAA... comment"). The role appends keys; existing
+# authorized_keys entries are preserved unless exclusive=true.
+#
+# NOTE: The legacy provision-server composite action implicitly seeded
+# the deploy user's authorized_keys from /root/.ssh/authorized_keys.
+# This role does not — the consumer must pass keys explicitly. If the
+# list is empty, the deploy user is created without any SSH access and
+# can only be reached by becoming the user from a root session.
+deploy_user_authorized_keys: []
+deploy_user_authorized_keys_exclusive: false

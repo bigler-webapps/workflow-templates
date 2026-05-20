@@ -1,0 +1,24 @@
+---
+base_apt_upgrade: dist
+base_apt_cache_valid_time: 3600
+
+base_packages:
+  - curl
+  - git
+  - htop
+  - ncdu
+  - rsync
+  - acl
+  - ca-certificates
+  - gnupg
+
+# Kernel tuning for high-container-density hosts. Default
+# fs.inotify.max_user_instances is 128 — easily exhausted with 30+
+# containers; symptom is intermittent file-watcher failures.
+base_sysctl_tuning:
+  - name: fs.inotify.max_user_instances
+    value: "512"
+  - name: fs.inotify.max_user_watches
+    value: "524288"
+
+base_sysctl_file: /etc/sysctl.d/99-webapp-tuning.conf
