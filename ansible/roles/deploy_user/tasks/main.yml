@@ -1,0 +1,46 @@
+---
+- name: Provision deploy user (requires root)
+  become: true
+  block:
+    - name: Ensure deploy primary group exists
+      ansible.builtin.group:
+        name: "{{ deploy_user_name }}"
+        state: present
+
+    - name: Ensure deploy user exists with locked password
+      ansible.builtin.user:
+        name: "{{ deploy_user_name }}"
+        group: "{{ deploy_user_name }}"
+        groups: "{{ deploy_user_additional_groups }}"
+        append: true
+        shell: "{{ deploy_user_shell }}"
+        create_home: true
+        password_lock: true
+        state: present
+
+    - name: Configure passwordless maintenance sudoers entry
+      community.general.sudoers:
+        name: "{{ deploy_user_sudoers_filename }}"
+        state: present
+        user: "{{ deploy_user_name }}"
+        commands: "{{ deploy_user_sudo_commands }}"
+        nopassword: true
+        setenv: true
+        validation: required
+
+    - name: Ensure deploy user's .ssh directory exists with correct perms
+      ansible.builtin.file:
+        path: "/home/{{ deploy_user_name }}/.ssh"
+        state: directory
+        owner: "{{ deploy_user_name }}"
+        group: "{{ deploy_user_name }}"
+        mode: "0700"
+
+    - name: Install authorized_keys for deploy user
+      ansible.posix.authorized_key:
+        user: "{{ deploy_user_name }}"
+        key: "{{ item }}"
+        state: present
+        exclusive: "{{ deploy_user_authorized_keys_exclusive }}"
+      loop: "{{ deploy_user_authorized_keys }}"
+      when: deploy_user_authorized_keys | length > 0

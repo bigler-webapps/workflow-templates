@@ -1,0 +1,23 @@
+---
+- name: Base server bootstrap (requires root)
+  become: true
+  block:
+    - name: Apt update and upgrade
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: "{{ base_apt_upgrade }}"
+        cache_valid_time: "{{ base_apt_cache_valid_time }}"
+
+    - name: Install common base packages
+      ansible.builtin.apt:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Apply kernel sysctl tuning for high-container-density hosts
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_file: "{{ base_sysctl_file }}"
+        state: present
+        reload: true
+      loop: "{{ base_sysctl_tuning }}"
