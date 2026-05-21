@@ -1,0 +1,286 @@
+name: 'Cross-server restore — destination-side import'
+description: >-
+  Downloads the encrypted dump produced by restore-source-export, ships it to
+  the destination host, decrypts it there with a passphrase deterministically
+  derived from the pre-shared transport key, and imports it into the dest
+  app's running DB via restore.py --mode import-only. Always deletes the
+  GitHub Artifact at the end (success or failure).
+
+inputs:
+  dest_target:
+    description: 'Inventory target name of the destination (used for logging + work-dir naming).'
+    required: true
+  app_name:
+    description: 'App name (e.g. innoservice). Must match ^[a-zA-Z0-9_-]+$.'
+    required: true
+  dest_subtarget:
+    description: 'Destination compose env (e.g. staging, production). Selects which {app}_{env} compose project on the dest host receives the dump.'
+    required: true
+  auto_restart:
+    description: 'If "true", run docker compose up -d after import. Default false. Requires dest_compose_path.'
+    required: false
+    default: 'false'
+  dest_compose_path:
+    description: 'Path on the dest host containing docker-compose.yml. Required when auto_restart=true.'
+    required: false
+    default: ''
+  ssh_host:
+    description: 'Destination host SSH address.'
+    required: true
+  ssh_user:
+    description: 'Destination host SSH user.'
+    required: true
+  ssh_private_key:
+    description: 'Destination host SSH private key (PEM contents).'
+    required: true
+  artifact_name:
+    description: 'Artifact name produced by restore-source-export.'
+    required: true
+  transport_key:
+    description: 'Pre-shared transport key (must match the value passed to restore-source-export). Used together with the run identifier to derive the decryption passphrase.'
+    required: true
+  ops_scripts_path:
+    description: 'Local path containing webapp-ops-scripts checkout (must contain restore.py).'
+    required: false
+    default: 'ops-scripts'
+  github_token:
+    description: 'Token used to delete the handoff artifact at the end. Caller should pass secrets.GITHUB_TOKEN.'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_DEST_TARGET: ${{ inputs.dest_target }}
+        INPUT_APP_NAME: ${{ inputs.app_name }}
+        INPUT_DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_AUTO_RESTART: ${{ inputs.auto_restart }}
+        INPUT_DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        TRANSPORT_KEY: ${{ inputs.transport_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_PRIVATE_KEY INPUT_SSH_HOST INPUT_SSH_USER INPUT_APP_NAME INPUT_DEST_SUBTARGET INPUT_DEST_TARGET ARTIFACT_NAME TRANSPORT_KEY GITHUB_TOKEN)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}'."
+            exit 1
+          fi
+        done
+
+        printf '%s' "$INPUT_DEST_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'dest_target' input"; exit 1; }
+        printf '%s' "$INPUT_APP_NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'app_name' input"; exit 1; }
+        printf '%s' "$INPUT_DEST_SUBTARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'dest_subtarget' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+        printf '%s' "$INPUT_AUTO_RESTART" | grep -qE '^(true|false)$' || { echo "❌ Invalid 'auto_restart' input (must be true/false)"; exit 1; }
+        if [ "$INPUT_AUTO_RESTART" = "true" ]; then
+          if [ -z "$INPUT_DEST_COMPOSE_PATH" ]; then
+            echo "❌ auto_restart=true requires 'dest_compose_path' input."
+            exit 1
+          fi
+          printf '%s' "$INPUT_DEST_COMPOSE_PATH" | grep -qE '^/[a-zA-Z0-9._/-]+$' || { echo "❌ Invalid 'dest_compose_path' input (must be absolute path)"; exit 1; }
+        fi
+
+    - name: 🧮 Compute work-dir
+      id: compute_names
+      shell: bash
+      env:
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        APP_NAME: ${{ inputs.app_name }}
+      run: |
+        set -euo pipefail
+        WORK_TAG="restore-import-${RUN_ID}-${RUN_ATTEMPT}-${APP_NAME}"
+        echo "work_tag=${WORK_TAG}" >> "$GITHUB_OUTPUT"
+
+    - name: 🔐 Derive run-scoped passphrase from transport key
+      shell: bash
+      env:
+        TRANSPORT_KEY: ${{ inputs.transport_key }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        # Must use the same derivation formula as restore-source-export.
+        PASSPHRASE="$(printf '%s:%s:%s' "$TRANSPORT_KEY" "$RUN_ID" "$RUN_ATTEMPT" | sha256sum | awk '{print $1}')"
+        echo "::add-mask::${PASSPHRASE}"
+        echo "PASSPHRASE=${PASSPHRASE}" >> "$GITHUB_ENV"
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_xrestore_dest
+        chmod 600 ~/.ssh/id_xrestore_dest
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 📂 Sync ops scripts to dest host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "${OPS_SCRIPTS_PATH}" ]; then
+          echo "❌ ops_scripts_path '${OPS_SCRIPTS_PATH}' not found."
+          exit 1
+        fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/restore.py" ]; then
+          echo "❌ ${OPS_SCRIPTS_PATH}/restore.py missing — webapp-ops-scripts checkout failed?"
+          exit 1
+        fi
+
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "mkdir -p /srv/infrastructure/ops-scripts"
+        scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
+          "${OPS_SCRIPTS_PATH}/restore.py" \
+          "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/restore.py"
+
+    - name: 📥 Download encrypted artifact
+      uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ./xrestore-handoff/
+
+    - name: ⬆️ Upload encrypted dump to dest host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+      run: |
+        set -euo pipefail
+        ls -la ./xrestore-handoff/
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        WORK_DIR="/tmp/${WORK_TAG}"
+        rm -rf "$WORK_DIR"
+        mkdir -p "$WORK_DIR"
+        chmod 700 "$WORK_DIR"
+        EOF
+        scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
+          ./xrestore-handoff/dump.tar.enc \
+          "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/dump.tar.enc"
+
+    - name: 🔓 Decrypt + untar on dest host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+        PASSPHRASE: ${{ env.PASSPHRASE }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           ENC_PASS=$(printf '%q' "$PASSPHRASE") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        WORK_DIR="/tmp/${WORK_TAG}"
+        openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENC_PASS \
+          -in "${WORK_DIR}/dump.tar.enc" \
+          | tar -C "$WORK_DIR" -xf -
+        rm -f "${WORK_DIR}/dump.tar.enc"
+        chmod 600 "${WORK_DIR}/dump.sql.gz" "${WORK_DIR}/manifest.json"
+        ls -la "$WORK_DIR"
+        EOF
+
+    - name: 🔄 Run restore.py --mode import-only on dest host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+        APP_NAME: ${{ inputs.app_name }}
+        DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           APP_NAME=$(printf '%q' "$APP_NAME") \
+           DEST_SUBTARGET=$(printf '%q' "$DEST_SUBTARGET") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        export PATH=$PATH:/usr/local/bin
+        WORK_DIR="/tmp/${WORK_TAG}"
+        python3 /srv/infrastructure/ops-scripts/restore.py \
+          --mode import-only \
+          --app "$APP_NAME" \
+          --target-env "$DEST_SUBTARGET" \
+          --dump-file "${WORK_DIR}/dump.sql.gz"
+        EOF
+
+    - name: 🚀 Auto-restart dest stack (optional)
+      if: ${{ inputs.auto_restart == 'true' }}
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "DEST_COMPOSE_PATH=$(printf '%q' "$DEST_COMPOSE_PATH") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        cd "$DEST_COMPOSE_PATH"
+        docker compose up -d
+        EOF
+
+    - name: 🧹 Cleanup dest host work-dir
+      if: always()
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           bash -s" <<'EOF' || true
+        set -euo pipefail
+        rm -rf "/tmp/${WORK_TAG}"
+        EOF
+        rm -f ~/.ssh/id_xrestore_dest
+        rm -rf ./xrestore-handoff
+
+    - name: 🗑️ Delete handoff artifact (always)
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        ARTIFACT_ID="$(gh api -X GET "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id" 2>/dev/null | head -n1 || true)"
+        if [ -n "${ARTIFACT_ID:-}" ] && [ "$ARTIFACT_ID" != "null" ]; then
+          echo "Deleting handoff artifact id=${ARTIFACT_ID} name=${ARTIFACT_NAME}"
+          gh api -X DELETE "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}" || echo "⚠️ Artifact delete failed (will expire via retention)."
+        else
+          echo "ℹ️ Artifact '${ARTIFACT_NAME}' not found via API — nothing to delete (will expire via retention)."
+        fi

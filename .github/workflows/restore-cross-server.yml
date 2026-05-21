@@ -1,0 +1,157 @@
+name: Cross-server restore
+
+# Reusable workflow that ships an app DB dump from a source environment to a
+# destination environment via short-lived encrypted GitHub Artifact.
+# Owned by workflow-templates; called from app/ops repos.
+#
+# Flow:
+#   Job A (env=source_target) → restore-source-export → encrypted artifact
+#   Job B (env=dest_target)   → restore-dest-import   → DB import on dest host
+#
+# The caller is responsible for:
+#   • inventory-level validation (source_target != dest_target, role checks, …)
+#   • DESTROY-token enforcement when dest_subtarget=production
+#   • pinning a specific SHA of this workflow
+
+on:
+  workflow_call:
+    inputs:
+      source_target:
+        description: 'Inventory target name (and GitHub Environment) of the source.'
+        type: string
+        required: true
+      dest_target:
+        description: 'Inventory target name (and GitHub Environment) of the destination.'
+        type: string
+        required: true
+      app_name:
+        description: 'App name (matches compose project prefix on both hosts).'
+        type: string
+        required: true
+      source_env:
+        description: 'Source compose env label (e.g. production). Selects the running compose project on the source host.'
+        type: string
+        required: true
+      dest_subtarget:
+        description: 'Destination compose env label (e.g. staging, production).'
+        type: string
+        required: true
+      snapshot_id:
+        description: 'Restic snapshot ID or "latest".'
+        type: string
+        required: false
+        default: 'latest'
+      auto_restart:
+        description: 'Run docker compose up -d on the dest host after import.'
+        type: boolean
+        required: false
+        default: false
+      dest_compose_path:
+        description: 'Absolute path on the dest host containing docker-compose.yml. Required if auto_restart=true.'
+        type: string
+        required: false
+        default: ''
+      ops_scripts_ref:
+        description: >-
+          Ref/SHA of bigler-webapps/webapp-ops-scripts to use.
+          TODO (S33-analog): callers should pass a pinned commit SHA instead of the 'main' default
+          so restore.py executions on prod hosts cannot silently change.
+        type: string
+        required: false
+        default: 'main'
+    secrets:
+      CROSS_SERVER_TRANSPORT_KEY:
+        description: >-
+          Long-lived shared key (org/repo secret). Both jobs derive the per-run
+          encryption passphrase from this key + the GitHub run identifier. The
+          key itself never appears in logs, outputs, or API responses.
+        required: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate cross-target inputs
+        env:
+          SOURCE_TARGET: ${{ inputs.source_target }}
+          DEST_TARGET: ${{ inputs.dest_target }}
+          APP_NAME: ${{ inputs.app_name }}
+          SOURCE_ENV: ${{ inputs.source_env }}
+          DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+          SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE_TARGET" = "$DEST_TARGET" ]; then
+            echo "❌ source_target and dest_target must differ."
+            exit 1
+          fi
+          printf '%s' "$SOURCE_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid source_target"; exit 1; }
+          printf '%s' "$DEST_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid dest_target"; exit 1; }
+          printf '%s' "$APP_NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid app_name"; exit 1; }
+          printf '%s' "$SOURCE_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid source_env"; exit 1; }
+          printf '%s' "$DEST_SUBTARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid dest_subtarget"; exit 1; }
+          printf '%s' "$SNAPSHOT_ID" | grep -qE '^(latest|[a-zA-Z0-9_-]+)$' || { echo "❌ Invalid snapshot_id"; exit 1; }
+
+  source_export:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.source_target }}
+    outputs:
+      artifact_name: ${{ steps.export.outputs.artifact_name }}
+    steps:
+      - name: Checkout workflow-templates (for composite actions)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Checkout webapp-ops-scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/webapp-ops-scripts
+          ref: ${{ inputs.ops_scripts_ref }}
+          path: ops-scripts
+
+      - id: export
+        uses: ./.github/actions/restore-source-export
+        with:
+          source_target: ${{ inputs.source_target }}
+          app_name: ${{ inputs.app_name }}
+          source_env: ${{ inputs.source_env }}
+          snapshot_id: ${{ inputs.snapshot_id }}
+          ssh_host: ${{ secrets.SSH_HOST }}
+          ssh_user: ${{ secrets.SSH_USER }}
+          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          restic_repo_b2: ${{ secrets.RESTIC_REPO_B2 }}
+          restic_password: ${{ secrets.RESTIC_PASSWORD }}
+          b2_key_id: ${{ secrets.B2_KEY_ID }}
+          b2_app_key: ${{ secrets.B2_APP_KEY }}
+          transport_key: ${{ secrets.CROSS_SERVER_TRANSPORT_KEY }}
+          ops_scripts_path: ops-scripts
+
+  dest_import:
+    needs: source_export
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.dest_target }}
+    steps:
+      - name: Checkout workflow-templates (for composite actions)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Checkout webapp-ops-scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/webapp-ops-scripts
+          ref: ${{ inputs.ops_scripts_ref }}
+          path: ops-scripts
+
+      - uses: ./.github/actions/restore-dest-import
+        with:
+          dest_target: ${{ inputs.dest_target }}
+          app_name: ${{ inputs.app_name }}
+          dest_subtarget: ${{ inputs.dest_subtarget }}
+          auto_restart: ${{ inputs.auto_restart && 'true' || 'false' }}
+          dest_compose_path: ${{ inputs.dest_compose_path }}
+          ssh_host: ${{ secrets.SSH_HOST }}
+          ssh_user: ${{ secrets.SSH_USER }}
+          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          artifact_name: ${{ needs.source_export.outputs.artifact_name }}
+          transport_key: ${{ secrets.CROSS_SERVER_TRANSPORT_KEY }}
+          ops_scripts_path: ops-scripts
+          github_token: ${{ secrets.GITHUB_TOKEN }}

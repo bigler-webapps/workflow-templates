@@ -1,0 +1,273 @@
+name: 'Cross-server restore — source-side export'
+description: >-
+  Runs restore.py in dump-only mode on the source host, encrypts the dump with
+  a passphrase deterministically derived from a pre-shared transport key + run
+  identifier, and uploads it as a short-lived GitHub Artifact. Consumed by the
+  cross-server-restore reusable workflow (Job A). The matching dest-side
+  composite is restore-dest-import — it derives the same passphrase from the
+  same transport key.
+
+inputs:
+  source_target:
+    description: 'Inventory target name of the source (used for logging + work-dir naming).'
+    required: true
+  app_name:
+    description: 'App name (e.g. innoservice). Must match ^[a-zA-Z0-9_-]+$.'
+    required: true
+  source_env:
+    description: 'Source environment label (e.g. production). Picks the running compose project on the source host.'
+    required: true
+  snapshot_id:
+    description: 'Restic snapshot ID, or "latest".'
+    required: false
+    default: 'latest'
+  ssh_host:
+    description: 'Source host SSH address.'
+    required: true
+  ssh_user:
+    description: 'Source host SSH user.'
+    required: true
+  ssh_private_key:
+    description: 'Source host SSH private key (PEM contents).'
+    required: true
+  restic_repo_b2:
+    description: 'Restic B2 repository URL for the source.'
+    required: true
+  restic_password:
+    description: 'Restic encryption password for the source repo.'
+    required: true
+  b2_key_id:
+    description: 'B2 key ID for the source repo.'
+    required: true
+  b2_app_key:
+    description: 'B2 application key for the source repo.'
+    required: true
+  ops_scripts_path:
+    description: 'Local path containing webapp-ops-scripts checkout (must contain restore.py).'
+    required: false
+    default: 'ops-scripts'
+  transport_key:
+    description: 'Pre-shared transport key (org/repo secret). Used together with the run identifier to derive the symmetric encryption passphrase. The matching dest-side composite must receive the same key.'
+    required: true
+  artifact_retention_days:
+    description: 'Retention for the encrypted handoff artifact. Default 1 day.'
+    required: false
+    default: '1'
+
+outputs:
+  artifact_name:
+    description: 'Name of the uploaded GitHub Artifact carrying the encrypted dump.'
+    value: ${{ steps.compute_names.outputs.artifact_name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_SOURCE_TARGET: ${{ inputs.source_target }}
+        INPUT_APP_NAME: ${{ inputs.app_name }}
+        INPUT_SOURCE_ENV: ${{ inputs.source_env }}
+        INPUT_SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        TRANSPORT_KEY: ${{ inputs.transport_key }}
+      run: |
+        set -euo pipefail
+        required_vars=(SSH_PRIVATE_KEY RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY INPUT_SSH_HOST INPUT_SSH_USER INPUT_APP_NAME INPUT_SOURCE_ENV INPUT_SOURCE_TARGET INPUT_SNAPSHOT_ID TRANSPORT_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}'."
+            exit 1
+          fi
+        done
+
+        printf '%s' "$INPUT_SOURCE_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'source_target' input"; exit 1; }
+        printf '%s' "$INPUT_APP_NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'app_name' input"; exit 1; }
+        printf '%s' "$INPUT_SOURCE_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'source_env' input"; exit 1; }
+        printf '%s' "$INPUT_SNAPSHOT_ID" | grep -qE '^(latest|[a-zA-Z0-9_-]+)$' || { echo "❌ Invalid 'snapshot_id' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 🧮 Compute work-dir and artifact name
+      id: compute_names
+      shell: bash
+      env:
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        APP_NAME: ${{ inputs.app_name }}
+        SOURCE_TARGET: ${{ inputs.source_target }}
+      run: |
+        set -euo pipefail
+        WORK_TAG="restore-export-${RUN_ID}-${RUN_ATTEMPT}-${APP_NAME}"
+        ARTIFACT_NAME="xrestore-${RUN_ID}-${RUN_ATTEMPT}-${SOURCE_TARGET}-${APP_NAME}"
+        echo "work_tag=${WORK_TAG}" >> "$GITHUB_OUTPUT"
+        echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+    - name: 🔐 Derive run-scoped passphrase from transport key
+      shell: bash
+      env:
+        TRANSPORT_KEY: ${{ inputs.transport_key }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        # Deterministic derivation: same key + run_id + attempt yield same passphrase
+        # on both sides of the handoff. Never persisted to outputs/API.
+        PASSPHRASE="$(printf '%s:%s:%s' "$TRANSPORT_KEY" "$RUN_ID" "$RUN_ATTEMPT" | sha256sum | awk '{print $1}')"
+        echo "::add-mask::${PASSPHRASE}"
+        echo "PASSPHRASE=${PASSPHRASE}" >> "$GITHUB_ENV"
+
+    - name: 🔑 Write SSH key
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_xrestore_src
+        chmod 600 ~/.ssh/id_xrestore_src
+
+    - name: ⚙️ Add known hosts
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.ssh
+        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+    - name: 📂 Sync ops scripts to source host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -d "${OPS_SCRIPTS_PATH}" ]; then
+          echo "❌ ops_scripts_path '${OPS_SCRIPTS_PATH}' not found."
+          exit 1
+        fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/restore.py" ]; then
+          echo "❌ ${OPS_SCRIPTS_PATH}/restore.py missing — webapp-ops-scripts checkout failed?"
+          exit 1
+        fi
+
+        ssh -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "mkdir -p /srv/infrastructure/ops-scripts"
+        scp -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes \
+          "${OPS_SCRIPTS_PATH}/restore.py" \
+          "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/restore.py"
+
+    - name: 💾 Run restore.py --mode dump-only on source host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        APP_NAME: ${{ inputs.app_name }}
+        SOURCE_ENV: ${{ inputs.source_env }}
+        SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPOSITORY=$(printf '%q' "$RESTIC_REPO_B2") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           AWS_ACCESS_KEY_ID=$(printf '%q' "$B2_KEY_ID") \
+           AWS_SECRET_ACCESS_KEY=$(printf '%q' "$B2_APP_KEY") \
+           APP_NAME=$(printf '%q' "$APP_NAME") \
+           SOURCE_ENV=$(printf '%q' "$SOURCE_ENV") \
+           SNAPSHOT_ID=$(printf '%q' "$SNAPSHOT_ID") \
+           WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        export PATH=$PATH:/usr/local/bin
+        OUT_DIR="/tmp/${WORK_TAG}"
+        rm -rf "$OUT_DIR"
+        mkdir -p "$OUT_DIR"
+        chmod 700 "$OUT_DIR"
+        python3 /srv/infrastructure/ops-scripts/restore.py \
+          --mode dump-only \
+          --app "$APP_NAME" \
+          --source-env "$SOURCE_ENV" \
+          --snapshot "$SNAPSHOT_ID" \
+          --output-dir "$OUT_DIR"
+        ls -la "$OUT_DIR"
+        EOF
+
+    - name: 🔒 Tar + encrypt dump on source host
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+        PASSPHRASE: ${{ env.PASSPHRASE }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           ENC_PASS=$(printf '%q' "$PASSPHRASE") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        OUT_DIR="/tmp/${WORK_TAG}"
+        ENC_FILE="/tmp/${WORK_TAG}.tar.enc"
+        rm -f "$ENC_FILE"
+        # tar from OUT_DIR (members at root: dump.sql.gz, manifest.json), pipe through openssl.
+        # AES-256-CBC + PBKDF2 + salt — widely available, deterministic across openssl 1.1+/3.x.
+        tar -C "$OUT_DIR" -cf - dump.sql.gz manifest.json \
+          | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ENC_PASS -out "$ENC_FILE"
+        chmod 600 "$ENC_FILE"
+        ls -la "$ENC_FILE"
+        EOF
+
+    - name: ⬇️ Pull encrypted dump back to runner
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+      run: |
+        set -euo pipefail
+        mkdir -p ./xrestore-handoff
+        scp -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes \
+          "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}.tar.enc" \
+          "./xrestore-handoff/dump.tar.enc"
+        chmod 600 ./xrestore-handoff/dump.tar.enc
+        ls -la ./xrestore-handoff/
+
+    - name: 📤 Upload encrypted dump as artifact
+      uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+      with:
+        name: ${{ steps.compute_names.outputs.artifact_name }}
+        path: ./xrestore-handoff/dump.tar.enc
+        retention-days: ${{ inputs.artifact_retention_days }}
+        if-no-files-found: error
+
+    - name: 🧹 Cleanup source host
+      if: always()
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
+      run: |
+        set -euo pipefail
+        ssh -i ~/.ssh/id_xrestore_src -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           bash -s" <<'EOF' || true
+        set -euo pipefail
+        rm -rf "/tmp/${WORK_TAG}" "/tmp/${WORK_TAG}.tar.enc"
+        EOF
+        rm -f ~/.ssh/id_xrestore_src
+        rm -rf ./xrestore-handoff
