@@ -9,6 +9,13 @@ inputs:
     description: 'Target environment (production / staging)'
     required: false
     default: 'production'
+  compose_profiles:
+    description: >-
+      Docker Compose profile(s) to activate on the destination host. Must be in
+      the allowlist '^(main|staging)$'. Defaults to "main" for backward-compat
+      with callers that pre-date the profile refactor.
+    required: false
+    default: 'main'
   remote_path:
     description: 'Remote deployment path on the server'
     required: false
@@ -35,6 +42,7 @@ runs:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
         SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        INPUT_COMPOSE_PROFILES: ${{ inputs.compose_profiles }}
       run: |
         set -euo pipefail
         required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
@@ -44,6 +52,10 @@ runs:
             exit 1
           fi
         done
+        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging)$' || {
+          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: main, staging)"
+          exit 1
+        }
 
     - name: 🔑 Write SSH key
       shell: bash
@@ -141,6 +153,9 @@ runs:
         if [ ! -f acme.json ]; then touch acme.json; chmod 600 acme.json; fi
         $DOCKER network inspect traefik_proxy >/dev/null 2>&1 || $DOCKER network create traefik_proxy
 
-        echo "🚀 Starting stack..."
+        # COMPOSE_PROFILES set INSIDE the SSH session so docker compose sees it.
+        # Value is regex-validated upstream; safe to template-inline.
+        export COMPOSE_PROFILES="${{ inputs.compose_profiles }}"
+        echo "🚀 Starting stack with COMPOSE_PROFILES=${COMPOSE_PROFILES}..."
         $DOCKER compose --env-file .env up -d --remove-orphans
         EOF
