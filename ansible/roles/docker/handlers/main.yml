@@ -1,0 +1,7 @@
+---
+- name: Restart docker
+  become: true
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  when: docker_restart_on_daemon_change | bool
