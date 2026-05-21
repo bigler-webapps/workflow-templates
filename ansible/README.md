@@ -14,6 +14,7 @@ to the Ubuntu archive.
 | `deploy_user` | Create the `deploy` user, sudoers entry for maintenance, SSH `authorized_keys` |
 | `ufw` | UFW default policies and a configurable list of allowed ports (default: SSH only) |
 | `fail2ban` | fail2ban with a default sshd jail |
+| `tailscale` | Tailscale install from the official apt repository plus idempotent `tailscale up` with pre-authorized key |
 
 Each role wraps its tasks in a `become: true` block. Consumers do not need
 to set `become` at the play level — the roles request privilege escalation
@@ -21,7 +22,8 @@ themselves.
 
 Ordering matters: `docker` must run before `deploy_user`, because the
 `deploy` user is added to the `docker` group which the Docker installation
-creates.
+creates. The `tailscale` role is independent of the others and may run at
+any point in the play.
 
 ## Differences vs the legacy `provision-server` composite action
 

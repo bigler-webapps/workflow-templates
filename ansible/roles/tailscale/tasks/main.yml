@@ -1,0 +1,113 @@
+---
+- name: Install Tailscale (requires root)
+  become: true
+  block:
+    - name: Ensure Tailscale keyring directory exists
+      ansible.builtin.file:
+        path: "{{ tailscale_apt_keyring_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Tailscale GPG key
+      ansible.builtin.get_url:
+        url: "{{ tailscale_apt_repo_url }}/{{ ansible_distribution_release }}.noarmor.gpg"
+        dest: "{{ tailscale_apt_keyring_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+
+    - name: Add Tailscale apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by={{ tailscale_apt_keyring_path }}]
+          {{ tailscale_apt_repo_url }}
+          {{ ansible_distribution_release }} main
+        filename: "{{ tailscale_apt_repo_filename }}"
+        state: present
+        update_cache: true
+
+    # update_cache here defends against stale apt caches when this role
+    # runs stand-alone (without the base role having refreshed caches).
+    - name: Install Tailscale
+      ansible.builtin.apt:
+        name: tailscale
+        state: present
+        update_cache: true
+
+    - name: Ensure tailscaled service started and enabled
+      ansible.builtin.systemd:
+        name: tailscaled
+        state: started
+        enabled: true
+
+    # Idempotency: skip `tailscale up` when the daemon is already
+    # `Running`. CAVEAT: this does not detect declared-vs-live drift for
+    # tags, hostname, or routes — set tailscale_force_up=true (one run)
+    # after changing those vars to force a re-up. See defaults.
+    - name: Check current Tailscale backend state
+      ansible.builtin.command: tailscale status --json
+      register: _tailscale_status
+      changed_when: false
+      failed_when: false
+
+    - name: Parse Tailscale backend state
+      ansible.builtin.set_fact:
+        _tailscale_backend_state: >-
+          {{ (_tailscale_status.stdout | from_json).BackendState
+             if (_tailscale_status.rc == 0 and (_tailscale_status.stdout | length) > 0)
+             else 'NoState' }}
+
+    # SECURITY NOTE: argv carries the auth-key. `no_log: true` suppresses
+    # standard task output, but third-party callback plugins (ARA,
+    # custom log shippers) may capture argv from internal task data
+    # before no_log applies. Vet new callbacks for this exposure.
+    #
+    # `--reset` ensures the live flag set exactly matches the declared
+    # variables — no left-over flags from a previous `tailscale up`.
+    - name: Bring Tailscale up
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['tailscale', 'up', '--reset',
+             '--authkey=' ~ tailscale_authkey,
+             '--hostname=' ~ tailscale_hostname,
+             '--ssh=' ~ (tailscale_ssh | string | lower),
+             '--accept-routes=' ~ (tailscale_accept_routes | string | lower)]
+            + (['--advertise-tags=' ~ (tailscale_advertise_tags | join(','))] if tailscale_advertise_tags else [])
+            + (['--advertise-routes=' ~ (tailscale_advertise_routes | join(','))] if tailscale_advertise_routes else [])
+          }}
+      when:
+        - tailscale_authkey | length > 0
+        - (_tailscale_backend_state != 'Running') or (tailscale_force_up | bool)
+      no_log: true
+      changed_when: true
+
+    - name: Re-check Tailscale state after up
+      ansible.builtin.command: tailscale status --json
+      register: _tailscale_status_post
+      changed_when: false
+      failed_when: false
+      when: tailscale_authkey | length > 0
+
+    - name: Assert Tailscale daemon responded with valid JSON
+      ansible.builtin.assert:
+        that:
+          - _tailscale_status_post.rc == 0
+          - (_tailscale_status_post.stdout | length) > 0
+        fail_msg: >-
+          Tailscale daemon did not respond to status query after up
+          (rc={{ _tailscale_status_post.rc }}).
+      when: tailscale_authkey | length > 0
+
+    - name: Assert Tailscale BackendState is Running
+      ansible.builtin.assert:
+        that:
+          - (_tailscale_status_post.stdout | from_json).BackendState == 'Running'
+        fail_msg: >-
+          Tailscale BackendState is
+          {{ (_tailscale_status_post.stdout | from_json).BackendState }},
+          expected Running.
+      when: tailscale_authkey | length > 0

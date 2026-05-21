@@ -1,6 +1,6 @@
 namespace: biglerconsult
 name: infra
-version: 0.1.0
+version: 0.2.0
 readme: README.md
 authors:
   - Micha Bigler <micha@bigler-consult.ch>
@@ -15,6 +15,8 @@ tags:
   - docker
   - server
   - provisioning
+  - vpn
+  - tailscale
 repository: https://github.com/bigler-webapps/workflow-templates
 issues: https://github.com/bigler-webapps/workflow-templates/issues
 dependencies:
