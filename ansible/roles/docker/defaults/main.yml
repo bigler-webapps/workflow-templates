@@ -13,3 +13,41 @@ docker_packages:
 
 docker_service_enabled: true
 docker_service_state: started
+
+# Options written to /etc/docker/daemon.json verbatim (rendered via
+# `to_nice_json`). The default disables Docker's userland-proxy because
+# the proxy SNATs ingress traffic to the docker bridge gateway (e.g.
+# 172.18.0.1), which breaks source-IP-based middleware decisions like
+# Traefik's IPAllowList. With it off, the kernel iptables DNAT path
+# preserves the real client IP all the way to the published container.
+#
+# ⚠️  FULL-REPLACEMENT SEMANTICS — NOT MERGE
+# Setting `docker_daemon_options` in group_vars / host_vars REPLACES the
+# entire dict. If you want to add an option (e.g. `log-driver:
+# json-file`) you MUST repeat `userland-proxy: false`, otherwise the
+# default is silently dropped and the SNAT bug returns on the next
+# playbook run. Ansible's `hash_behaviour` is `replace` by default in
+# this collection.
+#
+# Correct override pattern in a consumer group_vars file:
+#   docker_daemon_options:
+#     userland-proxy: false
+#     log-driver: json-file
+#
+# Incorrect (silently re-enables userland-proxy):
+#   docker_daemon_options:
+#     log-driver: json-file
+docker_daemon_options:
+  userland-proxy: false
+
+# Whether the handler restarts docker when daemon.json changes.
+#
+# When daemon.json is FIRST created on a host (file did not exist),
+# the handler fires regardless of this variable — the template task's
+# notify always fires on `changed`. This flag therefore only suppresses
+# restarts on SUBSEQUENT runs when the file already exists and gets
+# updated. Set to false if you want to control the restart manually
+# (e.g. coordinate with a maintenance window).
+#
+# Restarting docker briefly stops all running containers on the host.
+docker_restart_on_daemon_change: true

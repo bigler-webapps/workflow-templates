@@ -10,7 +10,7 @@ to the Ubuntu archive.
 | Role | Purpose |
 |---|---|
 | `base` | apt update/upgrade, common packages, kernel sysctl tuning for high-container-density hosts |
-| `docker` | Docker CE + compose plugin from the official Docker apt repository |
+| `docker` | Docker CE + compose plugin from the official Docker apt repository; renders `/etc/docker/daemon.json` (default `userland-proxy: false` to preserve real source IPs through DNAT) |
 | `deploy_user` | Create the `deploy` user, sudoers entry for maintenance, SSH `authorized_keys` |
 | `ufw` | UFW default policies and a configurable list of allowed ports (default: SSH only) |
 | `fail2ban` | fail2ban with a default sshd jail |
@@ -45,6 +45,15 @@ behavior changes:
   installed it as part of the base package set. Restic is backup-tooling
   tightly coupled to the webapp-management tenant's backup layout and
   belongs in a tenant-specific role, not in a reusable base collection.
+
+## Notable role variables
+
+### `docker`
+
+| Variable | Default | Notes |
+|---|---|---|
+| `docker_daemon_options` | `{userland-proxy: false}` | Rendered verbatim into `/etc/docker/daemon.json`. **Full replacement on override — repeat all desired keys.** See defaults file. |
+| `docker_restart_on_daemon_change` | `true` | If false, suppresses the auto-restart on subsequent runs when daemon.json content changes. The first time the file is created the restart fires regardless. |
 
 ## Consumption
 
