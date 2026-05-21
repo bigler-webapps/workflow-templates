@@ -1,0 +1,53 @@
+---
+# REQUIRED — override per host. Pre-authorized Tailscale auth-key
+# (format `tskey-auth-...`). When empty, the role installs Tailscale and
+# leaves it disconnected; this is useful for break-glass cases but means
+# the host will not show up in the tailnet.
+tailscale_authkey: ""
+
+# Hostname Tailscale registers under in the tailnet (and MagicDNS).
+# Defaults to the inventory hostname.
+tailscale_hostname: "{{ inventory_hostname }}"
+
+# Tags to advertise on this node. Must already be declared in the tailnet
+# ACL `tagOwners`. Empty list = no tags.
+tailscale_advertise_tags: []
+
+# Tailscale SSH (cert-based, separate from system sshd).
+# We default OFF — system SSH (key-based via authorized_keys) stays the
+# only inbound SSH path; the Tailscale layer is L3 reachability only.
+tailscale_ssh: false
+
+# Accept routes advertised by other nodes (subnet routers).
+# Default false for plain hosts.
+tailscale_accept_routes: false
+
+# Advertise subnet routes (this host as subnet router).
+# Empty list = no subnet advertisement.
+tailscale_advertise_routes: []
+
+# Force re-running `tailscale up` even when the daemon is already
+# `Running`. Set this to true for a single run after changing
+# tailscale_advertise_tags / tailscale_hostname / tailscale_ssh /
+# tailscale_accept_routes / tailscale_advertise_routes on an
+# already-connected host — the role does NOT auto-detect declared-vs-live
+# drift, so without this flag a changed variable does not converge.
+# When the role brings Tailscale up it always passes `--reset` so the
+# applied flags exactly match the declared vars, with no left-over state
+# from previous invocations.
+tailscale_force_up: false
+
+# Apt repository. Tailscale publishes per-codename `.noarmor.gpg`
+# (keyring) and `.tailscale-keyring.list` (sources) under this base URL.
+tailscale_apt_repo_url: "https://pkgs.tailscale.com/stable/ubuntu"
+tailscale_apt_keyring_path: "/usr/share/keyrings/tailscale-archive-keyring.gpg"
+tailscale_apt_repo_filename: "tailscale"
+
+# OPERATIONAL NOTE — Ghost nodes:
+# Tailscale's reusable, pre-authorized auth-keys register a NEW node each
+# time `tailscale up --authkey` runs on a host with a different
+# machine-key (e.g. after a host wipe / fresh provision). The old node
+# remains in the tailnet as an expired ghost until an admin removes it
+# via the admin console. For long-lived servers this rarely matters;
+# for hosts that are frequently re-provisioned, plan to clean up the
+# tailnet periodically.
