@@ -149,7 +149,10 @@ runs:
           stage)      ALIAS="staging" ;;
           *)          ALIAS="$SOURCE_ENV" ;;
         esac
-        TS_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z'
+        # backup.py historically used '%H:%M:%S' for the timestamp and was later
+        # changed to '%H%M%S' (no colons). Accept both forms so the action works
+        # against snapshots produced by either generation of the backup script.
+        TS_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:?[0-9]{2}:?[0-9]{2}Z'
         DUMP_RE="/${APP_NAME}_(${SOURCE_ENV}|${ALIAS})[-_].*_${TS_RE}\\.sql\\.gz\$"
         echo "regex: $DUMP_RE"
 
@@ -158,6 +161,8 @@ runs:
           "/srv/backups/db-dumps/${APP_NAME}_${ALIAS}-db-1_${APP_NAME}_2025-01-15T020000Z.sql.gz"
           "/srv/backups/db-dumps/${APP_NAME}_${SOURCE_ENV}_db_${APP_NAME}_2025-01-15T020000Z.sql.gz"
           "/srv/backups/db-dumps/${APP_NAME}_${ALIAS}_db_${APP_NAME}_2025-01-15T020000Z.sql.gz"
+          "/srv/backups/db-dumps/${APP_NAME}_${SOURCE_ENV}_db_${APP_NAME}-db_2025-11-20T22:06:07Z.sql.gz"
+          "/srv/backups/db-dumps/${APP_NAME}_${ALIAS}_db_${APP_NAME}-db_2025-11-20T22:06:07Z.sql.gz"
         )
         FIXTURES_NEG=(
           "/srv/backups/db-dumps/other_${SOURCE_ENV}-db-1_other_2025-01-15T020000Z.sql.gz"
@@ -214,7 +219,8 @@ runs:
           stage)      ALIAS="staging" ;;
           *)          ALIAS="$SOURCE_ENV" ;;
         esac
-        TS_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z'
+        # Accept both 'T22:06:07Z' (legacy backup.py) and 'T220607Z' (current).
+        TS_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:?[0-9]{2}:?[0-9]{2}Z'
         DUMP_RE="/${APP_NAME}_(${SOURCE_ENV}|${ALIAS})[-_].*_${TS_RE}\\.sql\\.gz\$"
 
         ALL_SQL_GZ="$(restic ls "$SNAP" | grep -E '\.sql\.gz$' || true)"
