@@ -16,10 +16,13 @@ name: Cross-server restore
 #   • pinning a specific SHA of this workflow
 #
 # Internal pinning:
-#   Composite actions are referenced by absolute `org/repo/path@SHA` to avoid
-#   the reusable-workflow trap where `./` paths resolve against the CALLER's
-#   checkout, and where `github.workflow_sha` returns the CALLER's commit
-#   instead of this workflow's. Bump the SHA below when a composite changes.
+#   Both jobs `actions/checkout` workflow-templates at a literal SHA pin and
+#   invoke composites via `./.github/actions/...`. Reason: when the composite
+#   is referenced via cross-org `uses: org/repo/path@SHA`, the caller's
+#   env-scoped secrets do NOT flow into the composite's `with:` evaluation
+#   context, so RESTIC_* / B2_* / SSH_* would resolve to empty strings.
+#   Loading composites locally after checkout keeps env-secrets in scope.
+#   Bump the `ref:` in the checkout steps below when a composite changes.
 
 on:
   workflow_call:
@@ -109,11 +112,26 @@ jobs:
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
     steps:
-      # No checkout: restore-source-export is loaded from workflow-templates@SHA
-      # below, and it pulls the restic snapshot from B2 directly on the runner.
-      # Bump @SHA when the composite changes.
+      # Cross-org reusable-workflow gotcha: when the composite is referenced as
+      # `uses: bigler-webapps/workflow-templates/.github/actions/...@SHA` and
+      # this reusable is called from a different account (e.g. MichaBigler/*),
+      # the caller's environment-scoped secrets do NOT flow into the composite
+      # call's `with:` evaluation context — they resolve to empty strings.
+      # Checking out workflow-templates and invoking the composite via a
+      # relative `./.github/actions/...` path lets env-secrets resolve from
+      # the job's `environment:` clause as expected.
+      #
+      # `ref:` is pinned to a literal workflow-templates SHA. Bump deliberately
+      # when a composite action changes (and bump this workflow's own SHA + the
+      # caller pin afterwards).
+      - name: Checkout workflow-templates (for composite actions)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: 7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+
       - id: export
-        uses: bigler-webapps/workflow-templates/.github/actions/restore-source-export@7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+        uses: ./.github/actions/restore-source-export
         with:
           source_target: ${{ inputs.source_target }}
           app_name: ${{ inputs.app_name }}
@@ -130,10 +148,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.dest_target }}
     steps:
-      # restore-dest-import (composite, loaded from workflow-templates@SHA below)
-      # still needs restore.py from webapp-ops-scripts on the runner so it can
-      # scp it to the dest host. Workflow-templates itself is NOT checked out;
-      # the composite is loaded via absolute org/repo/path@SHA reference.
+      # See source_export comment: composites must be loaded via local
+      # `./.github/actions/...` after an explicit workflow-templates checkout
+      # so env-scoped secrets (SSH_*) resolve.
+      - name: Checkout workflow-templates (for composite actions)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: 7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -141,7 +164,7 @@ jobs:
           ref: ${{ inputs.ops_scripts_ref }}
           path: ops-scripts
 
-      - uses: bigler-webapps/workflow-templates/.github/actions/restore-dest-import@7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+      - uses: ./.github/actions/restore-dest-import
         with:
           dest_target: ${{ inputs.dest_target }}
           app_name: ${{ inputs.app_name }}
