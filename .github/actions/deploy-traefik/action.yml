@@ -156,6 +156,16 @@ runs:
         # COMPOSE_PROFILES set INSIDE the SSH session so docker compose sees it.
         # Value is regex-validated upstream; safe to template-inline.
         export COMPOSE_PROFILES="${{ inputs.compose_profiles }}"
+
+        # Defensive `down` vor `up`: räumt orphan containers aus failed
+        # --force-recreate-Versuchen ab (Docker hinterlässt dabei "<hash>_<name>"
+        # umbenannte Container die compose nicht mehr trackt -> beim nächsten
+        # Recreate Name-Konflikt). `down --remove-orphans` killt sie sauber.
+        # Brief downtime ist akzeptabel weil --force-recreate ohnehin Container
+        # neu startet.
+        echo "🧹 Bringing down current stack (cleanup orphans)..."
+        $DOCKER compose --env-file .env down --remove-orphans || true
+
         echo "🚀 Starting stack with COMPOSE_PROFILES=${COMPOSE_PROFILES}..."
         $DOCKER compose --env-file .env up -d --remove-orphans
         EOF
