@@ -14,13 +14,52 @@ tag, not `@main`. The current stable tag is documented below.
 
 ### Planned for v2.0.0
 
-Tailnet-aware CI auth: composite actions will require
-`tailscale/github-action` before SSH steps so that consumers can close
-public SSH (port 22) and route CI access exclusively through the tailnet.
+Once all composite actions that SSH have shipped opt-in Tailnet support
+on the v1.x line, v2.0.0 will **remove the public-IP SSH fallback** and
+require Tailnet-only operation. That removal is the breaking change.
 
-This will be a **breaking change**. Callers will need to provide a
-Tailscale OAuth client and grant `tag:ci-deploy` (or similar) in the
-tailnet ACL before they can upgrade.
+Consumers who want to be ready for v2: pin to `@v1.x` today, set
+`ts_oauth_client_id` + `ts_oauth_secret` on every caller workflow, point
+`ssh_host` at the Tailnet hostname instead of the public IP. Then the
+v2 cutover is a no-op for behavior, only a tag bump.
+
+---
+
+## [1.1.0] - 2026-05-23
+
+### Added
+
+`janitor` composite action gains three optional inputs that let the
+runner join the tailnet ephemerally via OIDC before SSHing into the
+target:
+
+- `ts_oauth_client_id` — Tailscale OAuth client ID
+- `ts_oauth_secret` — Tailscale OAuth client secret
+- `ts_tag` — tailnet tag for the ephemeral node (default `tag:ci-deploy`)
+
+When both `ts_oauth_client_id` and `ts_oauth_secret` are provided, the
+action runs `tailscale/github-action@v3` before any SSH step. The caller
+is then expected to pass a Tailnet hostname (or IP) as `ssh_host`
+instead of a public IP. When the two inputs are empty (the default),
+the action falls back to the previous public-IP SSH path unchanged —
+**backwards-compatible**, no migration required for current callers.
+
+This is the first composite action to support the Tailnet path. The
+remaining SSH-using actions (`backup`, `deploy-app`, `deploy-traefik`,
+`maintenance`, `provision-server`, `restore`, `restore-cross-server`,
+`sync-ssh-access`, `sync-kuma-notifications`, `register-kuma-monitors`,
+`update-server`) will gain the same opt-in inputs in subsequent v1.x
+releases.
+
+### Notes
+
+- `tailscale/github-action@v3` is pinned to the floating tag with a
+  `# TODO S33: SHA-pin via Renovate` comment, consistent with the
+  existing pattern for other third-party actions in this repo.
+- Pre-requisites for callers wanting to use the Tailnet path: a
+  Tailscale OAuth client with `Auth Keys: Write` scope restricted to
+  `tag:ci-deploy`, and a tailnet ACL that authorises `tag:ci-deploy`
+  to reach the server tags on port 22.
 
 ---
 
