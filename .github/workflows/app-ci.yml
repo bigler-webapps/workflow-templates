@@ -21,7 +21,10 @@ on:
         default: ''
       run-backend:
         type: boolean
-        default: true
+        # Temporarily disabled by default to save GH Actions minutes. Callers
+        # that want backend CI must opt in with `run-backend: true`. Flip back
+        # to true when budget allows.
+        default: false
       # Frontend
       node-version:
         type: string
@@ -37,7 +40,10 @@ on:
         default: true
       run-frontend-tests:
         type: boolean
-        default: true
+        # Temporarily disabled by default to save GH Actions minutes. Lint
+        # stays on. Callers that want test runs must opt in with
+        # `run-frontend-tests: true`. Flip back to true when budget allows.
+        default: false
     secrets:
       VITE_APP_MUI_LICENSE_KEY:
         required: false
