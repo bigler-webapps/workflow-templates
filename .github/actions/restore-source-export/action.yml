@@ -201,7 +201,11 @@ runs:
         echo "::add-mask::${RESTIC_REPOSITORY}"
 
         if [ "$SNAPSHOT_INPUT" = "latest" ]; then
-          SNAP="$(restic snapshots --latest 1 --json | jq -r '.[0].id // empty')"
+          # `restic snapshots --latest 1` returns the latest snapshot PER (host, paths)
+          # tuple — when an old server identity is still in the repo, the first entry
+          # may be a stale snapshot. Sort all snapshots by .time and pick the truly
+          # newest one.
+          SNAP="$(restic snapshots --json | jq -r 'sort_by(.time) | last | .id // empty')"
         else
           SNAP="$(restic snapshots "$SNAPSHOT_INPUT" --json | jq -r '.[0].id // empty')"
         fi
