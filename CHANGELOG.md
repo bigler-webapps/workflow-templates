@@ -25,6 +25,19 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.6.0] - 2026-05-23
+
+### Added
+
+`backup` composite action gains the same three optional Tailnet inputs
+(`ts_oauth_client_id`, `ts_oauth_secret`, `ts_tag`). When provided, the
+runner joins the tailnet ephemerally before the rsync + SSH-driven
+restic backup, verify, and (optional) staging-sync steps. The
+backup.py / verify_backup.py / restore.py invocations on the server
+are unchanged — only the network path differs. Backwards-compatible.
+
+---
+
 ## [1.5.0] - 2026-05-23
 
 ### Added
