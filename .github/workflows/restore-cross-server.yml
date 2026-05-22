@@ -6,12 +6,20 @@ name: Cross-server restore
 #
 # Flow:
 #   Job A (env=source_target) → restore-source-export → encrypted artifact
+#                               (runs restic against B2 from the runner; no SSH)
 #   Job B (env=dest_target)   → restore-dest-import   → DB import on dest host
+#                               (SSH to dest host + restore.py --mode import-only)
 #
 # The caller is responsible for:
 #   • inventory-level validation (source_target != dest_target, role checks, …)
 #   • DESTROY-token enforcement when dest_subtarget=production
 #   • pinning a specific SHA of this workflow
+#
+# Internal pinning:
+#   Composite actions are referenced by absolute `org/repo/path@SHA` to avoid
+#   the reusable-workflow trap where `./` paths resolve against the CALLER's
+#   checkout, and where `github.workflow_sha` returns the CALLER's commit
+#   instead of this workflow's. Bump the SHA below when a composite changes.
 
 on:
   workflow_call:
@@ -29,7 +37,7 @@ on:
         type: string
         required: true
       source_env:
-        description: 'Source compose env label (e.g. production). Selects the running compose project on the source host.'
+        description: 'Source compose env label (e.g. production). Used to match the dump file in the source restic snapshot. Accepts aliases production↔prod, staging↔stage.'
         type: string
         required: true
       dest_subtarget:
@@ -53,7 +61,9 @@ on:
         default: ''
       ops_scripts_ref:
         description: >-
-          Ref/SHA of bigler-webapps/webapp-ops-scripts to use.
+          Ref/SHA of bigler-webapps/webapp-ops-scripts to use on the dest host
+          (drives restore.py --mode import-only). Source side no longer uses
+          ops-scripts (restic runs directly from the runner against B2).
           TODO (S33-analog): callers should pass a pinned commit SHA instead of the 'main' default
           so restore.py executions on prod hosts cannot silently change.
         type: string
@@ -99,51 +109,31 @@ jobs:
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
     steps:
-      # In a reusable workflow, local `./` action paths resolve against the
-      # CALLER's checkout, not workflow-templates'. Check out workflow-templates
-      # at the SAME commit that owns this workflow file (github.workflow_sha)
-      # to get the matching composite actions.
-      - name: Checkout workflow-templates (for composite actions)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          repository: bigler-webapps/workflow-templates
-          ref: ${{ github.workflow_sha }}
-
-      - name: Checkout webapp-ops-scripts
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          repository: bigler-webapps/webapp-ops-scripts
-          ref: ${{ inputs.ops_scripts_ref }}
-          path: ops-scripts
-
+      # No checkout: restore-source-export is loaded from workflow-templates@SHA
+      # below, and it pulls the restic snapshot from B2 directly on the runner.
+      # Bump @SHA when the composite changes.
       - id: export
-        uses: ./.github/actions/restore-source-export
+        uses: bigler-webapps/workflow-templates/.github/actions/restore-source-export@b72e1b1fa09abcac58dd1078e2cff84fa9222261
         with:
           source_target: ${{ inputs.source_target }}
           app_name: ${{ inputs.app_name }}
           source_env: ${{ inputs.source_env }}
           snapshot_id: ${{ inputs.snapshot_id }}
-          ssh_host: ${{ secrets.SSH_HOST }}
-          ssh_user: ${{ secrets.SSH_USER }}
-          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
           restic_repo_b2: ${{ secrets.RESTIC_REPO_B2 }}
           restic_password: ${{ secrets.RESTIC_PASSWORD }}
           b2_key_id: ${{ secrets.B2_KEY_ID }}
           b2_app_key: ${{ secrets.B2_APP_KEY }}
           transport_key: ${{ secrets.CROSS_SERVER_TRANSPORT_KEY }}
-          ops_scripts_path: ops-scripts
 
   dest_import:
     needs: source_export
     runs-on: ubuntu-latest
     environment: ${{ inputs.dest_target }}
     steps:
-      - name: Checkout workflow-templates (for composite actions)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          repository: bigler-webapps/workflow-templates
-          ref: ${{ github.workflow_sha }}
-
+      # restore-dest-import (composite, loaded from workflow-templates@SHA below)
+      # still needs restore.py from webapp-ops-scripts on the runner so it can
+      # scp it to the dest host. Workflow-templates itself is NOT checked out;
+      # the composite is loaded via absolute org/repo/path@SHA reference.
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -151,7 +141,7 @@ jobs:
           ref: ${{ inputs.ops_scripts_ref }}
           path: ops-scripts
 
-      - uses: ./.github/actions/restore-dest-import
+      - uses: bigler-webapps/workflow-templates/.github/actions/restore-dest-import@b72e1b1fa09abcac58dd1078e2cff84fa9222261
         with:
           dest_target: ${{ inputs.dest_target }}
           app_name: ${{ inputs.app_name }}
