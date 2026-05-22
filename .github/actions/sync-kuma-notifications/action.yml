@@ -33,10 +33,31 @@ inputs:
     description: 'Set "true" to delete Kuma notifications not present in the config file.'
     required: false
     default: 'false'
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before the SSH tunnel step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
+    required: false
+    default: ''
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
+    required: false
+    default: ''
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    required: false
+    default: 'tag:ci-deploy'
 
 runs:
   using: composite
   steps:
+    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
+      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
+
     - name: Setup Python
       uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
       with:

@@ -25,6 +25,42 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.5.0] - 2026-05-23
+
+### Added
+
+`sync-kuma-notifications` composite action gains the same three
+optional Tailnet inputs (`ts_oauth_client_id`, `ts_oauth_secret`,
+`ts_tag`). When provided, the runner joins the tailnet ephemerally
+before opening the SSH tunnel into the Kuma server. The port-forward
+mechanism is unchanged — `ssh -fNL` works identically over a tailnet
+hop. Backwards-compatible.
+
+---
+
+## [1.4.0] - 2026-05-23
+
+### Added
+
+`update-server` composite action gains the same three optional Tailnet
+inputs. The action uses `appleboy/ssh-action` for the actual remote
+execution, which connects to whatever host string is provided — so
+the path swap is transparent. Backwards-compatible.
+
+---
+
+## [1.3.0] - 2026-05-23
+
+### Added
+
+`sync-ssh-access` composite action gains the same three optional
+Tailnet inputs as janitor (v1.1.0) and maintenance (v1.2.0). The
+key-sync flow itself (`scp` + remote `bash` block) is unchanged; only
+the network path differs when the Tailnet inputs are provided.
+Backwards-compatible.
+
+---
+
 ## [1.2.0] - 2026-05-23
 
 ### Added
