@@ -113,7 +113,7 @@ jobs:
       # below, and it pulls the restic snapshot from B2 directly on the runner.
       # Bump @SHA when the composite changes.
       - id: export
-        uses: bigler-webapps/workflow-templates/.github/actions/restore-source-export@b72e1b1fa09abcac58dd1078e2cff84fa9222261
+        uses: bigler-webapps/workflow-templates/.github/actions/restore-source-export@7177b1a6d8e3feab98c320d422c7c4b22cb025f4
         with:
           source_target: ${{ inputs.source_target }}
           app_name: ${{ inputs.app_name }}
@@ -141,7 +141,7 @@ jobs:
           ref: ${{ inputs.ops_scripts_ref }}
           path: ops-scripts
 
-      - uses: bigler-webapps/workflow-templates/.github/actions/restore-dest-import@b72e1b1fa09abcac58dd1078e2cff84fa9222261
+      - uses: bigler-webapps/workflow-templates/.github/actions/restore-dest-import@7177b1a6d8e3feab98c320d422c7c4b22cb025f4
         with:
           dest_target: ${{ inputs.dest_target }}
           app_name: ${{ inputs.app_name }}
