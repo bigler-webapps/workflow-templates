@@ -99,8 +99,15 @@ jobs:
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
     steps:
+      # In a reusable workflow, local `./` action paths resolve against the
+      # CALLER's checkout, not workflow-templates'. Check out workflow-templates
+      # at the SAME commit that owns this workflow file (github.workflow_sha)
+      # to get the matching composite actions.
       - name: Checkout workflow-templates (for composite actions)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: ${{ github.workflow_sha }}
 
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -133,6 +140,9 @@ jobs:
     steps:
       - name: Checkout workflow-templates (for composite actions)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: ${{ github.workflow_sha }}
 
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
