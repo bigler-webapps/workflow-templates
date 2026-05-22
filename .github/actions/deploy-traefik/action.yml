@@ -157,14 +157,24 @@ runs:
         # Value is regex-validated upstream; safe to template-inline.
         export COMPOSE_PROFILES="${{ inputs.compose_profiles }}"
 
-        # Defensive `down` vor `up`: räumt orphan containers aus failed
-        # --force-recreate-Versuchen ab (Docker hinterlässt dabei "<hash>_<name>"
-        # umbenannte Container die compose nicht mehr trackt -> beim nächsten
-        # Recreate Name-Konflikt). `down --remove-orphans` killt sie sauber.
-        # Brief downtime ist akzeptabel weil --force-recreate ohnehin Container
-        # neu startet.
-        echo "🧹 Bringing down current stack (cleanup orphans)..."
-        $DOCKER compose --env-file .env down --remove-orphans || true
+        # `up -d --remove-orphans` is idempotent: it starts missing services,
+        # recreates only those whose compose config changed (image/env-file/
+        # labels/mounts), and removes orphan containers. Unchanged services
+        # (e.g. uptime-kuma on docs-only pushes) stay running untouched.
+        # A previous defensive `down` step was removed because it caused
+        # unrelated app deploys hitting Kuma to fail during the brief downtime
+        # window.
+        #
+        # Pre-up cleanup of stopped containers in THIS project's scope
+        # (running containers untouched). Catches residual hash-renamed
+        # orphans from any historical interrupted `--force-recreate` so the
+        # subsequent `up` doesn't hit name-conflict errors. Cheap on a healthy
+        # stack (nothing to remove).
+        COMPOSE_PROJECT_NAME=$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || true)
+        if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+          echo "🧹 Pruning stopped containers in project ${COMPOSE_PROJECT_NAME}..."
+          $DOCKER container prune -f --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" || true
+        fi
 
         echo "🚀 Starting stack with COMPOSE_PROFILES=${COMPOSE_PROFILES}..."
         $DOCKER compose --env-file .env up -d --remove-orphans
