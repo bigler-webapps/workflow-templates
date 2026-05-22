@@ -189,6 +189,11 @@ runs:
         SNAPSHOT_INPUT: ${{ inputs.snapshot_id }}
       run: |
         set -euo pipefail
+        # Defensively mask the B2 repo URL even though it flows from secrets.RESTIC_REPO_B2
+        # at the workflow level. GH propagates secret masks through composite inputs, but
+        # the docs only guarantee redaction for values explicitly passed through ::add-mask::.
+        # Belt-and-braces so the repo URL never lands in failure logs.
+        echo "::add-mask::${RESTIC_REPOSITORY}"
 
         if [ "$SNAPSHOT_INPUT" = "latest" ]; then
           SNAP="$(restic snapshots --latest 1 --json | jq -r '.[0].id // empty')"
@@ -196,7 +201,7 @@ runs:
           SNAP="$(restic snapshots "$SNAPSHOT_INPUT" --json | jq -r '.[0].id // empty')"
         fi
         if [ -z "$SNAP" ]; then
-          echo "❌ Snapshot '${SNAPSHOT_INPUT}' could not be resolved against ${RESTIC_REPOSITORY}."
+          echo "❌ Snapshot '${SNAPSHOT_INPUT}' could not be resolved against the configured B2 repo."
           exit 1
         fi
         echo "snapshot_id=${SNAP}" >> "$GITHUB_OUTPUT"
@@ -276,7 +281,6 @@ runs:
       shell: bash
       env:
         WORK_DIR: ${{ steps.workdir.outputs.work_dir }}
-        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
         ENC_PASS: ${{ env.PASSPHRASE }}
       run: |
         set -euo pipefail
@@ -316,4 +320,10 @@ runs:
         WORK_DIR: ${{ steps.workdir.outputs.work_dir }}
       run: |
         set -euo pipefail
-        rm -rf "$WORK_DIR"
+        # Guard: if the workdir step failed early, WORK_DIR may be empty.
+        # rm -rf "" silently no-ops on GNU coreutils, so be explicit.
+        if [ -n "${WORK_DIR:-}" ]; then
+          rm -rf "$WORK_DIR"
+        else
+          echo "ℹ️ WORK_DIR not set (workdir step likely failed) — nothing to clean."
+        fi
