@@ -26,6 +26,18 @@ inputs:
     description: 'JSON-array of substrings expected in running container names after reboot'
     required: false
     default: '[]'
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
+    required: false
+    default: ''
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
+    required: false
+    default: ''
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    required: false
+    default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
@@ -52,6 +64,15 @@ runs:
         printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+
+    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
+      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
 
     - name: 🔑 Write SSH key
       shell: bash

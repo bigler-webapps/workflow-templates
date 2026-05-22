@@ -25,6 +25,31 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.2.0] - 2026-05-23
+
+### Added
+
+`maintenance` composite action gains the same three optional Tailnet
+inputs as janitor (v1.1.0):
+
+- `ts_oauth_client_id`
+- `ts_oauth_secret`
+- `ts_tag` (default `tag:ci-deploy`)
+
+When provided, the runner joins the tailnet ephemerally before any SSH
+step, and `ssh_host` is expected to be a Tailnet hostname (or IP).
+When empty, behavior is unchanged — public-IP SSH continues to work.
+
+Reboot/post-reboot SSH-reconnect behaviour is unaffected: the
+ephemeral tailnet node stays up for the lifetime of the workflow job;
+when the target server's `tailscaled` comes back after reboot, the
+existing wait-for-host SSH loop reconnects via the tailnet route
+without any additional handling.
+
+Backwards-compatible. Existing callers see no change.
+
+---
+
 ## [1.1.0] - 2026-05-23
 
 ### Added
