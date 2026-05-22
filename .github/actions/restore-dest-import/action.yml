@@ -132,12 +132,13 @@ runs:
         mkdir -p ~/.ssh
         ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
-    - name: 📂 Sync ops scripts to dest host
+    - name: 📂 Ship restore.py to dest host work-dir
       shell: bash
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
         OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
+        WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
       run: |
         set -euo pipefail
 
@@ -150,11 +151,22 @@ runs:
           exit 1
         fi
 
+        # Stage restore.py inside the per-run work dir (mode 700, user-writable
+        # /tmp/<work_tag>/). Avoids needing root/sudo to write into
+        # /srv/infrastructure/ops-scripts/ on hosts where the deploy user is
+        # not privileged there (e.g. the staging host).
         ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
-          "mkdir -p /srv/infrastructure/ops-scripts"
+          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        WORK_DIR="/tmp/${WORK_TAG}"
+        rm -rf "$WORK_DIR"
+        mkdir -p "$WORK_DIR"
+        chmod 700 "$WORK_DIR"
+        EOF
         scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
           "${OPS_SCRIPTS_PATH}/restore.py" \
-          "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/restore.py"
+          "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/restore.py"
 
     - name: 📥 Download encrypted artifact
       uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
@@ -171,15 +183,8 @@ runs:
       run: |
         set -euo pipefail
         ls -la ./xrestore-handoff/
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
-          "WORK_TAG=$(printf '%q' "$WORK_TAG") \
-           bash -s" <<'EOF'
-        set -euo pipefail
-        WORK_DIR="/tmp/${WORK_TAG}"
-        rm -rf "$WORK_DIR"
-        mkdir -p "$WORK_DIR"
-        chmod 700 "$WORK_DIR"
-        EOF
+        # Work dir was already created and restore.py was staged by the prior
+        # "Ship restore.py" step. Just scp the encrypted dump alongside.
         scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
           ./xrestore-handoff/dump.tar.enc \
           "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/dump.tar.enc"
@@ -225,7 +230,7 @@ runs:
         set -euo pipefail
         export PATH=$PATH:/usr/local/bin
         WORK_DIR="/tmp/${WORK_TAG}"
-        python3 /srv/infrastructure/ops-scripts/restore.py \
+        python3 "${WORK_DIR}/restore.py" \
           --mode import-only \
           --app "$APP_NAME" \
           --target-env "$DEST_SUBTARGET" \
@@ -277,7 +282,15 @@ runs:
         RUN_ID: ${{ github.run_id }}
       run: |
         set -euo pipefail
-        ARTIFACT_ID="$(gh api -X GET "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id" 2>/dev/null | head -n1 || true)"
+        # Listing artifacts needs `actions: read` (default). Deleting needs
+        # `actions: write` — the caller job must declare it explicitly, otherwise
+        # this step degrades gracefully (artifact expires via retention).
+        if ! LIST_JSON="$(gh api -X GET "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" 2>&1)"; then
+          echo "⚠️ Failed to list artifacts (likely missing actions:read/write on GITHUB_TOKEN). Artifact will expire via retention."
+          echo "    API response: ${LIST_JSON}"
+          exit 0
+        fi
+        ARTIFACT_ID="$(printf '%s' "$LIST_JSON" | jq -r --arg name "$ARTIFACT_NAME" '.artifacts[] | select(.name==$name) | .id' | head -n1)"
         if [ -n "${ARTIFACT_ID:-}" ] && [ "$ARTIFACT_ID" != "null" ]; then
           echo "Deleting handoff artifact id=${ARTIFACT_ID} name=${ARTIFACT_NAME}"
           gh api -X DELETE "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}" || echo "⚠️ Artifact delete failed (will expire via retention)."
