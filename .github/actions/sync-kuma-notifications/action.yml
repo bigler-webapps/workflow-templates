@@ -44,7 +44,10 @@ runs:
 
     - name: Install kuma deps
       shell: bash
-      run: pip install --quiet "uptime-kuma-api==1.2.1" "PyYAML==6.0.2"
+      # uptime-kuma-api 1.3.0+ supports Kuma 2.x (Socket.IO v4 protocol).
+      # 1.2.1 was tested against Kuma 1.x and fails with "Connection reset by
+      # peer" during Socket.IO handshake against Kuma 2's server.
+      run: pip install --quiet "uptime-kuma-api>=1.3.0,<2.0" "PyYAML==6.0.2"
 
     - name: Configure SSH key
       shell: bash
