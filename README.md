@@ -2,6 +2,24 @@
 
 Shared composite actions for bigler-webapps infrastructure.
 
+## Pinning & Versioning
+
+Consumers should pin composite-action `uses:` references to a released
+tag, **not** `@main`. `main` tracks the latest state and may include
+breaking changes.
+
+```yaml
+- uses: bigler-webapps/workflow-templates/.github/actions/<action>@v1.0.0
+```
+
+The current stable tag is documented in [`CHANGELOG.md`](./CHANGELOG.md).
+
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
+
+- Major bumps (`v2.0.0`) signal breaking changes requiring caller updates
+- Minor bumps (`v1.1.0`) add features in a backwards-compatible way
+- Patch bumps (`v1.0.1`) are bug fixes only
+
 ## Usage
 
 Call any composite action from your infra repo's `.github/workflows/` job — always from a job with `runs-on:` + `environment:` + `steps:` (NOT from a `uses:`-only job, since `environment:` is incompatible with `uses:` at job level):
@@ -13,14 +31,14 @@ jobs:
     environment: main-prod
     steps:
       - uses: actions/checkout@v4
-      - uses: bigler-webapps/workflow-templates/.github/actions/backup@main
+      - uses: bigler-webapps/workflow-templates/.github/actions/backup@v1.0.0
         with:
           target: main-prod
           ssh_host: ${{ secrets.SSH_HOST }}
           # ... explicit secret inputs
 ```
 
-This pattern is required because reusable workflows (`uses: org/repo/.github/workflows/X.yml@main`) cannot access the caller's environment-level secrets when the caller can't set `environment:` (e.g., matrix-driven dispatch).
+This pattern is required because reusable workflows (`uses: org/repo/.github/workflows/X.yml@v1.0.0`) cannot access the caller's environment-level secrets when the caller can't set `environment:` (e.g., matrix-driven dispatch).
 
 ## Composite actions
 
