@@ -122,10 +122,101 @@ def sync_notifications(api, config_path, prune=False):
                 print(f"🗑️  deleted stale notification: {name}")
 
 
-def sync_monitors(api, config_path, prune=False):
-    with open(config_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-    specs = data.get("monitors", [])
+def monitors_from_project_yaml(project_yaml_path):
+    """Derive monitor specs from project.yaml.
+
+    Convention (no monitoring: section in project.yaml → all defaults):
+      <name_prefix>-frontend          → https://<primary-domain>
+      <name_prefix>-healthz           → https://<primary-domain><healthz_path>
+
+    name_prefix     defaults to project_name
+    healthz_path    defaults to /api/healthz
+    primary-domain  is environments.production.domains[0]
+
+    Overrides via optional `monitoring:` section in project.yaml:
+      monitoring:
+        name_prefix: jg-ferien        # use a different prefix than project_name
+        healthz_path: /healthz        # use a different healthz endpoint
+        defaults:                     # override monitor defaults
+          interval: 30
+          max_retries: 5
+        extra:                        # additional monitors beyond auto-generated
+          - name: youngrgamechangersbs
+            url: https://younggamechangersbs.ch
+        # Optional: skip the auto-generated entries entirely (e.g. if you want
+        # custom names that don't fit the prefix pattern).
+        skip_auto: false
+    """
+    with open(project_yaml_path, "r", encoding="utf-8") as fh:
+        pj = yaml.safe_load(fh) or {}
+
+    project_name = pj.get("project_name")
+    if not project_name:
+        raise ValueError(f"{project_yaml_path}: missing 'project_name'.")
+
+    monitoring = pj.get("monitoring") or {}
+    name_prefix = monitoring.get("name_prefix", project_name)
+    healthz_path = monitoring.get("healthz_path", "/api/healthz")
+    overrides = monitoring.get("defaults") or {}
+    extra = monitoring.get("extra") or []
+    skip_auto = bool(monitoring.get("skip_auto", False))
+
+    base = {
+        "type": "http",
+        "interval": 60,
+        "max_retries": 3,
+        "retry_interval": 60,
+    }
+    base.update(overrides)
+
+    specs = []
+    if not skip_auto:
+        envs = pj.get("environments") or {}
+        prod = envs.get("production") or {}
+        domains = prod.get("domains") or []
+        if not domains:
+            raise ValueError(
+                f"{project_yaml_path}: environments.production.domains is empty; "
+                "cannot derive auto-monitors. Set monitoring.skip_auto=true or "
+                "add at least one domain."
+            )
+        primary = domains[0]
+        specs.append({**base, "name": f"{name_prefix}-frontend", "url": f"https://{primary}"})
+        specs.append({**base, "name": f"{name_prefix}-healthz",  "url": f"https://{primary}{healthz_path}"})
+
+    for entry in extra:
+        merged = {**base, **entry}
+        if "url" not in merged or "name" not in merged:
+            raise ValueError(
+                f"{project_yaml_path}: monitoring.extra entry missing 'name' or 'url': {entry!r}"
+            )
+        specs.append(merged)
+
+    return specs
+
+
+def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
+    """Sync monitors. Source is either a monitor.yml or a project.yaml.
+
+    If config_path is given and exists → use legacy monitor.yml format.
+    Else if project_yaml_path is given → derive monitors from project.yaml.
+    Else → error.
+    """
+    if config_path and Path(config_path).exists():
+        with open(config_path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        specs = data.get("monitors", [])
+    elif project_yaml_path and Path(project_yaml_path).exists():
+        specs = monitors_from_project_yaml(project_yaml_path)
+        print(f"ℹ️  Derived {len(specs)} monitor spec(s) from {project_yaml_path}")
+    else:
+        print(
+            "ℹ️  No monitors config found "
+            f"(checked monitor.yml='{config_path}', project.yaml='{project_yaml_path}'); "
+            "nothing to do."
+        )
+        return
+
     if not specs:
         print("ℹ️  No monitors declared in config; nothing to do.")
         return
@@ -192,22 +283,38 @@ def main():
                     help="Delete Kuma notifications absent from the config")
 
     sm = sub.add_parser("monitors", help="Sync monitors")
-    sm.add_argument("--config", required=True, help="Path to monitor.yml")
+    sm.add_argument(
+        "--config",
+        required=False,
+        default="monitoring/monitor.yml",
+        help="Path to monitor.yml (legacy). If absent on disk, fall back to --project-yaml.",
+    )
+    sm.add_argument(
+        "--project-yaml",
+        required=False,
+        default="project.yaml",
+        help="Path to project.yaml. Used to derive monitors when --config is missing.",
+    )
     sm.add_argument("--prune", action="store_true",
                     help="Delete Kuma monitors absent from the config")
 
     args = parser.parse_args()
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"❌ Config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
 
     api = _login()
     try:
         if args.command == "notifications":
+            config_path = Path(args.config)
+            if not config_path.exists():
+                print(f"❌ Config file not found: {config_path}", file=sys.stderr)
+                sys.exit(1)
             sync_notifications(api, config_path, prune=args.prune)
         elif args.command == "monitors":
-            sync_monitors(api, config_path, prune=args.prune)
+            sync_monitors(
+                api,
+                config_path=args.config,
+                project_yaml_path=args.project_yaml,
+                prune=args.prune,
+            )
     finally:
         api.disconnect()
 

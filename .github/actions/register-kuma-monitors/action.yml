@@ -1,11 +1,24 @@
 name: 'Register Uptime Kuma Monitors'
-description: 'Reads a per-app YAML config and idempotently registers or updates monitors in Uptime Kuma. Notifications marked default:true (via sync-kuma-notifications) are auto-applied. Connects via SSH tunnel to the host (Kuma must be bound to 127.0.0.1:3001 there).'
+description: >-
+  Idempotently registers or updates monitors in Uptime Kuma from either a
+  per-app monitoring/monitor.yml (legacy) or project.yaml. Notifications marked
+  default:true (via sync-kuma-notifications) are auto-applied. Connects via
+  SSH tunnel to the host (Kuma must be bound to 127.0.0.1:3001 there).
+
+  Source-resolution: if `config_path` exists on disk, the action uses it
+  (legacy monitor.yml format). Otherwise it falls back to `project_yaml_path`
+  and derives monitors from `project.yaml` (see kuma_sync.monitors_from_project_yaml
+  for the convention and per-app overrides).
 
 inputs:
   config_path:
-    description: 'Path to monitor YAML (relative to repo root).'
+    description: 'Path to monitor YAML (legacy). If the file is missing on disk, the action falls back to project_yaml_path.'
     required: false
     default: 'monitoring/monitor.yml'
+  project_yaml_path:
+    description: 'Path to project.yaml used to derive monitors when config_path is absent.'
+    required: false
+    default: 'project.yaml'
   ssh_host:
     description: 'SSH host for tunnel into the Kuma server.'
     required: true
@@ -89,6 +102,7 @@ runs:
         python "${GITHUB_ACTION_PATH}/../../../scripts/kuma_sync.py" \
           monitors \
           --config "${{ inputs.config_path }}" \
+          --project-yaml "${{ inputs.project_yaml_path }}" \
           ${PRUNE_FLAG}
 
     - name: Close SSH tunnel
