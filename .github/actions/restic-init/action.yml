@@ -1,0 +1,86 @@
+name: 'Restic Init (B2)'
+description: >-
+  One-off initialisation of a Restic repository on Backblaze B2. Idempotent —
+  if the repo is already initialised, the action logs the current state and
+  exits successfully without writing anything.
+
+  Intended use: run once when bringing up a new server / dedicated backup
+  bucket. NOT wired into the backup workflow on purpose — silent auto-init
+  would mask misrouted-secret bugs (typoed RESTIC_REPO_B2 → restic happily
+  inits an empty repo at the wrong place → corruption invisible until
+  restore time). Keep this explicit.
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging). Must match ^[a-zA-Z0-9_-]+$.'
+    required: true
+  restic_repo_b2:
+    description: 'Restic B2 repository URL (e.g. s3:https://s3.<region>.backblazeb2.com/<bucket>/<path>).'
+    required: true
+  restic_password:
+    description: 'Restic encryption password for the new repo.'
+    required: true
+  b2_key_id:
+    description: 'B2 key ID with write access to the bucket/path.'
+    required: true
+  b2_app_key:
+    description: 'B2 application key paired with b2_key_id.'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+      run: |
+        set -euo pipefail
+        required_vars=(INPUT_TARGET RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}'."
+            exit 1
+          fi
+        done
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+
+    - name: 📦 Install restic + jq on runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends restic jq
+        echo "restic: $(restic version)"
+        echo "jq: $(jq --version)"
+
+    - name: 🚀 Idempotent restic init
+      shell: bash
+      env:
+        RESTIC_REPOSITORY: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.b2_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        # Defensively mask the B2 repo URL even though it flows from a secret
+        # at the workflow level — belt-and-braces against accidental log leak.
+        echo "::add-mask::${RESTIC_REPOSITORY}"
+
+        # Probe the repo with a lightweight read. `restic snapshots` exits 0
+        # if the repo exists and the credentials are correct, non-zero otherwise.
+        if restic snapshots --json >/dev/null 2>&1; then
+          SNAP_COUNT="$(restic snapshots --json | jq 'length')"
+          echo "ℹ️  Repo for target=${TARGET} already initialised — nothing to do."
+          echo "    Current snapshot count: ${SNAP_COUNT}"
+          exit 0
+        fi
+
+        echo "Initialising new restic repo for target=${TARGET}..."
+        restic init
+        echo "✅ Restic repo initialised. Run the backup workflow to populate it."
