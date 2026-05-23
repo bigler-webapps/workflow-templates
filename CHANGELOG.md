@@ -25,6 +25,40 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.9.0] - 2026-05-23
+
+### Added
+
+`deploy-traefik` composite action gains the same three optional Tailnet
+inputs (`ts_oauth_client_id`, `ts_oauth_secret`, `ts_tag`). When
+provided, the runner joins the tailnet ephemerally before rsync + SSH
+into the target server. The idempotent `up -d --remove-orphans` flow
+introduced in v1.7.0 is unaffected by the network-path swap.
+
+Last of the SSH-using composite actions to gain Tailnet support. After
+this release, the v1.x line is feature-complete on Tailnet opt-in
+across:
+
+- janitor (v1.1.0)
+- maintenance (v1.2.0)
+- sync-ssh-access (v1.3.0)
+- update-server (v1.4.0)
+- sync-kuma-notifications (v1.5.0)
+- backup (v1.6.0)
+- restore + restore-dest-import (v1.8.0)
+- deploy-traefik (v1.9.0)
+
+Not migrated (intentional):
+- restore-source-export — pulls restic directly from B2 on the runner,
+  no SSH
+- provision-server — bootstrap workflow, runs on a fresh host before
+  it joins the tailnet; the public-IP path stays in for break-glass
+
+Backwards-compatible. Callers without ts_oauth_* inputs keep public-IP
+SSH behavior.
+
+---
+
 ## [1.8.0] - 2026-05-23
 
 ### Added
