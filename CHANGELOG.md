@@ -25,6 +25,80 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.11.0] - 2026-05-23
+
+### Added
+
+`deploy-app` composite action gains **Tailscale-SSH-only** auth path. The
+runner joins the tailnet ephemerally via OIDC (`tailscale/github-action@v3`,
+`ts_oauth_client_id` + `ts_oauth_secret` inputs, now **required**) and uses
+`tailscale ssh deploy@<host>` for rsync + remote docker compose orchestration.
+Tag-based identity (`tag:ci-deploy → tag:server-*` as `deploy`) replaces
+key-based auth — auth decisions live in the tailnet ACL `ssh:`-section.
+
+`ssh_host` becomes optional. When empty, the composite derives the Tailnet
+hostname from `project.yaml` → `environments[env].server` +
+`.tail990d7f.ts.net` suffix. Explicit `ssh_host` input still works as an
+override (e.g. for ad-hoc Tailnet hostnames).
+
+`ssh_user` becomes optional with default `deploy` (matches the
+`biglerconsult.infra.deploy_user` ansible role default).
+
+### Removed
+
+`ssh_private_key` input. v1.11.0 has no key-based SSH path at all.
+
+`🔑 Write SSH key` and `⚙️ Add known hosts` steps. Tailscale-SSH cert flow
+replaces both — host identity is handled by Tailscale's SSH-CA, and no
+per-runner private key exists.
+
+`appleboy/ssh-action` calls in `🔐 Provision optional file secrets` and
+`🐳 Build, restart & migrate`. Both steps now use inline `tailscale ssh
+deploy@<host> bash <<EOF`-heredoc pattern. File-secret contents are
+base64-encoded locally and decoded remote-side, so multi-line PEMs survive
+the stdin transport intact.
+
+### Errata
+
+The v1.9.0 CHANGELOG-note ("last of SSH-using composite actions to gain
+Tailnet support") was incorrect — `deploy-app` was overlooked. v1.11.0
+closes that gap. The v1.x Tailnet migration is now genuinely complete
+across:
+
+- janitor (v1.1.0)
+- maintenance (v1.2.0)
+- sync-ssh-access (v1.3.0)
+- update-server (v1.4.0)
+- sync-kuma-notifications (v1.5.0)
+- backup (v1.6.0)
+- deploy-traefik (v1.7.0 idempotent up + v1.9.0 Tailnet)
+- restore + restore-dest-import (v1.8.0)
+- provision-server (v1.10.0)
+- **deploy-app (v1.11.0)** ← this release
+
+`register-kuma-monitors` still uses raw SSH and is scoped for a future
+v1.12.0 release. `restore-source-export` has no SSH and remains unchanged.
+
+### Breaking
+
+`ssh_private_key` removal is a breaking change for any caller that has not
+already populated `ts_oauth_client_id` + `ts_oauth_secret`. Callers must:
+
+1. Pin to `@v1.11.0` (or `@v1`-floating once advanced).
+2. Drop `ssh_host` / `ssh_user` / `ssh_private_key` lines from the caller's
+   `uses:` block — or keep `ssh_host` only as an explicit Tailnet-hostname
+   override.
+3. Pass `ts_oauth_client_id` + `ts_oauth_secret` (synced from
+   `proton://Projekt Webapp-Management/Cloudflare API/ts_oauth_*` via
+   `sync-secrets` into the app's per-environment GitHub secrets).
+4. Server-side prerequisite: `tailscale up --ssh` is active and the tailnet
+   ACL `ssh:`-section authorises `tag:ci-deploy → tag:server-*` as `deploy`
+   (see webapp-management ansible group_vars/all.yml).
+
+The v1.10.x line keeps working for callers that need more migration runway.
+
+---
+
 ## [1.10.0] - 2026-05-23
 
 ### Added
