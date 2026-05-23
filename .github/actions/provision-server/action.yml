@@ -18,10 +18,31 @@ inputs:
   deploy_user:
     description: 'Deploy user to create / configure'
     required: true
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host (or target_host) is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action uses the caller-provided ssh_host directly (public IP for fresh-bootstrap scenarios).'
+    required: false
+    default: ''
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
+    required: false
+    default: ''
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    required: false
+    default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
+    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
+      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
+
     - name: 🔎 Validate inputs
       shell: bash
       env:
@@ -129,11 +150,6 @@ runs:
           mkdir -p /srv/infrastructure/webapp-management
           chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management
           chmod 2775 /srv/infrastructure/webapp-management
-
-          # Pre-create subdirs used as docker-compose bind-mount sources so
-          # that Docker can't race the first rsync and create them root-owned.
-          mkdir -p /srv/infrastructure/webapp-management/wireguard
-          chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/webapp-management/wireguard
 
           mkdir -p /srv/infrastructure/ops-scripts
           chown -R "${DEPLOY_USER}:${DEPLOY_USER}" /srv/infrastructure/ops-scripts

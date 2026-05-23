@@ -25,6 +25,31 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.10.0] - 2026-05-23
+
+### Added
+
+`provision-server` composite action gains the same three optional Tailnet
+inputs (`ts_oauth_client_id`, `ts_oauth_secret`, `ts_tag`). Less
+commonly applicable than the other migrated actions — provision-server
+typically runs against a brand-new host that hasn't joined the tailnet
+yet, in which case the inputs stay empty and the action SSHes via the
+caller-provided ssh_host (public IP). For the rare break-glass case
+where Ansible-Foundation needs to be re-applied to an already-
+tailnet-connected host, the Tailnet path is now available.
+
+### Removed
+
+The pre-create-wireguard-subdir block in the bootstrap script is gone.
+WireGuard was retired across all bigler-webapps servers earlier today
+in favor of Tailscale — a fresh-bootstrap host has no need for that
+bind-mount directory.
+
+Backwards-compatible. Existing callers without ts_oauth_* inputs see
+no behavior change beyond the wireguard-subdir cleanup.
+
+---
+
 ## [1.9.0] - 2026-05-23
 
 ### Added
