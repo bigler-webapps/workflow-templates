@@ -47,7 +47,15 @@ import yaml
 try:
     from uptime_kuma_api import UptimeKumaApi
 except ImportError:
-    print("❌ uptime-kuma-api not installed. Run: pip install uptime-kuma-api", file=sys.stderr)
+    # We install the Kuma-2-compatible fork `uptime-kuma-api-v2` (PyPI),
+    # not the abandoned upstream `uptime-kuma-api`. The import name stays
+    # the same — see comments in
+    # .github/actions/register-kuma-monitors/action.yml for context.
+    print(
+        "❌ uptime-kuma-api-v2 not installed. "
+        "Run: pip install uptime-kuma-api-v2",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

@@ -65,7 +65,19 @@ runs:
 
     - name: Install kuma deps
       shell: bash
-      run: pip install --quiet "uptime-kuma-api==1.2.1" "PyYAML==6.0.2"
+      # Kuma 2.x server requires a Kuma-2-aware client. Upstream
+      # `lucasheld/uptime-kuma-api` is de facto abandoned: last release Sept
+      # 2023, PRs untouched since April 2025, multiple Kuma-2 compat issues
+      # sitting open (#85, #86, #87). Until an official successor exists, we
+      # pin the `exaland/uptime-kuma-api-v2` fork (published on PyPI as
+      # `uptime-kuma-api-v2`). Drop-in: same import
+      # `from uptime_kuma_api import UptimeKumaApi`. Last commit 2026-05-22,
+      # explicitly Kuma 2.x targeted. Tiny community (7 stars) — accept that
+      # risk because there is no better option in the ecosystem today.
+      # Symptom of mismatch (Kuma 2 server + Kuma 1.x client): engine.io
+      # polling fails with ConnectionResetError(104) during the Socket.IO
+      # handshake. TODO S33: SHA-pin via Renovate when stable.
+      run: pip install --quiet "uptime-kuma-api-v2==1.0.2" "PyYAML==6.0.2"
 
     - name: Configure SSH key
       shell: bash
