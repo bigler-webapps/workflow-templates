@@ -25,7 +25,7 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
-## [1.7.0] - 2026-05-23
+## [1.8.0] - 2026-05-23
 
 ### Added
 
@@ -43,6 +43,19 @@ artifact). No Tailnet step needed and none added — the source-side
 handoff path stays pure-internet → B2.
 
 Backwards-compatible across both actions.
+
+---
+
+## [1.7.0] - 2026-05-23
+
+### Fixed
+
+`deploy-traefik` composite action: `docker compose up -d` is now run
+idempotently so a no-op deploy doesn't trigger a routine container
+recreate and a small downtime window. See #12 for the implementation
+detail and motivation.
+
+Backwards-compatible.
 
 ---
 
