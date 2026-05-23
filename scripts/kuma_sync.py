@@ -146,6 +146,23 @@ def sync_monitors(api, config_path, prune=False):
             "maxretries": int(spec.get("max_retries", 3)),
             "retryInterval": int(spec.get("retry_interval", 60)),
         }
+        # Optional fields — only set if explicitly declared in the YAML.
+        # Backward-compatible: existing configs without these keys behave as before.
+        if "accepted_statuscodes" in spec:
+            kwargs["accepted_statuscodes"] = spec["accepted_statuscodes"]
+        if "hostname" in spec:
+            kwargs["hostname"] = spec["hostname"]
+        if "port" in spec:
+            kwargs["port"] = int(spec["port"])
+        if "keyword" in spec:
+            kwargs["keyword"] = spec["keyword"]
+        if "method" in spec:
+            kwargs["method"] = spec["method"]
+        if "body" in spec:
+            kwargs["body"] = spec["body"]
+        if "headers" in spec:
+            kwargs["headers"] = spec["headers"]
+
         # Drop None to let Kuma defaults apply
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
