@@ -25,6 +25,27 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.7.0] - 2026-05-23
+
+### Added
+
+Restore-family composite actions gain the same three optional Tailnet
+inputs (`ts_oauth_client_id`, `ts_oauth_secret`, `ts_tag`):
+
+- `restore` — single-app restore. SSHes to one server. Tailnet path
+  added.
+- `restore-dest-import` — destination-side of the cross-server restore.
+  SSHes to the dest server. Tailnet path added.
+
+**Not changed:** `restore-source-export` does not SSH (it pulls restic
+snapshots directly from B2 on the runner, encrypts, uploads as
+artifact). No Tailnet step needed and none added — the source-side
+handoff path stays pure-internet → B2.
+
+Backwards-compatible across both actions.
+
+---
+
 ## [1.6.0] - 2026-05-23
 
 ### Added

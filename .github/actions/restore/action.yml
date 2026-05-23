@@ -40,10 +40,31 @@ inputs:
     description: 'Local path containing ops scripts (must include restore.py)'
     required: false
     default: 'ops-scripts'
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
+    required: false
+    default: ''
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
+    required: false
+    default: ''
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    required: false
+    default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
+    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
+      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
+
     - name: Validate inputs
       shell: bash
       env:
