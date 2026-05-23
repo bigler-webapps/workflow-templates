@@ -25,6 +25,35 @@ v2 cutover is a no-op for behavior, only a tag bump.
 
 ---
 
+## [1.11.1] - 2026-05-24
+
+### Fixed
+
+`deploy-app` v1.11.0 rsync step failed because `rsync -e "tailscale ssh"`
+invokes the remote-shell tool with ssh-style flags (`-l <user> <host>`),
+and `tailscale ssh` only accepts `[user@]<host>` form. Symptom:
+
+```
+flag provided but not defined: -l
+SSH to a Tailscale machine
+USAGE
+  tailscale ssh [user@]<host> [args...]
+rsync error: error in rsync protocol data stream (code 12)
+```
+
+v1.11.1 installs a small wrapper script `/tmp/ts-ssh-rsync` before the
+rsync step that translates `-l user host args...` to
+`tailscale ssh user@host args...`. The wrapper also silently drops
+ssh-style `-p`/`-i` flags rsync may inject (Tailnet doesn't need them).
+File-secret and docker-compose steps are unaffected — they invoke
+`tailscale ssh user@host bash <<EOF` directly with the canonical
+`user@host` form.
+
+Callers already on `@v1.11.0` should bump to `@v1.11.1`. The
+ts_oauth_* secrets and project.yaml-derived ssh_host remain unchanged.
+
+---
+
 ## [1.11.0] - 2026-05-23
 
 ### Added

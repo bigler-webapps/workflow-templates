@@ -241,6 +241,41 @@ runs:
         echo "Generating .env for env: ${TARGET_ENV}"
         generate-env --env "${TARGET_ENV}"
 
+    - name: 📝 Build rsync → tailscale-ssh wrapper
+      shell: bash
+      run: |
+        set -euo pipefail
+        # rsync invokes its `-e` remote-shell tool with ssh-style flags
+        # (`-l <user> <host>`, sometimes `-p <port>` / `-i <identity>`).
+        # `tailscale ssh` does NOT accept those flags — it expects
+        # `tailscale ssh [user@]<host> [args...]`. This wrapper translates
+        # rsync's call convention into the tailscale-ssh argv shape:
+        #   `wrap -l deploy host rsync --server ...`
+        #     → `tailscale ssh deploy@host rsync --server ...`
+        # `-p` / `-i` are silently dropped (Tailnet doesn't need them —
+        # auth is identity-based, port is fixed by tailscaled).
+        cat > /tmp/ts-ssh-rsync <<'WRAP'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        USER_ARG=""
+        HOST_ARG=""
+        declare -a EXTRA=()
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -l)    USER_ARG="$2"; shift 2 ;;
+            -p|-i) shift 2 ;;  # drop ssh-style port/identity flags rsync may pass
+            *)     HOST_ARG="$1"; shift; EXTRA=("$@"); break ;;
+          esac
+        done
+        if [ -n "$USER_ARG" ]; then
+          exec tailscale ssh "${USER_ARG}@${HOST_ARG}" "${EXTRA[@]}"
+        else
+          exec tailscale ssh "${HOST_ARG}" "${EXTRA[@]}"
+        fi
+        WRAP
+        chmod +x /tmp/ts-ssh-rsync
+        echo "✅ Wrapper /tmp/ts-ssh-rsync installed."
+
     - name: 🚀 Rsync project to server (via tailscale ssh)
       shell: bash
       env:
@@ -255,7 +290,7 @@ runs:
           --no-owner --no-group --no-perms --omit-dir-times \
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-          -e "tailscale ssh" \
+          -e /tmp/ts-ssh-rsync \
           --exclude=certbot/letsencrypt \
           --exclude=docker-compose.override.yml \
           --exclude=.git \
