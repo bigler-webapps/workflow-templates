@@ -10,6 +10,52 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.0.2] - 2026-05-24
+
+### Fixed
+
+`deploy-app` server-side lock-file is now **server-wide** instead of
+per-REMOTE_PATH (per-app).
+
+**Background**: pre-v2.0.2 the lock was `/tmp/deploy-${REMOTE_PATH-slug}.lock`,
+so each app had its own lock. When 7 apps push dependency bumps to
+`develop` simultaneously (e.g. a bulk `django-core-micha` version bump
+across all tenants), 7 docker builds run in parallel on a single staging
+server. With ~700MB peak memory per build, this exceeds a 3.7GiB server
+and triggers OOM-cascades (systemd-journald died, full reboot needed).
+
+GitHub Actions `concurrency.group` is repository-scoped — it doesn't
+help across 7 different app repos. Server-side flock is the only
+cross-app coordination point.
+
+### Change
+
+```diff
+-LOCK_NAME="$(printf '%s' "$REMOTE_PATH" | sed 's|/|_|g; s|^_||')"
+-LOCK_FILE="/tmp/deploy-${LOCK_NAME}.lock"
++LOCK_FILE="/tmp/deploy-server.lock"
+```
+
+Effect:
+- rsync still runs parallel (low memory)
+- docker build + compose up + migrate **serialize** across all apps
+  on the same server
+- 7-app bulk-push wave: ~7 × 2min = ~14 min total wall time
+  instead of failed-with-OOM at the 4th-5th simultaneous build
+
+### Migration
+
+For each caller pinned to `@v1.11.1` or `@v2.0.0` deploy-app:
+
+```diff
+-uses: ...deploy-app@v1.11.1
++uses: ...deploy-app@v2.0.2
+```
+
+No input contract changes from v1.11.1 → v2.0.2. Just bump the tag.
+
+---
+
 ## [2.0.1] - 2026-05-24
 
 ### Fixed / Refactored
