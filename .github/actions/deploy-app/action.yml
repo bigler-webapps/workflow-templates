@@ -1,11 +1,11 @@
 name: 'Deploy App'
 description: 'Deploys a Django/React app via rsync + Docker Compose over Tailscale SSH (no SSH-key auth path).'
 
-# v1.11.0 — Tailscale-SSH-only. ssh_private_key input removed. Tailscale
-# OAuth (ts_oauth_*) is required; the runner joins the tailnet ephemerally
-# and uses `tailscale ssh` for all remote operations. Tag-based identity
-# replaces key-based auth — auth decisions live in the tailnet ACL
-# `ssh:`-section (tag:ci-deploy → tag:server-* as `deploy`).
+# v2.0.0 — Simplified Tailscale-SSH path. Plain `ssh user@host.tail990d7f.ts.net`
+# replaces v1.11.1's `tailscale ssh` wrapper + rsync flag-translation script —
+# the system OpenSSH client connects via Tailnet, Tailscale-SSH server-side
+# accepts the Tailnet identity (Authenticated="none" at WireGuard layer).
+# rsync uses `-e ssh` directly. ssh_private_key input remains absent.
 
 inputs:
   environment:
@@ -207,11 +207,9 @@ runs:
         # Fail fast with a clear error before doing the expensive rsync
         # if the tailnet ACL doesn't permit tag:ci-deploy → this host as
         # ${SSH_USER}, or tailscaled isn't running on the target with
-        # --ssh, or any other policy/connectivity issue. Avoids ambiguous
-        # rsync-style errors and surfaces ACL misconfigurations in
-        # seconds instead of minutes.
-        echo "→ tailscale ssh ${SSH_USER}@${TAILNET_HOST} 'true'"
-        if ! tailscale ssh "${SSH_USER}@${TAILNET_HOST}" true; then
+        # --ssh, or any other policy/connectivity issue.
+        echo "→ ssh ${SSH_USER}@${TAILNET_HOST} true"
+        if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${SSH_USER}@${TAILNET_HOST}" true; then
           echo "❌ Tailscale-SSH pre-flight failed."
           echo "   Common causes:"
           echo "   - Tailnet ACL ssh:-section missing rule for tag:ci-deploy → tag:server-* as ${SSH_USER}"
@@ -241,42 +239,7 @@ runs:
         echo "Generating .env for env: ${TARGET_ENV}"
         generate-env --env "${TARGET_ENV}"
 
-    - name: 📝 Build rsync → tailscale-ssh wrapper
-      shell: bash
-      run: |
-        set -euo pipefail
-        # rsync invokes its `-e` remote-shell tool with ssh-style flags
-        # (`-l <user> <host>`, sometimes `-p <port>` / `-i <identity>`).
-        # `tailscale ssh` does NOT accept those flags — it expects
-        # `tailscale ssh [user@]<host> [args...]`. This wrapper translates
-        # rsync's call convention into the tailscale-ssh argv shape:
-        #   `wrap -l deploy host rsync --server ...`
-        #     → `tailscale ssh deploy@host rsync --server ...`
-        # `-p` / `-i` are silently dropped (Tailnet doesn't need them —
-        # auth is identity-based, port is fixed by tailscaled).
-        cat > /tmp/ts-ssh-rsync <<'WRAP'
-        #!/usr/bin/env bash
-        set -euo pipefail
-        USER_ARG=""
-        HOST_ARG=""
-        declare -a EXTRA=()
-        while [ $# -gt 0 ]; do
-          case "$1" in
-            -l)    USER_ARG="$2"; shift 2 ;;
-            -p|-i) shift 2 ;;  # drop ssh-style port/identity flags rsync may pass
-            *)     HOST_ARG="$1"; shift; EXTRA=("$@"); break ;;
-          esac
-        done
-        if [ -n "$USER_ARG" ]; then
-          exec tailscale ssh "${USER_ARG}@${HOST_ARG}" "${EXTRA[@]}"
-        else
-          exec tailscale ssh "${HOST_ARG}" "${EXTRA[@]}"
-        fi
-        WRAP
-        chmod +x /tmp/ts-ssh-rsync
-        echo "✅ Wrapper /tmp/ts-ssh-rsync installed."
-
-    - name: 🚀 Rsync project to server (via tailscale ssh)
+    - name: 🚀 Rsync project to server (via plain ssh over Tailnet)
       shell: bash
       env:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
@@ -290,7 +253,7 @@ runs:
           --no-owner --no-group --no-perms --omit-dir-times \
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-          -e /tmp/ts-ssh-rsync \
+          -e "ssh -o StrictHostKeyChecking=accept-new" \
           --exclude=certbot/letsencrypt \
           --exclude=docker-compose.override.yml \
           --exclude=.git \
@@ -306,7 +269,7 @@ runs:
           --exclude=backups \
           ./ "${SSH_USER}@${TAILNET_HOST}:${REMOTE_PATH}"
 
-    - name: 🔐 Provision optional file secrets (via tailscale ssh)
+    - name: 🔐 Provision optional file secrets (via plain ssh over Tailnet)
       if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
       shell: bash
       env:
@@ -336,7 +299,7 @@ runs:
         # Send a self-contained script over stdin. Local shell interpolates
         # the ${VAR}-references when building the heredoc body; remote-only
         # references use \$VAR so they resolve in the remote bash.
-        tailscale ssh "${SSH_USER}@${TAILNET_HOST}" bash <<EOF
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TAILNET_HOST}" bash <<EOF
         set -euo pipefail
 
         REMOTE_PATH="${REMOTE_PATH}"
@@ -363,7 +326,7 @@ runs:
         fi
         EOF
 
-    - name: 🐳 Build, restart & migrate (via tailscale ssh)
+    - name: 🐳 Build, restart & migrate (via plain ssh over Tailnet)
       shell: bash
       env:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
@@ -379,7 +342,7 @@ runs:
         #   - All subsequent `\$VAR` references are escaped and resolve
         #     REMOTE-side, against the just-assigned remote variables.
         # This split keeps the data/code boundary explicit and audit-clean.
-        tailscale ssh "${SSH_USER}@${TAILNET_HOST}" bash <<EOF
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TAILNET_HOST}" bash <<EOF
         set -euo pipefail
 
         REMOTE_PATH="${REMOTE_PATH}"

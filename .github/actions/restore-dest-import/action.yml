@@ -6,6 +6,8 @@ description: >-
   app's running DB via restore.py --mode import-only. Always deletes the
   GitHub Artifact at the end (success or failure).
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed.
+
 inputs:
   dest_target:
     description: 'Inventory target name of the destination (used for logging + work-dir naming).'
@@ -25,13 +27,10 @@ inputs:
     required: false
     default: ''
   ssh_host:
-    description: 'Destination host SSH address.'
+    description: 'Tailnet hostname of destination'
     required: true
   ssh_user:
     description: 'Destination host SSH user.'
-    required: true
-  ssh_private_key:
-    description: 'Destination host SSH private key (PEM contents).'
     required: true
   artifact_name:
     description: 'Artifact name produced by restore-source-export.'
@@ -47,23 +46,20 @@ inputs:
     description: 'Token used to delete the handoff artifact at the end. Caller should pass secrets.GITHUB_TOKEN.'
     required: true
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -81,13 +77,18 @@ runs:
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
         INPUT_AUTO_RESTART: ${{ inputs.auto_restart }}
         INPUT_DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
         ARTIFACT_NAME: ${{ inputs.artifact_name }}
         TRANSPORT_KEY: ${{ inputs.transport_key }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
         set -euo pipefail
-        required_vars=(SSH_PRIVATE_KEY INPUT_SSH_HOST INPUT_SSH_USER INPUT_APP_NAME INPUT_DEST_SUBTARGET INPUT_DEST_TARGET ARTIFACT_NAME TRANSPORT_KEY GITHUB_TOKEN)
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        required_vars=(INPUT_SSH_HOST INPUT_SSH_USER INPUT_APP_NAME INPUT_DEST_SUBTARGET INPUT_DEST_TARGET ARTIFACT_NAME TRANSPORT_KEY GITHUB_TOKEN)
         for var_name in "${required_vars[@]}"; do
           if [ -z "${!var_name}" ]; then
             echo "❌ Missing required input '${var_name}'."
@@ -134,25 +135,6 @@ runs:
         echo "::add-mask::${PASSPHRASE}"
         echo "PASSPHRASE=${PASSPHRASE}" >> "$GITHUB_ENV"
 
-    - name: 🔑 Write SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_xrestore_dest
-        chmod 600 ~/.ssh/id_xrestore_dest
-
-    - name: ⚙️ Add known hosts
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
     - name: 📂 Ship restore.py to dest host work-dir
       shell: bash
       env:
@@ -176,7 +158,7 @@ runs:
         # /tmp/<work_tag>/). Avoids needing root/sudo to write into
         # /srv/infrastructure/ops-scripts/ on hosts where the deploy user is
         # not privileged there (e.g. the staging host).
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "WORK_TAG=$(printf '%q' "$WORK_TAG") \
            bash -s" <<'EOF'
         set -euo pipefail
@@ -185,7 +167,7 @@ runs:
         mkdir -p "$WORK_DIR"
         chmod 700 "$WORK_DIR"
         EOF
-        scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
+        scp -o StrictHostKeyChecking=accept-new \
           "${OPS_SCRIPTS_PATH}/restore.py" \
           "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/restore.py"
 
@@ -204,9 +186,7 @@ runs:
       run: |
         set -euo pipefail
         ls -la ./xrestore-handoff/
-        # Work dir was already created and restore.py was staged by the prior
-        # "Ship restore.py" step. Just scp the encrypted dump alongside.
-        scp -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes \
+        scp -o StrictHostKeyChecking=accept-new \
           ./xrestore-handoff/dump.tar.enc \
           "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/dump.tar.enc"
 
@@ -219,7 +199,7 @@ runs:
         PASSPHRASE: ${{ env.PASSPHRASE }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "WORK_TAG=$(printf '%q' "$WORK_TAG") \
            ENC_PASS=$(printf '%q' "$PASSPHRASE") \
            bash -s" <<'EOF'
@@ -243,7 +223,7 @@ runs:
         DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "WORK_TAG=$(printf '%q' "$WORK_TAG") \
            APP_NAME=$(printf '%q' "$APP_NAME") \
            DEST_SUBTARGET=$(printf '%q' "$DEST_SUBTARGET") \
@@ -267,7 +247,7 @@ runs:
         DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "DEST_COMPOSE_PATH=$(printf '%q' "$DEST_COMPOSE_PATH") \
            bash -s" <<'EOF'
         set -euo pipefail
@@ -284,13 +264,12 @@ runs:
         WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_xrestore_dest -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "WORK_TAG=$(printf '%q' "$WORK_TAG") \
            bash -s" <<'EOF' || true
         set -euo pipefail
         rm -rf "/tmp/${WORK_TAG}"
         EOF
-        rm -f ~/.ssh/id_xrestore_dest
         rm -rf ./xrestore-handoff
 
     - name: 🗑️ Delete handoff artifact (always)
