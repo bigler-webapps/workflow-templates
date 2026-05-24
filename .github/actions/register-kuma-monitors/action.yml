@@ -2,16 +2,22 @@ name: 'Register Uptime Kuma Monitors'
 description: >-
   Idempotently registers or updates monitors in Uptime Kuma from either a
   per-app monitoring/monitor.yml (legacy) or project.yaml. Notifications marked
-  default:true (via sync-kuma-notifications) are auto-applied. Connects via
-  SSH tunnel to the host (Kuma must be bound to 127.0.0.1:3001 there).
+  default:true (via sync-kuma-notifications) are auto-applied.
 
   Source-resolution: if `config_path` exists on disk, the action uses it
   (legacy monitor.yml format). Otherwise it falls back to `project_yaml_path`
   and derives monitors from `project.yaml` (see kuma_sync.monitors_from_project_yaml
   for the convention and per-app overrides).
 
-# v2.0.0 — First Tailnet adoption AND Tailscale-SSH-only. Previously raw
-# SSH (no Tailnet opt-in). Now requires ts_oauth_* + plain ssh over Tailnet.
+# v2.0.1 — Tailscale Serve direct-HTTPS. SSH-tunnel removed.
+# The Kuma host runs `tailscale serve --bg --https=8443 http://localhost:3001`
+# which exposes Kuma as `https://<host>.tail990d7f.ts.net:8443` to any tailnet
+# member. CI joins tailnet ephemerally and hits the URL directly — no SSH,
+# no port-forward, no -fNL plumbing.
+#
+# Previous v2.0.0 SSH-tunnel pattern (ssh -fNL) is gone — simpler, faster,
+# and no more "Permission denied" issues caused by KUMA_SSH_HOST being a
+# public IP that the v2.0.0 composite tried to Tailscale-SSH into.
 
 inputs:
   config_path:
@@ -22,28 +28,22 @@ inputs:
     description: 'Path to project.yaml used to derive monitors when config_path is absent.'
     required: false
     default: 'project.yaml'
-  ssh_host:
-    description: 'Tailnet hostname for tunnel into the Kuma server.'
-    required: true
-  ssh_user:
-    description: 'SSH user (typically deploy).'
-    required: true
+  kuma_url:
+    description: 'Full URL to Kuma over Tailnet (e.g. https://staging.tail990d7f.ts.net:8443). Caller passes this; defaults to staging-tailnet-serve.'
+    required: false
+    default: 'https://staging.tail990d7f.ts.net:8443'
   kuma_user:
     description: 'Automation user in Kuma.'
     required: true
   kuma_password:
     description: 'Password for the automation user.'
     required: true
-  kuma_local_port:
-    description: 'Server-side localhost port Kuma listens on (matches docker-compose port binding).'
-    required: false
-    default: '3001'
   prune:
     description: 'Set "true" to delete Kuma monitors not present in this config file. WARNING: deletes monitors from OTHER apps too if their names are absent here — only enable in single-source-of-truth setups.'
     required: false
     default: 'false'
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    description: 'Tailscale OAuth client ID. Required.'
     required: true
   ts_oauth_secret:
     description: 'Tailscale OAuth client secret.'
@@ -64,18 +64,23 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: latest
 
-    - name: 🔎 Validate Tailnet inputs
+    - name: 🔎 Validate inputs
       shell: bash
       env:
         INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
         INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
+        INPUT_KUMA_URL: ${{ inputs.kuma_url }}
       run: |
         set -euo pipefail
         if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
-          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required"
           exit 1
         fi
-        echo "✅ Tailnet OAuth inputs present."
+        if ! printf '%s' "$INPUT_KUMA_URL" | grep -qE '^https?://[a-zA-Z0-9._:-]+(/.*)?$'; then
+          echo "❌ Invalid kuma_url (expected http(s)://host[:port])"
+          exit 1
+        fi
+        echo "✅ Inputs validated."
 
     - name: Setup Python
       uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
@@ -98,30 +103,26 @@ runs:
       # handshake. TODO S33: SHA-pin via Renovate when stable.
       run: pip install --quiet "uptime-kuma-api-v2==1.0.2" "PyYAML==6.0.2"
 
-    - name: Open SSH tunnel to Kuma
+    - name: 🔌 Pre-flight Kuma reachability check
       shell: bash
       env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-        SSH_USER: ${{ inputs.ssh_user }}
-        KUMA_PORT: ${{ inputs.kuma_local_port }}
+        KUMA_URL: ${{ inputs.kuma_url }}
       run: |
         set -euo pipefail
-        # Plain ssh over Tailnet — auth=none (Tailscale-SSH server-side).
-        ssh -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes \
-            -fNL "${KUMA_PORT}:localhost:${KUMA_PORT}" \
-            "${SSH_USER}@${SSH_HOST}"
-        for _ in $(seq 1 10); do
-          if curl -sf "http://localhost:${KUMA_PORT}/" -o /dev/null; then
-            echo "✅ Kuma reachable via tunnel"
-            break
-          fi
-          sleep 1
-        done
+        # Verify Kuma is reachable via Tailnet before running the sync.
+        # Tailscale's HTTPS cert (Let's Encrypt for *.ts.net) is in the
+        # system CA bundle, so curl validates normally.
+        if ! curl -sf --max-time 10 -o /dev/null -w "%{http_code}\n" "${KUMA_URL}/" | grep -qE '^(200|302)$'; then
+          echo "❌ Kuma not reachable at ${KUMA_URL}"
+          echo "   Check: tailscale serve config on the Kuma host."
+          exit 1
+        fi
+        echo "✅ Kuma reachable at ${KUMA_URL}"
 
     - name: Sync monitors
       shell: bash
       env:
-        KUMA_URL: http://localhost:${{ inputs.kuma_local_port }}
+        KUMA_URL: ${{ inputs.kuma_url }}
         KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
         KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
       run: |
@@ -135,14 +136,3 @@ runs:
           --config "${{ inputs.config_path }}" \
           --project-yaml "${{ inputs.project_yaml_path }}" \
           ${PRUNE_FLAG}
-
-    - name: Close SSH tunnel
-      if: always()
-      shell: bash
-      env:
-        KUMA_PORT: ${{ inputs.kuma_local_port }}
-      run: |
-        # v2.0.0: narrow pkill pattern includes port-forward spec so it
-        # never matches unrelated ssh processes (e.g. tailscale's internal
-        # ProxyCommand plumbing on the runner).
-        pkill -f "ssh .* -fNL ${KUMA_PORT}:localhost:${KUMA_PORT}" || true

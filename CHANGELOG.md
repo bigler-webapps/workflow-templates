@@ -10,6 +10,74 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.0.1] - 2026-05-24
+
+### Fixed / Refactored
+
+`register-kuma-monitors` and `sync-kuma-notifications` switch from
+SSH-tunnel-into-Kuma (`ssh -fNL 3001:localhost:3001`) to **direct HTTPS
+over Tailnet** via Tailscale Serve.
+
+**Background**: v2.0.0 made these two composites Tailscale-SSH-only.
+But the SSH-tunnel pattern continued to require ssh_host/ssh_user
+inputs that pointed at the Kuma server. If the secret carried a
+public IP (not a Tailnet hostname), v2.0.0 would fail at the
+SSH-handshake step with `Permission denied (publickey,password)`.
+v2.0.1 removes the SSH layer entirely.
+
+**Architectural change**: Kuma host (today: staging) runs
+```
+tailscale serve --bg --https=8443 http://localhost:3001
+```
+which exposes Kuma as `https://<host>.tail990d7f.ts.net:8443` to any
+tailnet member. CI joins tailnet ephemerally and calls the URL
+directly — no SSH, no port-forward, no `pkill` cleanup.
+
+### Inputs changed (breaking)
+
+Both composites:
+
+- **Removed**: `ssh_host`, `ssh_user`
+- **Added**: `kuma_url` (default `https://staging.tail990d7f.ts.net:8443`)
+
+Callers must drop ssh_host/ssh_user lines; kuma_url default is fine
+for staging-hosted Kuma.
+
+### Migration
+
+For each caller pinned to `@v2.0.0`:
+
+```diff
+- uses: ...register-kuma-monitors@v2.0.0
+  with:
+    config_path: monitoring/monitor.yml
+-   ssh_host: ${{ secrets.KUMA_SSH_HOST }}
+-   ssh_user: ${{ secrets.KUMA_SSH_USER }}
+    ts_oauth_client_id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+    ts_oauth_secret: ${{ secrets.TS_OAUTH_SECRET }}
+    kuma_user: ${{ secrets.KUMA_AUTOMATION_USER }}
+    kuma_password: ${{ secrets.KUMA_AUTOMATION_PASSWORD }}
++   # kuma_url defaults to staging-tailnet; no override needed
+```
+
+Plus: `KUMA_SSH_HOST`, `KUMA_SSH_USER`, `KUMA_SSH_PRIVATE_KEY` GH-env
+secrets become orphaned. Cleanup in a follow-up pass.
+
+### Why this is "the right way"
+
+v1.x: SSH-tunnel to private port. Works, but requires SSH-tunnel
+plumbing, key auth, port-forwarding, cleanup-pkill. Three layers of
+abstraction for what is fundamentally "talk HTTP to a service".
+
+v2.0.0: same SSH-tunnel-pattern but with Tailscale-SSH auth. Inherits
+all of v1.x's complexity, fails when KUMA_SSH_HOST is a public-IP.
+
+v2.0.1: direct HTTPS via Tailnet. Auth is Tailnet-identity (ACL-gated),
+transport is plain HTTPS with Let's-Encrypt-issued cert. Two layers
+instead of five.
+
+---
+
 ## [2.0.0] - 2026-05-24
 
 ### Breaking — Tailscale-SSH-only across all SSH-using composites
