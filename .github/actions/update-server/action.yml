@@ -6,6 +6,9 @@ description: >-
   install newly-required base tools, etc. without risking a re-bootstrap.
   For initial bootstrap of a fresh host, use provision-server instead.
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key_root removed; auth is via
+# Tailnet identity (tag:ci-deploy) + tailnet ACL ssh:-section.
+
 inputs:
   target:
     description: 'Inventory target name (used for logging)'
@@ -15,29 +18,23 @@ inputs:
     required: false
     default: ''
   ssh_host:
-    description: 'SSH host address (used if target_host is empty)'
-    required: true
-  ssh_private_key_root:
-    description: 'Root SSH private key (PEM contents) — sysctl/apt require root'
+    description: 'Tailnet hostname (used if target_host is empty)'
     required: true
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host (or target_host) is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -50,20 +47,21 @@ runs:
       env:
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_TARGET_HOST: ${{ inputs.target_host }}
-        SSH_PRIVATE_KEY_ROOT: ${{ inputs.ssh_private_key_root }}
         SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
         set -euo pipefail
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
         if ! printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$'; then
           echo "❌ Invalid 'target' input"
           exit 1
         fi
         if [ -n "${INPUT_TARGET_HOST:-}" ] && ! printf '%s' "$INPUT_TARGET_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$'; then
           echo "❌ Invalid 'target_host' input"
-          exit 1
-        fi
-        if [ -z "$SSH_PRIVATE_KEY_ROOT" ]; then
-          echo "❌ ssh_private_key_root is required"
           exit 1
         fi
         if [ -z "$SSH_HOST" ] && [ -z "$INPUT_TARGET_HOST" ]; then
@@ -86,41 +84,40 @@ runs:
         echo "TARGET_HOST=$TARGET_HOST" >> "$GITHUB_ENV"
 
     - name: 🔧 Apply incremental updates
-      uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262  # v1.0.3
+      shell: bash
       env:
-        TARGET_HOST_ENV: ${{ env.TARGET_HOST }}
-      with:
-        host: ${{ env.TARGET_HOST }}
-        username: root
-        key: ${{ inputs.ssh_private_key_root }}
-        envs: TARGET_HOST_ENV
-        script: |
-          set -euo pipefail
-          echo "🔧 Updating ${TARGET_HOST_ENV}"
+        TARGET_HOST: ${{ env.TARGET_HOST }}
+      run: |
+        set -euo pipefail
+        # Tailscale-SSH auth (Authenticated="none"); transport is plain ssh
+        # over Tailnet. ACL ssh:-section must authorise tag:ci-deploy → root.
+        ssh -o StrictHostKeyChecking=accept-new "root@${TARGET_HOST}" bash <<EOF
+        set -euo pipefail
+        echo "🔧 Updating ${TARGET_HOST}"
 
-          export DEBIAN_FRONTEND=noninteractive
+        export DEBIAN_FRONTEND=noninteractive
 
-          # 1. Refresh package metadata only — never upgrade unattended.
-          apt-get update -qq
+        # 1. Refresh package metadata only — never upgrade unattended.
+        apt-get update -qq
 
-          # 2. Ensure base tooling is installed. Idempotent: apt-get install
-          # only acts when the package is missing or upgradable to a newer
-          # version explicitly requested. Without versions, this is a no-op
-          # on machines that already have the packages.
-          apt-get install -y --no-upgrade \
-            curl git ufw fail2ban htop ncdu rsync acl restic
+        # 2. Ensure base tooling is installed. Idempotent: apt-get install
+        # only acts when the package is missing or upgradable to a newer
+        # version explicitly requested. Without versions, this is a no-op
+        # on machines that already have the packages.
+        apt-get install -y --no-upgrade curl git ufw fail2ban htop ncdu rsync acl restic
 
-          # 3. Persist kernel sysctl tuning. Idempotent: cat > overwrites with
-          # the same content. sysctl --system applies *config files*, never
-          # restarts services.
-          cat <<'EOF' >/etc/sysctl.d/99-webapp-tuning.conf
-          fs.inotify.max_user_instances = 512
-          fs.inotify.max_user_watches   = 524288
-          EOF
-          sysctl --system >/dev/null
+        # 3. Persist kernel sysctl tuning. Idempotent: cat > overwrites with
+        # the same content. sysctl --system applies *config files*, never
+        # restarts services.
+        cat <<'SYSCTL_EOF' >/etc/sysctl.d/99-webapp-tuning.conf
+        fs.inotify.max_user_instances = 512
+        fs.inotify.max_user_watches   = 524288
+        SYSCTL_EOF
+        sysctl --system >/dev/null
 
-          # 4. Report current values for verification.
-          echo "── Active sysctl values ──"
-          sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches
+        # 4. Report current values for verification.
+        echo "── Active sysctl values ──"
+        sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches
 
-          echo "✅ Server update finished."
+        echo "✅ Server update finished."
+        EOF
