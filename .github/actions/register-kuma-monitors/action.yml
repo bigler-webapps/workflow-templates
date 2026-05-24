@@ -139,6 +139,10 @@ runs:
     - name: Close SSH tunnel
       if: always()
       shell: bash
+      env:
+        KUMA_PORT: ${{ inputs.kuma_local_port }}
       run: |
-        # v2.0.0: process pattern simplified — no more `-i .*/id_sync` part.
-        pkill -f 'ssh .* -fNL' || true
+        # v2.0.0: narrow pkill pattern includes port-forward spec so it
+        # never matches unrelated ssh processes (e.g. tailscale's internal
+        # ProxyCommand plumbing on the runner).
+        pkill -f "ssh .* -fNL ${KUMA_PORT}:localhost:${KUMA_PORT}" || true
