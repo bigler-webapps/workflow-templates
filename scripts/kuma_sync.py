@@ -134,12 +134,15 @@ def monitors_from_project_yaml(project_yaml_path):
     """Derive monitor specs from project.yaml.
 
     Convention (no monitoring: section in project.yaml → all defaults):
-      <name_prefix>-frontend          → https://<primary-domain>
-      <name_prefix>-healthz           → https://<primary-domain><healthz_path>
+      <name_prefix>-frontend            → https://<prod-primary>
+      <name_prefix>-healthz             → https://<prod-primary><healthz_path>
+      <name_prefix>-staging-frontend    → https://<staging-primary>      (if defined)
+      <name_prefix>-staging-healthz     → https://<staging-primary><healthz_path>  (if defined)
 
-    name_prefix     defaults to project_name
-    healthz_path    defaults to /api/healthz
-    primary-domain  is environments.production.domains[0]
+    name_prefix       defaults to project_name
+    healthz_path      defaults to /api/healthz
+    prod-primary      is environments.production.domains[0]
+    staging-primary   is environments.staging.domains[0] (if exists; otherwise skipped silently)
 
     Overrides via optional `monitoring:` section in project.yaml:
       monitoring:
@@ -154,6 +157,11 @@ def monitors_from_project_yaml(project_yaml_path):
         # Optional: skip the auto-generated entries entirely (e.g. if you want
         # custom names that don't fit the prefix pattern).
         skip_auto: false
+        # Optional: skip the auto-generated staging monitors only (keep prod).
+        # Useful for apps where staging is internal-only and shouldn't be on
+        # the public-uptime dashboard. No effect when skip_auto=true (in that
+        # case no auto-derived monitors are emitted at all).
+        skip_staging: false
     """
     with open(project_yaml_path, "r", encoding="utf-8") as fh:
         pj = yaml.safe_load(fh) or {}
@@ -168,6 +176,7 @@ def monitors_from_project_yaml(project_yaml_path):
     overrides = monitoring.get("defaults") or {}
     extra = monitoring.get("extra") or []
     skip_auto = bool(monitoring.get("skip_auto", False))
+    skip_staging = bool(monitoring.get("skip_staging", False))
 
     base = {
         "type": "http",
@@ -180,17 +189,39 @@ def monitors_from_project_yaml(project_yaml_path):
     specs = []
     if not skip_auto:
         envs = pj.get("environments") or {}
+
+        # Production monitors (required).
         prod = envs.get("production") or {}
-        domains = prod.get("domains") or []
-        if not domains:
+        prod_domains = prod.get("domains") or []
+        if not prod_domains:
             raise ValueError(
                 f"{project_yaml_path}: environments.production.domains is empty; "
                 "cannot derive auto-monitors. Set monitoring.skip_auto=true or "
                 "add at least one domain."
             )
-        primary = domains[0]
+        primary = prod_domains[0]
         specs.append({**base, "name": f"{name_prefix}-frontend", "url": f"https://{primary}"})
         specs.append({**base, "name": f"{name_prefix}-healthz",  "url": f"https://{primary}{healthz_path}"})
+
+        # Staging monitors (opt-out via monitoring.skip_staging=true, or
+        # implicit-skip when environments.staging.domains is missing/empty).
+        if not skip_staging:
+            staging = envs.get("staging") or {}
+            staging_domains = staging.get("domains") or []
+            if staging_domains:
+                staging_primary = staging_domains[0]
+                specs.append({**base, "name": f"{name_prefix}-staging-frontend", "url": f"https://{staging_primary}"})
+                specs.append({**base, "name": f"{name_prefix}-staging-healthz",  "url": f"https://{staging_primary}{healthz_path}"})
+
+    # Track auto-derived names so explicit `extra` entries can cleanly
+    # override them. This prevents the silent double-write that would
+    # otherwise occur when an operator declares e.g. `monitoring.extra:
+    # [{name: myapp-staging-frontend, url: ...}]` while staging-auto-derive
+    # is also active — both specs would land in the list, sync_monitors
+    # would issue two edit_monitor calls per CI run, and the final state
+    # would depend on iteration order. With explicit override, the `extra`
+    # entry wins and a single notice goes to stderr.
+    auto_names = {s["name"] for s in specs}
 
     for entry in extra:
         merged = {**base, **entry}
@@ -198,6 +229,13 @@ def monitors_from_project_yaml(project_yaml_path):
             raise ValueError(
                 f"{project_yaml_path}: monitoring.extra entry missing 'name' or 'url': {entry!r}"
             )
+        if merged["name"] in auto_names:
+            print(
+                f"ℹ️  monitoring.extra entry '{merged['name']}' overrides "
+                f"auto-derived monitor of the same name (extra wins).",
+                file=sys.stderr,
+            )
+            specs = [s for s in specs if s["name"] != merged["name"]]
         specs.append(merged)
 
     return specs

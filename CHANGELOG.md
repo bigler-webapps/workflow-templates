@@ -10,6 +10,63 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.0.3] - 2026-05-24
+
+### Added
+
+`kuma_sync.py` now auto-derives **staging** Kuma monitors from
+`project.yaml` `environments.staging.domains`, in addition to the
+existing production-monitor derivation.
+
+**Background**: pre-v2.0.3, only production monitors were
+auto-generated (`<prefix>-frontend`, `<prefix>-healthz` pointing at
+`environments.production.domains[0]`). Staging deployments had no
+uptime monitoring unless declared manually via `monitoring.extra`.
+
+### Behaviour
+
+For each project.yaml where `environments.staging.domains` is non-empty,
+the following monitors are now auto-created on next
+`register-kuma-monitors` run:
+
+```
+<name_prefix>-staging-frontend  → https://<staging-domain[0]>
+<name_prefix>-staging-healthz   → https://<staging-domain[0]><healthz_path>
+```
+
+Defaults (interval, max_retries, retry_interval, healthz_path,
+name_prefix) follow the same `monitoring:` overrides as production.
+
+### Opt-out
+
+Apps that don't want auto-staging monitors can opt out via:
+
+```yaml
+monitoring:
+  skip_staging: true
+```
+
+Implicit-skip: when `environments.staging.domains` is missing or empty
+(e.g. apps without a staging environment), no staging monitors are
+created — no opt-out required.
+
+### Migration
+
+For each caller pinned to `register-kuma-monitors@v2.0.1`:
+
+```diff
+-uses: ...register-kuma-monitors@v2.0.1
++uses: ...register-kuma-monitors@v2.0.3
+```
+
+No input contract changes. After the bump, the next
+`workflow_dispatch` (or any `monitoring/**` / `project.yaml` change
+that trips the paths-filter) creates the staging monitors. Apps using
+the legacy `monitoring/monitor.yml` (currently: `hram`) are unaffected
+— derivation only runs when `monitor.yml` is absent.
+
+---
+
 ## [2.0.2] - 2026-05-24
 
 ### Fixed
