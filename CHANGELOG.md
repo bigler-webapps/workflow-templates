@@ -10,18 +10,78 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
-## [Unreleased]
+## [2.0.0] - 2026-05-24
 
-### Planned for v2.0.0
+### Breaking — Tailscale-SSH-only across all SSH-using composites
 
-Once all composite actions that SSH have shipped opt-in Tailnet support
-on the v1.x line, v2.0.0 will **remove the public-IP SSH fallback** and
-require Tailnet-only operation. That removal is the breaking change.
+`ssh_private_key` (and `ssh_private_key_root` on update-server) input
+is **removed** from every SSH-using composite. Authentication is
+Tailnet-identity-based via tag:ci-deploy and the tailnet ACL
+`ssh:`-section (Tailscale-SSH server-side, OpenSSH client reports
+`Authenticated using "none"`).
 
-Consumers who want to be ready for v2: pin to `@v1.x` today, set
-`ts_oauth_client_id` + `ts_oauth_secret` on every caller workflow, point
-`ssh_host` at the Tailnet hostname instead of the public IP. Then the
-v2 cutover is a no-op for behavior, only a tag bump.
+`ts_oauth_client_id` + `ts_oauth_secret` change from optional to
+**required** on every SSH-using composite. The runner joins the
+tailnet ephemerally via OIDC at the start of each composite, then all
+remote operations use plain `ssh user@<host>.tail990d7f.ts.net`.
+
+The previously-experimental `tailscale ssh`-wrapper + rsync-flag-
+translation script in `deploy-app` v1.11.x is **removed**. v2.0.0
+uses plain `ssh` everywhere — simpler, no wrapper. Tailscale-SSH
+server-side intercepts SSH connections at the WireGuard layer and
+authorises the Tailnet identity before any OpenSSH auth method is
+tried; the client doesn't need to know about Tailscale's SSH CA.
+
+### Composites in this release
+
+| Composite | Notes |
+|---|---|
+| deploy-app | Simplified — drops the /tmp/ts-ssh-rsync wrapper. rsync uses `-e ssh`. |
+| deploy-traefik | Tailscale-SSH-only. |
+| janitor | Tailscale-SSH-only. **GHA-validated on main-prod.** |
+| update-server | Tailscale-SSH-only. SSHes as **root** — requires Tailnet ACL ssh:-rule to include `users: ["root"]`. |
+| sync-ssh-access | Tailscale-SSH-only. SSHes as **root** — same ACL requirement. |
+| maintenance | Tailscale-SSH-only. Uses deploy + sudo (NOPASSWD via biglerconsult.infra.deploy_user role). |
+| backup | Tailscale-SSH-only. |
+| restore + restore-dest-import | Tailscale-SSH-only. |
+| sync-kuma-notifications | Tailscale-SSH-only. `ssh -fNL` port-forward works over plain ssh (not `tailscale ssh`). |
+| register-kuma-monitors | **First Tailnet adoption** — was raw-SSH only in v1.x. Now Tailscale-SSH-only. |
+
+### Not migrated (intentional)
+
+- **provision-server** — bootstrap-before-Tailnet-membership. Public-IP
+  SSH-key path stays (the host hasn't joined the tailnet yet on first run).
+  v1.10.x line continues.
+- **restore-source-export** — never SSHes (pulls restic directly from B2
+  to runner). No change needed.
+
+### Caller migration
+
+For each caller pinned to `@v1.x.x`:
+
+1. Add `ts_oauth_client_id` + `ts_oauth_secret` inputs (sourced from
+   `proton://Projekt Webapp-Management/Cloudflare API/ts_oauth_*` via
+   sync-secrets to GH-env-secrets).
+2. Drop `ssh_private_key` / `ssh_private_key_root` input.
+3. Set `ssh_host` to the Tailnet hostname (`<target>.tail990d7f.ts.net`).
+4. Bump `@v1.x.x` → `@v2.0.0` (or `@v2` floating).
+
+### Tailnet ACL prerequisite
+
+Composites that SSH as `root` (update-server, sync-ssh-access) require
+the tailnet ACL `ssh:`-section to include `root` in the users[] list
+for tag:ci-deploy → tag:server-*. The security posture is unchanged
+from v1.x (CI had `ssh_private_key_root` in secrets); the auth method
+just moves from key-based to Tailnet-identity-based.
+
+### Errata
+
+The v1.0.0 CHANGELOG-note ("v2.0.0 will remove the public-IP SSH
+fallback") understated the scope. v2.0.0 doesn't just remove the
+fallback — it removes the SSH-key auth entirely. The public-IP path
+was already a defensive fallback in v1.x; with v2.0.0 there's no
+key-based auth path at all (except provision-server, which is
+out-of-scope).
 
 ---
 
