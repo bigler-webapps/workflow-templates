@@ -155,7 +155,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: e989af5fd68f6c8baa8ce24bba7ccd2a6735e6da  # v2.0.2 — Phase 1 hotfix: pre-v2.0.0 pin checked out the legacy restore-dest-import with ssh_private_key requirement. Phase 2 will bump this to v2.0.3 SHA after release tag.
+          ref: 74ee3545b96828aed8a29047aaab06a48d98d8f0  # v2.0.3 — bumped from v2.0.2 hotfix per the v2.0.3 CHANGELOG promise. Both checkout refs in this workflow now load composites at the v2.0.3 release snapshot.
 
       - id: export
         uses: ./.github/actions/restore-source-export
@@ -182,7 +182,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: e989af5fd68f6c8baa8ce24bba7ccd2a6735e6da  # v2.0.2 — Phase 1 hotfix: pre-v2.0.0 pin checked out the legacy restore-dest-import with ssh_private_key requirement. Phase 2 will bump this to v2.0.3 SHA after release tag.
+          ref: 74ee3545b96828aed8a29047aaab06a48d98d8f0  # v2.0.3 — bumped from v2.0.2 hotfix per the v2.0.3 CHANGELOG promise. Both checkout refs in this workflow now load composites at the v2.0.3 release snapshot.
 
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
