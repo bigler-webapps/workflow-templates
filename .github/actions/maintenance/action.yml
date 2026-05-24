@@ -1,18 +1,19 @@
 name: 'Maintenance — Reboot if needed'
 description: 'Installs apt updates, decides whether reboot is needed, reboots and waits for host, then checks containers.'
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed.
+# Logs in as deploy with sudo -n (NOPASSWD covers apt-get + reboot via
+# the biglerconsult.infra.deploy_user role sudoers config).
+
 inputs:
   target:
     description: 'Inventory target name (used for logging)'
     required: true
   ssh_host:
-    description: 'SSH host address'
+    description: 'Tailnet hostname'
     required: true
   ssh_user:
-    description: 'SSH user'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents)'
+    description: 'SSH user (typically deploy)'
     required: true
   apply_updates:
     description: 'Install apt updates before reboot decision'
@@ -27,33 +28,44 @@ inputs:
     required: false
     default: '[]'
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
+    - name: 🔗 Join Tailnet
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
+
     - name: Validate inputs
       shell: bash
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_SSH_USER: ${{ inputs.ssh_user }}
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
         set -euo pipefail
-        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        required_vars=(SSH_HOST SSH_USER)
         for var_name in "${required_vars[@]}"; do
           if [ -z "${!var_name}" ]; then
             echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
@@ -65,34 +77,6 @@ runs:
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
 
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
-      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
-      with:
-        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
-        oauth-secret: ${{ inputs.ts_oauth_secret }}
-        tags: ${{ inputs.ts_tag }}
-        version: latest
-
-    - name: 🔑 Write SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-
-    - name: ⚙️ Add known hosts
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
     - name: 🛠️ Install system updates
       if: ${{ inputs.apply_updates == 'true' }}
       shell: bash
@@ -101,7 +85,7 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'bash -s' << "EOF"
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'bash -s' << "EOF"
         set -euo pipefail
 
         SUDO=""
@@ -154,7 +138,7 @@ runs:
         if [ "$FORCE_REBOOT" = "true" ]; then
           NEED_REBOOT="yes"
           REASON="forced"
-        elif ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "test -f /var/run/reboot-required"; then
+        elif ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "test -f /var/run/reboot-required"; then
           NEED_REBOOT="yes"
           REASON="reboot-required"
         fi
@@ -163,7 +147,7 @@ runs:
         echo "reason=$REASON" >> "$GITHUB_OUTPUT"
 
         echo "Decision: need_reboot=$NEED_REBOOT (reason=$REASON)"
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uname -a; uptime"
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uname -a; uptime"
 
     - name: ⏭️ Skip reboot
       if: steps.decision.outputs.need_reboot != 'yes'
@@ -178,7 +162,7 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "sudo -n systemctl reboot || sudo -n reboot || reboot" || true
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "sudo -n systemctl reboot || sudo -n reboot || reboot" || true
         echo "Reboot command sent."
 
     - name: ⏳ Wait for host to come back
@@ -189,11 +173,14 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
       run: |
         set -euo pipefail
+        # Tailscale-SSH reconnect: after reboot, tailscaled comes back up,
+        # the node re-advertises in the tailnet, and plain ssh (auth=none)
+        # works again. Magic-DNS resolution stays cached at the runner.
         echo "Waiting for SSH to become reachable again..."
         sleep 15
 
         for i in $(seq 1 60); do
-          if ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=5 "${SSH_USER}@${SSH_HOST}" "echo online" >/dev/null 2>&1; then
+          if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "${SSH_USER}@${SSH_HOST}" "echo online" >/dev/null 2>&1; then
             echo "Host is reachable again."
             exit 0
           fi
@@ -213,14 +200,14 @@ runs:
       run: |
         set -euo pipefail
 
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uptime"
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uptime"
         echo
 
         echo "Running containers:"
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "table {{.Names}}\t{{.Status}}"'
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "table {{.Names}}\t{{.Status}}"'
         echo
 
-        CONTAINER_NAMES="$(ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "{{.Names}}"')"
+        CONTAINER_NAMES="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'docker ps --format "{{.Names}}"')"
         export CONTAINER_NAMES
 
         python3 - <<'PYCODE'

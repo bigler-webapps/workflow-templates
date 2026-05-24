@@ -1,19 +1,19 @@
 name: 'Sync Uptime Kuma Notifications'
 description: 'Reads a YAML config and idempotently registers or updates notification channels in Uptime Kuma. Notifications marked default:true are auto-applied to all monitors. Connects via SSH tunnel to the host (Kuma must be bound to 127.0.0.1:3001 there).'
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed.
+# ssh -fNL port-forward works over Tailnet plain-ssh (auth=none).
+
 inputs:
   config_path:
     description: 'Path to notifications YAML (relative to repo root).'
     required: false
     default: 'monitoring/notifications.yml'
   ssh_host:
-    description: 'SSH host for tunnel into the Kuma server.'
+    description: 'Tailnet hostname for tunnel into the Kuma server.'
     required: true
   ssh_user:
     description: 'SSH user (typically deploy).'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents).'
     required: true
   kuma_user:
     description: 'Automation user in Kuma.'
@@ -34,29 +34,39 @@ inputs:
     required: false
     default: 'false'
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before the SSH tunnel step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: composite
   steps:
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}
         version: latest
+
+    - name: 🔎 Validate Tailnet inputs
+      shell: bash
+      env:
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
+      run: |
+        set -euo pipefail
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        echo "✅ Tailnet OAuth inputs present."
 
     - name: Setup Python
       uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
@@ -79,19 +89,6 @@ runs:
       # handshake. TODO S33: SHA-pin via Renovate when stable.
       run: pip install --quiet "uptime-kuma-api-v2==1.0.2" "PyYAML==6.0.2"
 
-    - name: Configure SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
     - name: Open SSH tunnel to Kuma
       shell: bash
       env:
@@ -100,7 +97,10 @@ runs:
         KUMA_PORT: ${{ inputs.kuma_local_port }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
+        # Plain ssh over Tailnet — auth=none (Tailscale-SSH server-side).
+        # -fNL works because we're using system OpenSSH client, not
+        # `tailscale ssh` (which doesn't accept ssh-style flags).
+        ssh -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes \
             -fNL "${KUMA_PORT}:localhost:${KUMA_PORT}" \
             "${SSH_USER}@${SSH_HOST}"
         # Give the forwarder a moment to settle.
@@ -134,4 +134,5 @@ runs:
       if: always()
       shell: bash
       run: |
-        pkill -f 'ssh -i .*/id_sync .* -fNL' || true
+        # v2.0.0: process pattern simplified — no more `-i .*/id_sync` part.
+        pkill -f 'ssh .* -fNL' || true
