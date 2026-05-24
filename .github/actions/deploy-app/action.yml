@@ -349,13 +349,21 @@ runs:
 
         cd "\$REMOTE_PATH"
 
-        # Server-side serialization: prevent two concurrent docker compose
-        # runs for the same project+environment from racing on container
-        # names. GitHub Actions concurrency (per-workflow) is the primary
-        # guard; this is defense-in-depth for manual triggers or if the
-        # workflow guard fails.
-        LOCK_NAME="\$(printf '%s' "\$REMOTE_PATH" | sed 's|/|_|g; s|^_||')"
-        LOCK_FILE="/tmp/deploy-\${LOCK_NAME}.lock"
+        # v2.0.2: Server-side global serialization — single lock file
+        # SHARED ACROSS ALL APPS on this server. Two effects:
+        #   1. Two concurrent runs of the SAME app+env can't race container
+        #      names (the original v1.x reason).
+        #   2. SEVEN apps simultaneously pushing dependency bumps no longer
+        #      OOM the server with 7 parallel docker builds. They serialize
+        #      naturally; rsync ran parallel beforehand (low memory), only
+        #      the build/up phase needs serialization.
+        # Cross-repo GitHub Actions concurrency.group doesn't help here —
+        # group keys are repo-scoped. Server-side flock is the only
+        # cross-app coordination point.
+        #
+        # Lock auto-releases when this bash process exits (flock holds the
+        # fd, not the file itself — no stale-lock-after-crash risk).
+        LOCK_FILE="/tmp/deploy-server.lock"
         exec 200>"\$LOCK_FILE"
         echo "🔒 Acquiring deploy lock (\${LOCK_FILE})..."
         flock -x 200
