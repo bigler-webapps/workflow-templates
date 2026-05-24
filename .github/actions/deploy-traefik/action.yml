@@ -47,7 +47,7 @@ runs:
   using: 'composite'
   steps:
     - name: 🔗 Join Tailnet
-      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}

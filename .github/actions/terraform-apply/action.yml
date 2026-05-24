@@ -27,7 +27,7 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - uses: hashicorp/setup-terraform@v3  # TODO S33: SHA-pin via Renovate
+    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
       with:
         terraform_version: ${{ inputs.terraform_version }}
         cli_config_credentials_token: ${{ inputs.tf_cloud_token }}

@@ -30,7 +30,7 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - uses: hashicorp/setup-terraform@v3  # TODO S33: SHA-pin via Renovate
+    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3.1.2
       with:
         terraform_version: ${{ inputs.terraform_version }}
         cli_config_credentials_token: ${{ inputs.tf_cloud_token }}
@@ -63,7 +63,7 @@ runs:
 
     - name: Plan-Output als PR-Comment
       if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7  # TODO S33: SHA-pin via Renovate
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
       env:
         PLAN: "${{ steps.plan.outputs.stdout }}"
       with:
