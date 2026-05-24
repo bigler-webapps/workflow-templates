@@ -1,5 +1,8 @@
 name: 'Deploy Traefik Infrastructure'
-description: 'Deploys Traefik + supporting infrastructure stack to a server via rsync + docker compose'
+description: 'Deploys Traefik + supporting infrastructure stack to a server via rsync + docker compose over Tailscale SSH'
+
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed; auth via
+# Tailnet identity (tag:ci-deploy) + tailnet ACL ssh:-section.
 
 inputs:
   target:
@@ -21,35 +24,29 @@ inputs:
     required: false
     default: '/srv/infrastructure/webapp-management'
   ssh_host:
-    description: 'SSH host address'
+    description: 'Tailnet hostname (e.g. main-prod.tail990d7f.ts.net)'
     required: true
   ssh_user:
-    description: 'SSH user'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents)'
+    description: 'SSH user on the target host'
     required: true
   secrets_context_json:
     description: 'JSON-serialized secrets context (toJson(secrets)) for generate-env'
     required: true
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -57,19 +54,24 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: latest
 
-    - name: Validate inputs
+    - name: 🔎 Validate inputs
       shell: bash
       env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-        SSH_USER: ${{ inputs.ssh_user }}
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
         INPUT_COMPOSE_PROFILES: ${{ inputs.compose_profiles }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
+        INPUT_TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
-        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
-        for var_name in "${required_vars[@]}"; do
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        for var_name in INPUT_SSH_HOST INPUT_SSH_USER; do
           if [ -z "${!var_name}" ]; then
-            echo "❌ Missing required input '${var_name}' for target '${{ inputs.target }}'."
+            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
             exit 1
           fi
         done
@@ -77,24 +79,7 @@ runs:
           echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: main, staging)"
           exit 1
         }
-
-    - name: 🔑 Write SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-
-    - name: ⚙️ Add known hosts
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+        echo "✅ Inputs validated."
 
     - name: 🐍 Setup Python
       uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v4.8.0
@@ -114,20 +99,14 @@ runs:
       run: |
         set -euo pipefail
         # S5/S21 partial mitigation: drop CI-only secret families before
-        # generate-env sees them. Reduces blast radius of any crash/debug
-        # leak inside the generate-env subprocess.
+        # generate-env sees them. TS_ added in v2.0.0 (Tailscale OAuth).
         SECRETS_CONTEXT=$(
           printf '%s' "$SECRETS_CONTEXT_RAW" \
-            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_)") | not))'
+            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
         )
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
         generate-env --env ${{ inputs.target_environment }} --config project.yaml
-
-    # Note: Any additional file-material (origin certificates, GPG keys, etc.)
-    # that needs to land on the server is the caller's responsibility — write
-    # to ./certs/, ./gpg/, or similar before this action runs. rsync picks
-    # them up automatically.
 
     - name: 📂 Rsync project to server
       shell: bash
@@ -137,13 +116,14 @@ runs:
         REMOTE_PATH: ${{ inputs.remote_path }}
       run: |
         set -euo pipefail
+        # Plain ssh over Tailnet — auth=none (Tailscale-SSH server-side).
         rsync -rlvz \
           --delete --delete-delay \
           --partial --delay-updates \
           --no-owner --no-group --no-perms --omit-dir-times \
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-          -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+          -e "ssh -o StrictHostKeyChecking=accept-new" \
           --exclude '.git' \
           --exclude '.github' \
           --exclude 'acme.json' \
@@ -158,11 +138,13 @@ runs:
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_PATH: ${{ inputs.remote_path }}
+        COMPOSE_PROFILES: ${{ inputs.compose_profiles }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'EOF'
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" bash <<EOF
         set -euo pipefail
-        cd "${{ inputs.remote_path }}"
+        cd "${REMOTE_PATH}"
 
         if [ ! -f .env ]; then echo "❌ .env missing"; exit 1; fi
 
@@ -172,31 +154,31 @@ runs:
         fi
 
         if [ ! -f acme.json ]; then touch acme.json; chmod 600 acme.json; fi
-        $DOCKER network inspect traefik_proxy >/dev/null 2>&1 || $DOCKER network create traefik_proxy
+        \$DOCKER network inspect traefik_proxy >/dev/null 2>&1 || \$DOCKER network create traefik_proxy
 
         # COMPOSE_PROFILES set INSIDE the SSH session so docker compose sees it.
         # Value is regex-validated upstream; safe to template-inline.
-        export COMPOSE_PROFILES="${{ inputs.compose_profiles }}"
+        export COMPOSE_PROFILES="${COMPOSE_PROFILES}"
 
         # `up -d --remove-orphans` is idempotent: it starts missing services,
         # recreates only those whose compose config changed (image/env-file/
         # labels/mounts), and removes orphan containers. Unchanged services
         # (e.g. uptime-kuma on docs-only pushes) stay running untouched.
-        # A previous defensive `down` step was removed because it caused
+        # A previous defensive 'down' step was removed because it caused
         # unrelated app deploys hitting Kuma to fail during the brief downtime
         # window.
         #
         # Pre-up cleanup of stopped containers in THIS project's scope
         # (running containers untouched). Catches residual hash-renamed
-        # orphans from any historical interrupted `--force-recreate` so the
-        # subsequent `up` doesn't hit name-conflict errors. Cheap on a healthy
+        # orphans from any historical interrupted '--force-recreate' so the
+        # subsequent 'up' doesn't hit name-conflict errors. Cheap on a healthy
         # stack (nothing to remove).
-        COMPOSE_PROJECT_NAME=$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || true)
-        if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
-          echo "🧹 Pruning stopped containers in project ${COMPOSE_PROJECT_NAME}..."
-          $DOCKER container prune -f --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" || true
+        COMPOSE_PROJECT_NAME=\$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || true)
+        if [ -n "\${COMPOSE_PROJECT_NAME:-}" ]; then
+          echo "🧹 Pruning stopped containers in project \${COMPOSE_PROJECT_NAME}..."
+          \$DOCKER container prune -f --filter "label=com.docker.compose.project=\${COMPOSE_PROJECT_NAME}" || true
         fi
 
-        echo "🚀 Starting stack with COMPOSE_PROFILES=${COMPOSE_PROFILES}..."
-        $DOCKER compose --env-file .env up -d --remove-orphans
+        echo "🚀 Starting stack with COMPOSE_PROFILES=\${COMPOSE_PROFILES}..."
+        \$DOCKER compose --env-file .env up -d --remove-orphans
         EOF

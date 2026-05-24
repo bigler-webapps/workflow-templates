@@ -1,6 +1,9 @@
 name: 'Backup, Verify & Sync'
 description: 'Syncs ops scripts to server, runs Restic backup, verifies, and optionally syncs production data to staging. Expects ops-scripts/ in caller working dir.'
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed; auth via
+# Tailnet identity (tag:ci-deploy) + tailnet ACL ssh:-section.
+
 inputs:
   target:
     description: 'Inventory target name (used for logging)'
@@ -14,13 +17,10 @@ inputs:
     required: false
     default: '[]'
   ssh_host:
-    description: 'SSH host address'
+    description: 'Tailnet hostname'
     required: true
   ssh_user:
     description: 'SSH user'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents)'
     required: true
   restic_repo_b2:
     description: 'Restic B2 repository URL'
@@ -43,23 +43,20 @@ inputs:
     required: false
     default: 'backup/infra_paths.txt'
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -72,7 +69,6 @@ runs:
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
         RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
         RESTIC_PASSWORD: ${{ inputs.restic_password }}
         B2_KEY_ID: ${{ inputs.b2_key_id }}
@@ -80,9 +76,15 @@ runs:
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_SSH_USER: ${{ inputs.ssh_user }}
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
         set -euo pipefail
-        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        required_vars=(SSH_HOST SSH_USER RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
         for var_name in "${required_vars[@]}"; do
           if [ -z "${!var_name}" ]; then
             echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
@@ -117,25 +119,6 @@ runs:
           touch "${OPS_SCRIPTS_PATH}/infra_paths.txt"
         fi
 
-    - name: 🔑 Write SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-
-    - name: ⚙️ Add known hosts
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
     - name: 📂 Sync ops scripts to server
       id: sync_scripts
       continue-on-error: true
@@ -146,7 +129,7 @@ runs:
         OPS_SCRIPTS_PATH: ${{ inputs.ops_scripts_path }}
       run: |
         set -euo pipefail
-        rsync -avz -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+        rsync -avz -e "ssh -o StrictHostKeyChecking=accept-new" \
           "${OPS_SCRIPTS_PATH}/" \
           "${SSH_USER}@${SSH_HOST}:/srv/infrastructure/ops-scripts/"
 
@@ -167,7 +150,7 @@ runs:
       run: |
         set -euo pipefail
 
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "RESTIC_REPO_LOCAL=$(printf '%q' "$RESTIC_REPO_LOCAL") \
            RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
            RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
@@ -195,7 +178,7 @@ runs:
       run: |
         set -euo pipefail
 
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
            RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
            B2_KEY_ID=$(printf '%q' "$B2_KEY_ID") \
@@ -225,7 +208,7 @@ runs:
       run: |
         set -euo pipefail
 
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "RESTIC_REPOSITORY=$(printf '%q' "$RESTIC_REPOSITORY") \
            RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
            AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") \

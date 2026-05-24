@@ -10,6 +10,9 @@ description: >-
   and derives monitors from `project.yaml` (see kuma_sync.monitors_from_project_yaml
   for the convention and per-app overrides).
 
+# v2.0.0 — First Tailnet adoption AND Tailscale-SSH-only. Previously raw
+# SSH (no Tailnet opt-in). Now requires ts_oauth_* + plain ssh over Tailnet.
+
 inputs:
   config_path:
     description: 'Path to monitor YAML (legacy). If the file is missing on disk, the action falls back to project_yaml_path.'
@@ -20,13 +23,10 @@ inputs:
     required: false
     default: 'project.yaml'
   ssh_host:
-    description: 'SSH host for tunnel into the Kuma server.'
+    description: 'Tailnet hostname for tunnel into the Kuma server.'
     required: true
   ssh_user:
     description: 'SSH user (typically deploy).'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents).'
     required: true
   kuma_user:
     description: 'Automation user in Kuma.'
@@ -42,10 +42,41 @@ inputs:
     description: 'Set "true" to delete Kuma monitors not present in this config file. WARNING: deletes monitors from OTHER apps too if their names are absent here — only enable in single-source-of-truth setups.'
     required: false
     default: 'false'
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
+    required: true
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret.'
+    required: true
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node.'
+    required: false
+    default: 'tag:ci-deploy'
 
 runs:
   using: composite
   steps:
+    - name: 🔗 Join Tailnet
+      uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: latest
+
+    - name: 🔎 Validate Tailnet inputs
+      shell: bash
+      env:
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
+      run: |
+        set -euo pipefail
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        echo "✅ Tailnet OAuth inputs present."
+
     - name: Setup Python
       uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
       with:
@@ -67,19 +98,6 @@ runs:
       # handshake. TODO S33: SHA-pin via Renovate when stable.
       run: pip install --quiet "uptime-kuma-api-v2==1.0.2" "PyYAML==6.0.2"
 
-    - name: Configure SSH key
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
     - name: Open SSH tunnel to Kuma
       shell: bash
       env:
@@ -88,7 +106,8 @@ runs:
         KUMA_PORT: ${{ inputs.kuma_local_port }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
+        # Plain ssh over Tailnet — auth=none (Tailscale-SSH server-side).
+        ssh -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes \
             -fNL "${KUMA_PORT}:localhost:${KUMA_PORT}" \
             "${SSH_USER}@${SSH_HOST}"
         for _ in $(seq 1 10); do
@@ -120,5 +139,10 @@ runs:
     - name: Close SSH tunnel
       if: always()
       shell: bash
+      env:
+        KUMA_PORT: ${{ inputs.kuma_local_port }}
       run: |
-        pkill -f 'ssh -i .*/id_sync .* -fNL' || true
+        # v2.0.0: narrow pkill pattern includes port-forward spec so it
+        # never matches unrelated ssh processes (e.g. tailscale's internal
+        # ProxyCommand plumbing on the runner).
+        pkill -f "ssh .* -fNL ${KUMA_PORT}:localhost:${KUMA_PORT}" || true

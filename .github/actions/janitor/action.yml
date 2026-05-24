@@ -1,18 +1,21 @@
 name: 'Janitor (Docker prune + disk report)'
 description: 'Syncs ops scripts to the server and runs janitor.sh. Expects ops-scripts/ in the caller working dir.'
 
+# v2.0.0 — Tailscale-SSH-only. ssh_private_key removed; auth is via
+# Tailnet identity (tag:ci-deploy) + tailnet ACL ssh:-section. Transport
+# is plain `ssh user@<host>.tail990d7f.ts.net` (no tailscale-ssh wrapper
+# needed — Tailscale's SSH listener accepts the Tailnet-identity at the
+# WireGuard layer; OpenSSH reports `Authenticated using "none"`).
+
 inputs:
   target:
     description: 'Inventory target name (used for logging)'
     required: true
   ssh_host:
-    description: 'SSH host address'
+    description: 'Tailnet hostname (e.g. main-prod.tail990d7f.ts.net)'
     required: true
   ssh_user:
-    description: 'SSH user'
-    required: true
-  ssh_private_key:
-    description: 'SSH private key (PEM contents)'
+    description: 'SSH user on the target host'
     required: true
   ops_scripts_path:
     description: 'Local path containing ops scripts to sync to the server'
@@ -23,46 +26,20 @@ inputs:
     required: false
     default: '/srv/infrastructure/ops-scripts'
   ts_oauth_client_id:
-    description: 'Tailscale OAuth client ID. When set together with ts_oauth_secret, the runner joins the tailnet via OIDC before any SSH step, and ssh_host is expected to be a Tailnet hostname (or IP) instead of a public IP. Opt-in: when empty, the action falls back to public-IP SSH unchanged.'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client ID. Required (v2.0.0+ is Tailscale-SSH-only).'
+    required: true
   ts_oauth_secret:
-    description: 'Tailscale OAuth client secret (paired with ts_oauth_client_id).'
-    required: false
-    default: ''
+    description: 'Tailscale OAuth client secret.'
+    required: true
   ts_tag:
-    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL and the OAuth client must be authorised for it.'
+    description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL.'
     required: false
     default: 'tag:ci-deploy'
 
 runs:
   using: 'composite'
   steps:
-    - name: Validate inputs
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-        SSH_USER: ${{ inputs.ssh_user }}
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
-        INPUT_TARGET: ${{ inputs.target }}
-        INPUT_SSH_USER: ${{ inputs.ssh_user }}
-        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        required_vars=(SSH_HOST SSH_USER SSH_PRIVATE_KEY)
-        for var_name in "${required_vars[@]}"; do
-          if [ -z "${!var_name}" ]; then
-            echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
-            exit 1
-          fi
-        done
-
-        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
-        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
-        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
-
-    - name: 🔗 Join Tailnet (optional, opt-in via ts_oauth_*)
-      if: inputs.ts_oauth_client_id != '' && inputs.ts_oauth_secret != ''
+    - name: 🔗 Join Tailnet
       uses: tailscale/github-action@v3   # TODO S33: SHA-pin via Renovate
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -70,24 +47,24 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: latest
 
-    - name: 🔑 Write SSH key
+    - name: 🔎 Validate inputs
       shell: bash
       env:
-        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SSH_USER: ${{ inputs.ssh_user }}
+        INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
+        INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
         set -euo pipefail
-        mkdir -p ~/.ssh
-        printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_sync
-        chmod 600 ~/.ssh/id_sync
-
-    - name: ⚙️ Add known hosts
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.ssh
-        ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+        if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
+          echo "❌ ts_oauth_client_id and ts_oauth_secret are required (v2.0.0+)"
+          exit 1
+        fi
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid target"; exit 1; }
+        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid ssh_user"; exit 1; }
+        printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid ssh_host"; exit 1; }
+        echo "✅ Inputs validated."
 
     - name: 📂 Sync ops scripts to server
       shell: bash
@@ -98,7 +75,10 @@ runs:
         REMOTE_SCRIPTS_PATH: ${{ inputs.remote_scripts_path }}
       run: |
         set -euo pipefail
-        rsync -avz -e "ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes" \
+        # `rsync -e ssh` over Tailnet. Auth is Tailnet-identity (server
+        # responds Authenticated="none" — Tailscale's SSH listener
+        # validated at WireGuard layer). No -i private-key needed.
+        rsync -avz -e "ssh -o StrictHostKeyChecking=accept-new" \
           "${OPS_SCRIPTS_PATH}/" \
           "${SSH_USER}@${SSH_HOST}:${REMOTE_SCRIPTS_PATH}/"
 
@@ -110,5 +90,5 @@ runs:
         REMOTE_SCRIPTS_PATH: ${{ inputs.remote_scripts_path }}
       run: |
         set -euo pipefail
-        ssh -i ~/.ssh/id_sync -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}" \
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "bash ${REMOTE_SCRIPTS_PATH}/janitor.sh"
