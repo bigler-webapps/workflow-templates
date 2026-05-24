@@ -1,5 +1,20 @@
-name: 'Update Server (incremental config)'
-description: >-
+name: 'Update Server (incremental config) — DEPRECATED'
+description: |
+  DEPRECATED 2026-05-24. The supported update path is the Ansible-based
+  workflow (`webapp-management/.github/workflows/ansible-provision.yml` →
+  `site.yml` with `biglerconsult.infra` collection). That playbook is
+  idempotent and is the canonical provision-AND-update entry point.
+
+  Reason for deprecation: this composite SSHes as `root` over Tailnet, which
+  forces the tailnet ACL `ssh:` section to keep `root` in `users[]` for
+  `tag:ci-deploy`. With `root` removed from the CI tag (target state), a
+  compromised CI OAuth secret could no longer pivot to root on any server.
+  See SECURITY_FINDINGS.md S182.
+
+  Composite remains callable for break-glass scenarios where Ansible is
+  not available; callers should expect this to be removed once all callers
+  have migrated.
+
   Safe, idempotent re-apply of server tuning and tooling on an already-
   provisioned host. Does NOT touch firewall, sudoers, fail2ban core config,
   Docker daemon, or deploy users. Use this to roll out new sysctl tuning,

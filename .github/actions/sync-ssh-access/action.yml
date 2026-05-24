@@ -1,5 +1,27 @@
-name: 'Sync SSH Access Keys'
-description: 'Syncs root + deploy authorized_keys to a server from access/ directory in caller working dir.'
+name: 'Sync SSH Access Keys — DEPRECATED'
+description: |
+  DEPRECATED 2026-05-24. The supported access-key-sync path is the
+  Ansible-based workflow
+  (`webapp-management/.github/workflows/ansible-provision.yml` → `site.yml`).
+  See `site.yml` pre_tasks/post_tasks: pubkeys from `access/{deploy,
+  infrastructure,root}/*.pub` are applied via the `biglerconsult.infra.
+  deploy_user` role + an explicit `ansible.posix.authorized_key` task for root.
+
+  Reason for deprecation: this composite SSHes as `root` over Tailnet to
+  write `/root/.ssh/authorized_keys` directly, which forces the tailnet
+  ACL `ssh:` section to keep `root` in `users[]` for `tag:ci-deploy`.
+  See SECURITY_FINDINGS.md S182.
+
+  Future state after S32 (UFW :22 closure): break-glass key bootstrap on
+  a fresh server happens via Hetzner Rescue Console (cloud-init or manual
+  `authorized_keys` write); CI key-sync is no longer required because
+  Tailnet identity replaces `authorized_keys` for CI deploy auth.
+
+  Composite remains callable for break-glass scenarios; callers should
+  expect this to be removed once all callers have migrated to Ansible.
+
+  Syncs root + deploy authorized_keys to a server from access/ directory
+  in caller working dir.
 
 # v2.0.0 — Tailscale-SSH-only. ssh_private_key removed.
 # Logs in as root via Tailnet identity (tag:ci-deploy) — requires
