@@ -1,7 +1,24 @@
-name: 'Provision Server (bootstrap base)'
-description: 'Bootstraps a server (packages, Docker, deploy user, dirs, firewall, fail2ban). Does NOT sync access keys — call the sync-ssh-access composite separately.'
+name: 'Provision Server (bootstrap base) — DEPRECATED'
+description: |
+  DEPRECATED 2026-05-24. The supported provisioning path is the Ansible-based
+  workflow (ansible-provision.yml → biglerconsult.infra collection). This
+  composite remains as a break-glass option only — it installs Docker via the
+  unsigned `curl https://get.docker.com | sh` pipeline which is a supply-chain
+  risk during BGP/DNS-MITM scenarios. Callers must explicitly acknowledge the
+  legacy install path via `legacy_acknowledge: true`.
+
+  Bootstraps a server (packages, Docker, deploy user, dirs, firewall,
+  fail2ban). Does NOT sync access keys — call the sync-ssh-access composite
+  separately.
 
 inputs:
+  legacy_acknowledge:
+    description: |
+      MUST be set to "true" to confirm the caller accepts the deprecated
+      `curl | sh` Docker install path. Any other value causes the composite
+      to refuse to run. Prevents accidental invocation from new code paths.
+    required: false
+    default: 'false'
   target:
     description: 'Inventory target name (used for logging)'
     required: true
@@ -41,11 +58,12 @@ runs:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}
-        version: latest
+        version: "1.98.3"
 
     - name: 🔎 Validate inputs
       shell: bash
       env:
+        INPUT_LEGACY_ACKNOWLEDGE: ${{ inputs.legacy_acknowledge }}
         INPUT_TARGET: ${{ inputs.target }}
         # Default to "deploy" when caller leaves it empty (matches inventory default).
         INPUT_DEPLOY_USER: ${{ inputs.deploy_user || 'deploy' }}
@@ -54,6 +72,13 @@ runs:
         SSH_HOST: ${{ inputs.ssh_host }}
       run: |
         set -euo pipefail
+
+        if [ "$INPUT_LEGACY_ACKNOWLEDGE" != "true" ]; then
+          echo "❌ This composite is DEPRECATED and installs Docker via 'curl | sh' (supply-chain risk)."
+          echo "   Use .github/workflows/ansible-provision.yml in webapp-management instead."
+          echo "   If you must use this path (break-glass only), pass legacy_acknowledge: true."
+          exit 1
+        fi
 
         if ! printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$'; then
           echo "❌ Invalid 'target' input"

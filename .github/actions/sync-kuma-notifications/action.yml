@@ -48,7 +48,7 @@ runs:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}
-        version: latest
+        version: "1.98.3"
 
     - name: 🔎 Validate inputs
       shell: bash
@@ -99,13 +99,18 @@ runs:
         KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
         KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
         DISCORD_WEBHOOK_URL: ${{ inputs.discord_webhook_url }}
+        # S20-pattern: route caller-supplied inputs through env vars instead of
+        # ${{ ... }} interpolation inside the shell body, so values containing
+        # shell metacharacters (`; rm -rf /`) cannot escape the variable.
+        INPUT_PRUNE: ${{ inputs.prune }}
+        INPUT_CONFIG_PATH: ${{ inputs.config_path }}
       run: |
         set -euo pipefail
         PRUNE_FLAG=""
-        if [ "${{ inputs.prune }}" = "true" ]; then
+        if [ "$INPUT_PRUNE" = "true" ]; then
           PRUNE_FLAG="--prune"
         fi
         python "${GITHUB_ACTION_PATH}/../../../scripts/kuma_sync.py" \
           notifications \
-          --config "${{ inputs.config_path }}" \
+          --config "$INPUT_CONFIG_PATH" \
           ${PRUNE_FLAG}

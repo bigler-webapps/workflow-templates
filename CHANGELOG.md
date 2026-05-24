@@ -65,6 +65,68 @@ that trips the paths-filter) creates the staging monitors. Apps using
 the legacy `monitoring/monitor.yml` (currently: `hram`) are unaffected
 — derivation only runs when `monitor.yml` is absent.
 
+### Security
+
+Audit pass 2026-05-24 (sec_reviewer) addressed 5 P2 findings in
+workflow-templates. Behaviour-preserving hardening; no input contract
+changes for the kuma sync composites.
+
+- **INFRA-NEW-tailscale-version-latest**: `tailscale/github-action` had
+  `version: latest` in 12 composites, downloading the Tailscale client
+  binary from the Tailscale CDN at runtime without pinning. Pinned to
+  `version: "1.98.3"` across all 12 composites
+  (`backup`, `deploy-app`, `deploy-traefik`, `janitor`, `maintenance`,
+  `provision-server`, `register-kuma-monitors`, `restore`,
+  `restore-dest-import`, `sync-kuma-notifications`, `sync-ssh-access`,
+  `update-server`). The action validates the binary hash when an
+  explicit version is supplied.
+- **INFRA-NEW-restore-xserver-stale-ssh-key**: removed the now-unused
+  `ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}` line from
+  `restore-cross-server.yml`. `restore-dest-import` is
+  Tailscale-SSH-only since v2.0.0 and silently ignored the input, but
+  the secret reference still appeared in the `with:` block.
+- **INFRA-NEW-ops-scripts-ref-mutable**: `restore-cross-server.yml`
+  `ops_scripts_ref` default changed from `'main'` (moving ref) to `''`,
+  with a hard-fail in the `validate` job that rejects empty values and
+  anything that isn't a FULL 40-char commit SHA or a SemVer tag (`v1.2.3`
+  or `v1.2.3-rc1`). Short SHAs are deliberately rejected because 7-char
+  hex strings can collide with branch names (`cafe123`, `feedbed1`),
+  defeating the drift-prevention goal. Prevents silent prod-host drift
+  via webapp-ops-scripts main. No external callers —
+  `webapp-management/.github/workflows/restore-cross-server.yml` is a
+  separate `workflow_dispatch` orchestrator and does not call this
+  reusable workflow.
+- **INFRA-NEW-provision-curl-pipe-sh**: `provision-server` composite is
+  now formally DEPRECATED in the action description and refuses to run
+  unless the caller passes `legacy_acknowledge: true`. The unsigned
+  `curl https://get.docker.com | sh` pipeline remains as break-glass
+  only; supported path is `webapp-management/.github/workflows/ansible-provision.yml`.
+- **INFRA-NEW-kuma-prune-injection**: `sync-kuma-notifications` and
+  `register-kuma-monitors` previously interpolated `inputs.prune`,
+  `inputs.config_path`, and `inputs.project_yaml_path` directly into
+  the shell body via `${{ ... }}`. Routed through `env:` (S20-pattern)
+  so caller-supplied values containing shell metacharacters cannot
+  escape the variable.
+
+### Fixed (pre-existing, discovered during security review)
+
+- `restore-cross-server.yml` reusable workflow's `dest_import` job did
+  not pass `ts_oauth_client_id` / `ts_oauth_secret` to
+  `restore-dest-import`, which has required these inputs since v2.0.0
+  (Tailscale-SSH-only). The workflow had zero external callers, so the
+  latent runtime breakage never surfaced. Added `TS_OAUTH_CLIENT_ID`
+  and `TS_OAUTH_SECRET` to the workflow `secrets:` declaration and
+  forwarded them into the composite call site.
+- `restore-cross-server.yml` self-checkout `ref:` (used to load
+  `./.github/actions/...` composites inside both `source_export` and
+  `dest_import` jobs) was pinned to a pre-v2.0.0 SHA
+  (`7177b1a6...`). That tree carried the legacy `restore-dest-import`
+  with `ssh_private_key: required: true` and no Tailscale inputs —
+  meaning the v2.0.0 composite contract documented in v2.0.0's
+  CHANGELOG was never actually loaded by this workflow. Bumped to
+  `e989af5fd68f6c8baa8ce24bba7ccd2a6735e6da` (v2.0.2). Phase 2 (v2.0.3
+  release tag cut) will bump it again to the v2.0.3 SHA.
+
 ---
 
 ## [2.0.2] - 2026-05-24

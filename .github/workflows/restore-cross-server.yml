@@ -67,17 +67,30 @@ on:
           Ref/SHA of bigler-webapps/webapp-ops-scripts to use on the dest host
           (drives restore.py --mode import-only). Source side no longer uses
           ops-scripts (restic runs directly from the runner against B2).
-          TODO (S33-analog): callers should pass a pinned commit SHA instead of the 'main' default
-          so restore.py executions on prod hosts cannot silently change.
+          MUST be a pinned commit SHA — the validate job hard-fails on an empty
+          value to prevent silent prod-host execution of a moving 'main' ref.
+          (S33-analog hardening: workflow_call schema cannot enforce a required
+          input without a default, so we enforce at validate time instead.)
         type: string
         required: false
-        default: 'main'
+        default: ''
     secrets:
       CROSS_SERVER_TRANSPORT_KEY:
         description: >-
           Long-lived shared key (org/repo secret). Both jobs derive the per-run
           encryption passphrase from this key + the GitHub run identifier. The
           key itself never appears in logs, outputs, or API responses.
+        required: true
+      TS_OAUTH_CLIENT_ID:
+        description: >-
+          Tailscale OAuth client ID for the ephemeral CI tailnet node used by
+          restore-dest-import to SSH into the destination host via WireGuard.
+          Required since restore-dest-import@v2.0.0 (Tailscale-SSH-only).
+        required: true
+      TS_OAUTH_SECRET:
+        description: >-
+          Tailscale OAuth client secret paired with TS_OAUTH_CLIENT_ID.
+          Required since restore-dest-import@v2.0.0.
         required: true
 
 jobs:
@@ -92,6 +105,7 @@ jobs:
           SOURCE_ENV: ${{ inputs.source_env }}
           DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
           SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+          OPS_SCRIPTS_REF: ${{ inputs.ops_scripts_ref }}
         run: |
           set -euo pipefail
           if [ "$SOURCE_TARGET" = "$DEST_TARGET" ]; then
@@ -104,6 +118,19 @@ jobs:
           printf '%s' "$SOURCE_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid source_env"; exit 1; }
           printf '%s' "$DEST_SUBTARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid dest_subtarget"; exit 1; }
           printf '%s' "$SNAPSHOT_ID" | grep -qE '^(latest|[a-zA-Z0-9_-]+)$' || { echo "❌ Invalid snapshot_id"; exit 1; }
+          # ops_scripts_ref hardening: empty value or a moving branch ref ('main'/'master'/'develop')
+          # would let webapp-ops-scripts/restore.py change silently between runs. Require either
+          # a FULL 40-char commit SHA (unambiguous; short SHAs like 'cafe123' can collide with
+          # branch names that happen to be valid hex) OR a SemVer tag (vX.Y.Z with optional
+          # pre-release suffix like 'v1.2.3-rc1') to prevent silent prod drift.
+          if [ -z "$OPS_SCRIPTS_REF" ]; then
+            echo "❌ ops_scripts_ref must be a pinned commit SHA or a release tag. Empty value rejected to prevent silent prod-host drift."
+            exit 1
+          fi
+          printf '%s' "$OPS_SCRIPTS_REF" | grep -qE '^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?)$' || {
+            echo "❌ ops_scripts_ref must be a FULL 40-char commit SHA or a SemVer tag (e.g. 'v1.2.3' or 'v1.2.3-rc1'). Short SHAs are rejected because 7-char hex strings can collide with branch names. Got: '$OPS_SCRIPTS_REF'."
+            exit 1
+          }
 
   source_export:
     needs: validate
@@ -128,7 +155,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: 7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+          ref: e989af5fd68f6c8baa8ce24bba7ccd2a6735e6da  # v2.0.2 — Phase 1 hotfix: pre-v2.0.0 pin checked out the legacy restore-dest-import with ssh_private_key requirement. Phase 2 will bump this to v2.0.3 SHA after release tag.
 
       - id: export
         uses: ./.github/actions/restore-source-export
@@ -155,7 +182,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: 7177b1a6d8e3feab98c320d422c7c4b22cb025f4
+          ref: e989af5fd68f6c8baa8ce24bba7ccd2a6735e6da  # v2.0.2 — Phase 1 hotfix: pre-v2.0.0 pin checked out the legacy restore-dest-import with ssh_private_key requirement. Phase 2 will bump this to v2.0.3 SHA after release tag.
 
       - name: Checkout webapp-ops-scripts
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -173,8 +200,9 @@ jobs:
           dest_compose_path: ${{ inputs.dest_compose_path }}
           ssh_host: ${{ secrets.SSH_HOST }}
           ssh_user: ${{ secrets.SSH_USER }}
-          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
           artifact_name: ${{ needs.source_export.outputs.artifact_name }}
           transport_key: ${{ secrets.CROSS_SERVER_TRANSPORT_KEY }}
           ops_scripts_path: ops-scripts
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          ts_oauth_client_id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts_oauth_secret: ${{ secrets.TS_OAUTH_SECRET }}
