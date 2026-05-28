@@ -41,6 +41,23 @@
         modification_time: preserve
         access_time: preserve
 
+    # Writes GF_SECURITY_ADMIN_PASSWORD into /srv/loki/.env when the CI runner
+    # exposes it as an env var (injected from the GitHub staging environment by
+    # sync-secrets --server --secret-target staging).
+    # no_log=true: prevents the value appearing in Ansible output or logs.
+    # Idempotent: lineinfile replaces an existing line on re-runs.
+    - name: Write Grafana admin password to /srv/loki/.env (from CI GitHub env)
+      ansible.builtin.lineinfile:
+        path: "{{ loki_base_dir }}/.env"
+        regexp: '^GF_SECURITY_ADMIN_PASSWORD='
+        line: "GF_SECURITY_ADMIN_PASSWORD={{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | length > 0
+      no_log: true
+
     - name: Render Loki config
       ansible.builtin.template:
         src: loki-config.yml.j2
