@@ -1,0 +1,96 @@
+---
+- name: Deploy Loki + Grafana (staging log collector)
+  become: true
+  block:
+    - name: Create Loki config + base directories (root-owned)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      loop:
+        - "{{ loki_base_dir }}"
+        - "{{ loki_config_dir }}"
+
+    - name: Create Loki data directory (Loki container UID 10001)
+      ansible.builtin.file:
+        path: "{{ loki_data_dir }}"
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "0750"
+
+    - name: Create Grafana provisioning directory (Grafana container UID 472)
+      ansible.builtin.file:
+        path: "{{ loki_grafana_provisioning_dir }}"
+        state: directory
+        owner: "472"
+        group: "472"
+        mode: "0750"
+
+    # touch preserves mtime on re-runs so the compose env_file is not
+    # bumped unnecessarily. Populated by: sync-secrets --server --secret-target staging
+    - name: Ensure Grafana env file exists (populated out-of-band by sync-secrets)
+      ansible.builtin.file:
+        path: "{{ loki_base_dir }}/.env"
+        state: touch
+        owner: root
+        group: root
+        mode: "0600"
+        modification_time: preserve
+        access_time: preserve
+
+    # Writes GF_SECURITY_ADMIN_PASSWORD into /srv/loki/.env when the CI runner
+    # exposes it as an env var (injected from the GitHub staging environment by
+    # sync-secrets --server --secret-target staging).
+    # no_log=true: prevents the value appearing in Ansible output or logs.
+    # Idempotent: lineinfile replaces an existing line on re-runs.
+    - name: Write Grafana admin password to /srv/loki/.env (from CI GitHub env)
+      ansible.builtin.lineinfile:
+        path: "{{ loki_base_dir }}/.env"
+        regexp: '^GF_SECURITY_ADMIN_PASSWORD='
+        line: "GF_SECURITY_ADMIN_PASSWORD={{ lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | length > 0
+      no_log: true
+
+    - name: Render Loki config
+      ansible.builtin.template:
+        src: loki-config.yml.j2
+        dest: "{{ loki_config_dir }}/loki.yml"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Render Grafana Loki datasource provisioning
+      ansible.builtin.template:
+        src: grafana-datasources.yml.j2
+        dest: "{{ loki_grafana_provisioning_dir }}/loki.yml"
+        owner: "472"
+        group: "472"
+        mode: "0640"
+
+    - name: Render docker-compose.yml
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ loki_base_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Pull Loki + Grafana images
+      ansible.builtin.command:
+        cmd: docker compose pull --quiet
+        chdir: "{{ loki_base_dir }}"
+      changed_when: false
+
+    - name: Start / update Loki + Grafana stack
+      ansible.builtin.command:
+        cmd: docker compose up -d --remove-orphans
+        chdir: "{{ loki_base_dir }}"
+      register: _loki_up
+      changed_when: _loki_up.stderr is search('Started|Recreated|Created')

@@ -1,0 +1,60 @@
+# Managed by Ansible role biglerconsult.infra.loki — do not edit by hand.
+#
+# Trust model (W3): Loki and Grafana are published only on the Tailscale
+# interface ({{ ansible_tailscale0.ipv4.address }}). They are not reachable
+# from the public internet. Promtail on peer servers pushes to Loki via
+# the Tailnet — no TLS cert or HTTP auth is required between Promtail and
+# Loki because Tailscale provides mutual identity and transport encryption.
+#
+# Grafana admin password: injected via env_file /srv/loki/.env (Variante 2).
+# Run `sync-secrets --server --secret-target staging` to populate it.
+# The container starts without a password until sync-secrets has run.
+
+services:
+  loki:
+    image: grafana/loki:{{ loki_version }}
+    container_name: loki
+    restart: unless-stopped
+    mem_limit: 512m
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - {{ loki_config_dir }}/loki.yml:/etc/loki/loki.yml:ro
+      - {{ loki_data_dir }}:/loki
+    ports:
+      - "{{ ansible_tailscale0.ipv4.address }}:{{ loki_port }}:3100"
+    networks:
+      - loki_internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:{{ grafana_version }}
+    container_name: grafana
+    restart: unless-stopped
+    mem_limit: 256m
+    env_file: {{ loki_base_dir }}/.env
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: "{{ grafana_admin_user }}"
+      # GF_SECURITY_ADMIN_PASSWORD provided via env_file
+    volumes:
+      - {{ loki_base_dir }}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "{{ ansible_tailscale0.ipv4.address }}:{{ grafana_port }}:3000"
+    networks:
+      - loki_internal
+    depends_on:
+      loki:
+        condition: service_healthy
+
+networks:
+  loki_internal:
+    driver: bridge
+
+volumes:
+  grafana_data:

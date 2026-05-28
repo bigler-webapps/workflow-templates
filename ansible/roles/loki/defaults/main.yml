@@ -1,0 +1,23 @@
+---
+loki_version: "3.3.2"
+grafana_version: "11.4.0"
+
+loki_base_dir: /srv/loki
+loki_config_dir: /srv/loki/config
+loki_data_dir: /srv/loki/data
+loki_grafana_provisioning_dir: /srv/loki/grafana/provisioning/datasources
+
+# Port on which Loki's HTTP API is published (bound to Tailscale IP only).
+loki_port: 3100
+# Port on which Grafana is published (bound to Tailscale IP only).
+grafana_port: 3000
+
+# Retention period in days. Override in group_vars/stage.yml.
+loki_retention_days: 30
+
+# Grafana admin username. Password comes from /srv/loki/.env (Variante 2).
+grafana_admin_user: admin
+
+# Ingest limits — lower than Loki defaults to protect staging from log storms.
+loki_ingestion_rate_mb: 4
+loki_ingestion_burst_size_mb: 8
