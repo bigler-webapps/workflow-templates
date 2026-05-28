@@ -64,7 +64,9 @@
         dest: "{{ loki_config_dir }}/loki.yml"
         owner: root
         group: root
-        mode: "0640"
+        # 0644 so Loki container (UID 10001, not in root group) can read the file.
+        # The config contains no secrets — only server + storage settings.
+        mode: "0644"
 
     - name: Render Grafana Loki datasource provisioning
       ansible.builtin.template:
