@@ -62,11 +62,21 @@
       ansible.builtin.template:
         src: loki-config.yml.j2
         dest: "{{ loki_config_dir }}/loki.yml"
-        owner: root
-        group: root
-        # 0644 so Loki container (UID 10001, not in root group) can read the file.
-        # The config contains no secrets — only server + storage settings.
-        mode: "0644"
+        # owner = Loki container UID so it can read the file even with mode 0640.
+        # No secrets in this file — storage paths and server settings only.
+        owner: "10001"
+        group: "10001"
+        mode: "0640"
+
+    # Explicit file task to correct ownership on already-rendered files from
+    # older role runs (template says 'ok' when content unchanged, but this
+    # always enforces the right owner/mode idempotently).
+    - name: Ensure Loki config is readable by container UID 10001
+      ansible.builtin.file:
+        path: "{{ loki_config_dir }}/loki.yml"
+        owner: "10001"
+        group: "10001"
+        mode: "0640"
 
     - name: Render Grafana Loki datasource provisioning
       ansible.builtin.template:
