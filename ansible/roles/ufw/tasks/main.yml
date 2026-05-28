@@ -7,6 +7,15 @@
         name: ufw
         state: present
 
+    # Full desired-state reconciliation: wipe all existing rules and rebuild
+    # from ufw_allow_in. Causes a brief no-firewall window (UFW disabled
+    # between reset and re-enable). Default off; enable via
+    # ufw_managed_inbound_exclusive: true in group/host vars.
+    - name: Reset UFW for full desired-state reconciliation
+      community.general.ufw:
+        state: reset
+      when: ufw_managed_inbound_exclusive | default(false)
+
     # /etc/default/ufw contains a duplicate DEFAULT_FORWARD_POLICY setting
     # that survives across reboots. Persist it BEFORE enabling ufw so the
     # forward policy is consistent from the very first activation.
@@ -37,10 +46,25 @@
     - name: Allow configured inbound ports
       community.general.ufw:
         rule: allow
+        from_ip: "{{ item.from | default(omit) }}"
         port: "{{ item.port }}"
         proto: "{{ item.proto | default('tcp') }}"
         comment: "{{ item.comment | default(omit) }}"
       loop: "{{ ufw_allow_in }}"
+
+    # When a port previously had an unrestricted global rule and is now
+    # scoped to a source CIDR via `from:`, the old global rule must be
+    # deleted — otherwise both rules coexist and public access remains open.
+    # Skipped when ufw_managed_inbound_exclusive reset already cleared all
+    # rules. community.general.ufw treats absent-rule deletion as a no-op.
+    - name: Remove unrestricted inbound rules superseded by CIDR-scoped entries
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto | default('tcp') }}"
+        delete: true
+      loop: "{{ ufw_allow_in | selectattr('from', 'defined') | list }}"
+      when: not (ufw_managed_inbound_exclusive | default(false))
 
     - name: Set ufw logging level
       community.general.ufw:
@@ -50,4 +74,11 @@
     - name: Enable ufw
       community.general.ufw:
         state: enabled
+      when: ufw_enabled | bool
+
+    - name: Verify UFW is active after configuration
+      ansible.builtin.command: ufw status
+      register: _ufw_verify
+      changed_when: false
+      failed_when: "'Status: active' not in _ufw_verify.stdout"
       when: ufw_enabled | bool
