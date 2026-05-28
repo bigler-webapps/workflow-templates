@@ -25,11 +25,11 @@ services:
     networks:
       - loki_internal
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "wget -q --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 30s
 
   grafana:
     image: grafana/grafana:{{ grafana_version }}
@@ -48,9 +48,12 @@ services:
       - "{{ ansible_tailscale0.ipv4.address }}:{{ grafana_port }}:3000"
     networks:
       - loki_internal
+    # service_started (not service_healthy): Grafana retries the Loki connection
+    # internally on startup, so we don't need to gate on Loki being fully ready.
+    # service_healthy would cause compose to fail if Loki is still initialising.
     depends_on:
       loki:
-        condition: service_healthy
+        condition: service_started
 
 networks:
   loki_internal:
