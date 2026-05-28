@@ -2,35 +2,61 @@
 - name: Deploy Loki + Grafana (staging log collector)
   become: true
   block:
-    - name: Create Loki config + base directories (root-owned)
+    # ── Directory structure ──────────────────────────────────────────────────
+    # /srv/loki/ must be 0755 (world-traversable) so both the Loki container
+    # (UID 10001) and the Grafana container (UID 472) can descend into their
+    # respective subdirectories without being blocked by the parent perms.
+    - name: Ensure /srv/loki base dir is world-traversable (0755)
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ loki_base_dir }}"
         state: directory
         owner: root
         group: root
-        mode: "0750"
-      loop:
-        - "{{ loki_base_dir }}"
-        - "{{ loki_config_dir }}"
+        mode: "0755"
 
-    - name: Create Loki data directory (Loki container UID 10001)
+    # Config dir: group = loki_uid so the container reads files via group perms.
+    # Owner stays root to prevent the container from modifying the config.
+    - name: Ensure Loki config dir is group-readable by Loki container
+      ansible.builtin.file:
+        path: "{{ loki_config_dir }}"
+        state: directory
+        owner: root
+        group: "{{ loki_uid }}"
+        mode: "0750"
+
+    # Data dir: Loki creates chunks/index/compactor/WAL under this path.
+    # Full ownership so the container can create sub-directories freely.
+    - name: Ensure Loki data dir is owned by Loki container UID
       ansible.builtin.file:
         path: "{{ loki_data_dir }}"
         state: directory
-        owner: "10001"
-        group: "10001"
+        owner: "{{ loki_uid }}"
+        group: "{{ loki_uid }}"
         mode: "0750"
 
-    - name: Create Grafana provisioning directory (Grafana container UID 472)
+    # Grafana dir hierarchy: all owned by grafana_uid.
+    #   datasources               — Loki datasource provisioning config.
+    #   plugins/alerting/dashboards — empty; created to silence Grafana
+    #                                  "no such file or directory" warnings.
+    - name: Ensure Grafana dir hierarchy is owned by Grafana container UID
       ansible.builtin.file:
-        path: "{{ loki_grafana_provisioning_dir }}"
+        path: "{{ item }}"
         state: directory
-        owner: "472"
-        group: "472"
+        owner: "{{ grafana_uid }}"
+        group: "{{ grafana_uid }}"
         mode: "0750"
+      loop:
+        - "{{ loki_base_dir }}/grafana"
+        - "{{ loki_base_dir }}/grafana/provisioning"
+        - "{{ loki_grafana_provisioning_dir }}"
+        - "{{ loki_base_dir }}/grafana/provisioning/plugins"
+        - "{{ loki_base_dir }}/grafana/provisioning/alerting"
+        - "{{ loki_base_dir }}/grafana/provisioning/dashboards"
 
-    # touch preserves mtime on re-runs so the compose env_file is not
-    # bumped unnecessarily. Populated by: sync-secrets --server --secret-target staging
+    # ── .env file for Grafana admin password (Variante 2) ───────────────────
+    # touch with modification_time=preserve: creates the file if absent but
+    # does not bump mtime on re-runs, keeping compose env_file stable.
+    # Populated by: sync-secrets --server --secret-target staging
     - name: Ensure Grafana env file exists (populated out-of-band by sync-secrets)
       ansible.builtin.file:
         path: "{{ loki_base_dir }}/.env"
@@ -44,8 +70,8 @@
     # Writes GF_SECURITY_ADMIN_PASSWORD into /srv/loki/.env when the CI runner
     # exposes it as an env var (injected from the GitHub staging environment by
     # sync-secrets --server --secret-target staging).
-    # no_log=true: prevents the value appearing in Ansible output or logs.
-    # Idempotent: lineinfile replaces an existing line on re-runs.
+    # no_log=true: prevents the secret appearing in Ansible output or logs.
+    # Idempotent: lineinfile replaces an existing key on re-runs.
     - name: Write Grafana admin password to /srv/loki/.env (from CI GitHub env)
       ansible.builtin.lineinfile:
         path: "{{ loki_base_dir }}/.env"
@@ -58,20 +84,23 @@
       when: lookup('env', 'GF_SECURITY_ADMIN_PASSWORD') | length > 0
       no_log: true
 
+    # ── Config + compose rendering ──────────────────────────────────────────
+    # Config: owner=root (immutable), group=loki_uid (readable).
+    # mode 0640 → container reads as group member; no world-readable needed.
     - name: Render Loki config
       ansible.builtin.template:
         src: loki-config.yml.j2
         dest: "{{ loki_config_dir }}/loki.yml"
         owner: root
-        group: root
+        group: "{{ loki_uid }}"
         mode: "0640"
 
     - name: Render Grafana Loki datasource provisioning
       ansible.builtin.template:
         src: grafana-datasources.yml.j2
         dest: "{{ loki_grafana_provisioning_dir }}/loki.yml"
-        owner: "472"
-        group: "472"
+        owner: "{{ grafana_uid }}"
+        group: "{{ grafana_uid }}"
         mode: "0640"
 
     - name: Render docker-compose.yml
@@ -82,6 +111,7 @@
         group: root
         mode: "0640"
 
+    # ── Deploy ───────────────────────────────────────────────────────────────
     - name: Pull Loki + Grafana images
       ansible.builtin.command:
         cmd: docker compose pull --quiet

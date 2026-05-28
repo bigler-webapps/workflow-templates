@@ -3,13 +3,11 @@
 auth_enabled: false
 
 server:
-  http_listen_address: 0.0.0.0
   http_listen_port: 3100
   grpc_listen_port: 9096
   log_level: warn
 
 common:
-  instance_addr: 0.0.0.0
   path_prefix: /loki
   storage:
     filesystem:
@@ -40,5 +38,3 @@ compactor:
   compaction_interval: 10m
   retention_enabled: true
   retention_delete_delay: 2h
-  retention_delete_worker_count: 150
-  delete_request_store: filesystem

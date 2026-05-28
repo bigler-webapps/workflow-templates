@@ -21,3 +21,8 @@ grafana_admin_user: admin
 # Ingest limits — lower than Loki defaults to protect staging from log storms.
 loki_ingestion_rate_mb: 4
 loki_ingestion_burst_size_mb: 8
+
+# Container UIDs for ownership of mounted paths.
+# Must match the UID the process runs as inside the container image.
+loki_uid: 10001   # grafana/loki: runs as user loki (UID 10001)
+grafana_uid: 472  # grafana/grafana: runs as user grafana (UID 472)
