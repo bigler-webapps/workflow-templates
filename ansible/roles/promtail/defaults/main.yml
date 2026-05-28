@@ -1,0 +1,14 @@
+---
+promtail_version: "3.3.2"
+
+promtail_base_dir: /srv/promtail
+promtail_config_dir: /srv/promtail/config
+
+# Loki push URL. promtail_loki_host is set in group_vars/all.yml to the
+# staging host's Tailscale IP (derived from hostvars at play time).
+promtail_loki_port: 3100
+promtail_loki_url: "http://{{ promtail_loki_host }}:{{ promtail_loki_port }}/loki/api/v1/push"
+
+# Pipeline stage: drop log lines at DEBUG level to reduce ingest volume.
+# Set to false to ingest DEBUG lines (e.g. temporary deeper investigation).
+promtail_drop_debug: true

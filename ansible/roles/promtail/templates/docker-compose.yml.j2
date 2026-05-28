@@ -1,0 +1,25 @@
+# Managed by Ansible role biglerconsult.infra.promtail — do not edit by hand.
+#
+# Trust model (W3): Promtail pushes to Loki via Tailscale
+# ({{ promtail_loki_url }}). No TLS cert or HTTP auth required between
+# Promtail and Loki — Tailscale provides mutual identity and transport
+# encryption. The Docker socket is mounted read-only; Promtail uses it
+# only for docker_sd container discovery and log tailing, never for
+# write operations.
+
+services:
+  promtail:
+    image: grafana/promtail:{{ promtail_version }}
+    container_name: promtail
+    restart: unless-stopped
+    mem_limit: 128m
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - {{ promtail_config_dir }}/promtail.yml:/etc/promtail/promtail.yml:ro
+      # Read-only docker socket: docker_sd needs it for container discovery + log tailing.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log:/var/log:ro
+      - promtail_positions:/tmp/promtail
+
+volumes:
+  promtail_positions:
