@@ -7,6 +7,16 @@
         name: ufw
         state: present
 
+    # Full desired-state reconciliation: wipe all existing rules and rebuild
+    # from ufw_allow_in. Causes a brief window where all inbound traffic is
+    # permitted (UFW chains flushed and service disabled until re-enabled at
+    # the end of this block). Guarded by ufw_enabled so the enable task
+    # always follows the reset. Default off.
+    - name: Reset UFW for full desired-state reconciliation
+      community.general.ufw:
+        state: reset
+      when: (ufw_managed_inbound_exclusive | default(false)) and (ufw_enabled | bool)
+
     # /etc/default/ufw contains a duplicate DEFAULT_FORWARD_POLICY setting
     # that survives across reboots. Persist it BEFORE enabling ufw so the
     # forward policy is consistent from the very first activation.
@@ -37,10 +47,27 @@
     - name: Allow configured inbound ports
       community.general.ufw:
         rule: allow
+        from_ip: "{{ item.from | default(omit) }}"
         port: "{{ item.port }}"
         proto: "{{ item.proto | default('tcp') }}"
         comment: "{{ item.comment | default(omit) }}"
       loop: "{{ ufw_allow_in }}"
+
+    # When a port previously had an unrestricted global rule and is now
+    # scoped to a source CIDR via `from:`, the old global rule must be
+    # deleted — otherwise both rules coexist and the unrestricted one wins.
+    # Targets only the tcp (or item.proto) variant of the rule; any
+    # manually-added udp variant would need a separate entry to be removed.
+    # Skipped when ufw_managed_inbound_exclusive reset already cleared all
+    # rules. community.general.ufw treats absent-rule deletion as a no-op.
+    - name: Remove unrestricted inbound rules superseded by CIDR-scoped entries
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto | default('tcp') }}"
+        delete: true
+      loop: "{{ ufw_allow_in | selectattr('from', 'defined') | list }}"
+      when: not (ufw_managed_inbound_exclusive | default(false))
 
     - name: Set ufw logging level
       community.general.ufw:
@@ -50,4 +77,11 @@
     - name: Enable ufw
       community.general.ufw:
         state: enabled
+      when: ufw_enabled | bool
+
+    - name: Verify UFW is active after configuration
+      ansible.builtin.command: /usr/sbin/ufw status
+      register: _ufw_verify
+      changed_when: false
+      failed_when: "'Status: active' not in _ufw_verify.stdout"
       when: ufw_enabled | bool

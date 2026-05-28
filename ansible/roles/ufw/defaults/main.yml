@@ -23,3 +23,7 @@ ufw_allow_in:
 
 ufw_enabled: true
 ufw_logging: low
+
+# When true: reset UFW to empty state then rebuild from ufw_allow_in.
+# Provides full desired-state reconciliation. Off by default.
+ufw_managed_inbound_exclusive: false
