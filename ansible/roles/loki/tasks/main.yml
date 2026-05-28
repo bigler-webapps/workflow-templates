@@ -91,8 +91,22 @@
       changed_when: false
 
     - name: Start / update Loki + Grafana stack
-      ansible.builtin.command:
-        cmd: docker compose up -d --remove-orphans
-        chdir: "{{ loki_base_dir }}"
-      register: _loki_up
-      changed_when: _loki_up.stderr is search('Started|Recreated|Created')
+      block:
+        - name: Start / update Loki + Grafana stack
+          ansible.builtin.command:
+            cmd: docker compose up -d --remove-orphans
+            chdir: "{{ loki_base_dir }}"
+          register: _loki_up
+          changed_when: _loki_up.stderr is search('Started|Recreated|Created')
+      rescue:
+        - name: Capture Loki logs on failure (last 80 lines)
+          ansible.builtin.command:
+            cmd: docker logs loki --tail 80
+          ignore_errors: true
+          register: _loki_logs
+        - name: Display Loki logs
+          ansible.builtin.debug:
+            msg: "{{ (_loki_logs.stdout_lines | default([])) + (_loki_logs.stderr_lines | default([])) }}"
+        - name: Re-raise failure after log capture
+          ansible.builtin.fail:
+            msg: "Loki stack failed to start — see 'Capture Loki logs' task above."
