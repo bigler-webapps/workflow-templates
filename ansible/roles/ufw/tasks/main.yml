@@ -8,13 +8,14 @@
         state: present
 
     # Full desired-state reconciliation: wipe all existing rules and rebuild
-    # from ufw_allow_in. Causes a brief no-firewall window (UFW disabled
-    # between reset and re-enable). Default off; enable via
-    # ufw_managed_inbound_exclusive: true in group/host vars.
+    # from ufw_allow_in. Causes a brief window where all inbound traffic is
+    # permitted (UFW chains flushed and service disabled until re-enabled at
+    # the end of this block). Guarded by ufw_enabled so the enable task
+    # always follows the reset. Default off.
     - name: Reset UFW for full desired-state reconciliation
       community.general.ufw:
         state: reset
-      when: ufw_managed_inbound_exclusive | default(false)
+      when: (ufw_managed_inbound_exclusive | default(false)) and (ufw_enabled | bool)
 
     # /etc/default/ufw contains a duplicate DEFAULT_FORWARD_POLICY setting
     # that survives across reboots. Persist it BEFORE enabling ufw so the
@@ -54,7 +55,9 @@
 
     # When a port previously had an unrestricted global rule and is now
     # scoped to a source CIDR via `from:`, the old global rule must be
-    # deleted — otherwise both rules coexist and public access remains open.
+    # deleted — otherwise both rules coexist and the unrestricted one wins.
+    # Targets only the tcp (or item.proto) variant of the rule; any
+    # manually-added udp variant would need a separate entry to be removed.
     # Skipped when ufw_managed_inbound_exclusive reset already cleared all
     # rules. community.general.ufw treats absent-rule deletion as a no-op.
     - name: Remove unrestricted inbound rules superseded by CIDR-scoped entries
@@ -77,7 +80,7 @@
       when: ufw_enabled | bool
 
     - name: Verify UFW is active after configuration
-      ansible.builtin.command: ufw status
+      ansible.builtin.command: /usr/sbin/ufw status
       register: _ufw_verify
       changed_when: false
       failed_when: "'Status: active' not in _ufw_verify.stdout"
