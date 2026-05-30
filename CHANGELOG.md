@@ -10,6 +10,24 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [Unreleased]
+
+### Removed (BREAKING)
+
+Deleted the three deprecated root-SSH provisioning composite actions, fully
+superseded by the Ansible path (`webapp-management/ansible/site.yml` via the
+`biglerconsult.infra` collection) run from `ansible-provision.yml`:
+
+- `actions/provision-server` — fresh-host bootstrap (used unsigned `curl | sh`
+  Docker install; SSHed as root)
+- `actions/update-server` — idempotent re-apply (SSHed as root)
+- `actions/sync-ssh-access` — `authorized_keys` sync from `access/*.pub`
+  (now handled by `site.yml` pre_tasks)
+
+No consumers remained at deletion time (verified across all repos). Existing
+release tags (≤ v2.0.4) still contain these actions, so pinned references are
+unaffected; only `@main` consumers — of which there are none — would break.
+
 ## [2.0.3] - 2026-05-24
 
 ### Added

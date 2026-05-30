@@ -27,8 +27,8 @@ any point in the play.
 
 ## Differences vs the legacy `provision-server` composite action
 
-This collection is a deliberate, near-1:1 port of the inline bash in
-`.github/actions/provision-server/action.yml`, with three intentional
+This collection was a deliberate, near-1:1 port of the inline bash in the
+now-removed `provision-server` composite action, with three intentional
 behavior changes:
 
 - **`ufw` defaults open only port 22.** The legacy action also opened

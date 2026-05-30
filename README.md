@@ -48,8 +48,6 @@ This pattern is required because reusable workflows (`uses: org/repo/.github/wor
 | `actions/deploy-traefik` | Deploy Traefik infrastructure stack |
 | `actions/backup` | Backup + verify + optional staging sync (Restic to B2) |
 | `actions/restore` | Restore app DB to staging from Restic |
-| `actions/sync-ssh-access` | Sync SSH authorized_keys from `access/` |
-| `actions/provision-server` | Bootstrap base server (packages, Docker, deploy user, firewall) |
 | `actions/maintenance` | Weekly apt updates + conditional reboot |
 | `actions/janitor` | Monthly Docker prune + disk report |
 
