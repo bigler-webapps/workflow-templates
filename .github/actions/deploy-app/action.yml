@@ -137,7 +137,13 @@ runs:
     - name: 📦 Install tooling
       shell: bash
       run: |
-        pip install "django-core-micha>=2.4.0" "PyYAML==6.0.2"
+        # generate-env is a config-templating tool: it needs PyYAML + dcm's own
+        # modules, NOT the Django stack. --no-deps skips dcm's Django>=6.0.5 dep
+        # (which needs Python>=3.12), so the floor can require app_env support
+        # (>=2.17.0) without a runner Python bump. The >=2.17.0 floor is required:
+        # below it, generate-env silently ignores the project.yaml `app_env` block.
+        pip install "PyYAML==6.0.2"
+        pip install --no-deps "django-core-micha>=2.17.0"
 
     - name: 🧮 Calculate configuration
       id: config
