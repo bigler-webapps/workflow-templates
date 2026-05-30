@@ -38,25 +38,19 @@ RestartSec=5
 RuntimeDirectory=tailscale-mgmt
 RuntimeDirectoryMode=0750
 
-# Persistent state directory — REQUIRED with ProtectSystem=strict, which
-# otherwise mounts /var read-only and would prevent tailscaled from writing
-# its node key/prefs to --statedir (losing identity on every restart).
-# StateDirectory= creates /var/lib/tailscale-mgmt and marks it read-write for
-# this unit. systemd owns it; Ansible does NOT pre-create it.
+# Persistent state directory: systemd creates /var/lib/tailscale-mgmt and owns
+# it (Ansible does NOT pre-create it). tailscaled writes its node key/prefs here.
 StateDirectory=tailscale-mgmt
 StateDirectoryMode=0750
 
-# Hardening. NOTE: the upstream tailscaled.service does NOT use
-# ProtectSystem=strict; we add it here for defence in depth. tailscaled needs
-# RW access to its state dir (covered by StateDirectory above) and manages
-# kernel netfilter/routes (not blocked by ProtectSystem). Re-verify with a
-# real `tailscale up` if upstream hardening changes.
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=true
-NoNewPrivileges=false
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+# NO sandbox/capability hardening here — DELIBERATE.
+# This tailscaled runs `--ssh`, i.e. it is a Tailscale-SSH SERVER: it spawns
+# login sessions for the target user, which requires CAP_SETUID/CAP_SETGID
+# (initgroups/setuid), write access to /run (motd) and /home, and the ability
+# to gain privileges. Restricting these — e.g. CapabilityBoundingSet without
+# SETUID/SETGID, ProtectSystem=strict, ProtectHome=yes — breaks every SSH
+# session with "initgroups: Operation not permitted" / read-only /run.
+# The upstream tailscaled.service runs unrestricted for the same reason; match it.
 
 [Install]
 WantedBy=multi-user.target
