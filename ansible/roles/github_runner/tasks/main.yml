@@ -96,7 +96,9 @@
 
 - name: Read installed runner version (if any)
   # Used to detect whether the runner binary needs to be updated.
-  # slurp returns failed=true when the file does not exist yet.
+  # On a fresh host the file is absent: slurp errors, but failed_when:false keeps
+  # the play going AND sets _runner_installed_version.failed=false (overridden),
+  # so `.content` is simply ABSENT — guard on `content is defined`, NOT `.failed`.
   become: true
   ansible.builtin.slurp:
     src: "{{ github_runner_base_dir }}/.runner-version"
@@ -106,9 +108,8 @@
 - name: Determine whether runner binary needs update
   ansible.builtin.set_fact:
     _runner_needs_update: >-
-      {{ _runner_installed_version.failed | default(true)
-         or (_runner_installed_version.content | b64decode | trim)
-            != github_runner_version }}
+      {{ (_runner_installed_version.content is not defined)
+         or ((_runner_installed_version.content | b64decode | trim) != github_runner_version) }}
 
 - name: Extract actions/runner to base runner directory
   # Runs only on first install or when github_runner_version changed.
