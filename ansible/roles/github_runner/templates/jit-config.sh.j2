@@ -10,7 +10,7 @@
 #   2. Exchange the JWT for a short-lived installation access token.
 #   3. Call generate-jitconfig to obtain a one-time ephemeral runner token.
 #
-# Jinja2 variables ({{ ... }}) are expanded by Ansible at deploy time.
+# Jinja2 variables ({% raw %}{{ ... }}{% endraw %}) are expanded by Ansible at deploy time.
 # Shell variables (${VAR}) are resolved at runtime by bash.
 set -euo pipefail
 
