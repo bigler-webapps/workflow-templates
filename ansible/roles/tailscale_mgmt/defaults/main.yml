@@ -1,0 +1,57 @@
+---
+# tailscale_mgmt role — defaults
+#
+# PURPOSE: Runs a SECOND, persistent tailscaled instance dedicated to
+# management access. The DEFAULT tailscaled instance is left free so
+# that deploy jobs can join the tailnet ephemerally via tailscale/github-action
+# (tag:ci-deploy) without touching this persistent management node.
+#
+# After this role runs, the host is reachable at:
+#   ssh root@{{ tailscale_mgmt_hostname }}.<tailnet>
+# via Tailscale-SSH — no public SSH port needed for day-to-day access.
+#
+# Required host_vars (populated via sync-secrets, never hardcoded):
+#   tailscale_mgmt_authkey — pre-authorised auth-key for tag:ci-runner-host.
+#     Generate a reusable, pre-authorised key scoped to that tag in the
+#     Tailscale admin console (Keys → Generate auth key).
+#
+# tailscale_mgmt_port:
+#   Must NOT be 41641 (default tailscaled port). 0 = OS assigns an
+#   ephemeral port (safest: no static port conflict). Set a static port
+#   only if you need predictable firewall rules for UDP/41xxx.
+#
+# tailscale_mgmt_force_up:
+#   Set true (one-shot extra-var) after changing tailscale_mgmt_tag,
+#   tailscale_mgmt_hostname, or --ssh. The role skips `tailscale up`
+#   when the daemon is already Running — mirroring roles/tailscale behaviour.
+#
+# OPERATIONAL NOTE — Ghost nodes:
+#   Each new auth-key usage creates a new node in the tailnet. If you
+#   re-provision the host (fresh install), remove the old mgmt-node from
+#   the Tailscale admin console to avoid ghost accumulation.
+
+# REQUIRED — pre-authorised auth-key for tag:ci-runner-host (sync-secrets)
+tailscale_mgmt_authkey: ""
+
+# Tag this mgmt node advertises. Must be declared in the tailnet ACL tagOwners.
+tailscale_mgmt_tag: "tag:ci-runner-host"
+
+# MagicDNS hostname for this mgmt node.
+tailscale_mgmt_hostname: "{{ inventory_hostname }}-mgmt"
+
+# Unix socket for the mgmt tailscaled instance. All `tailscale --socket=`
+# commands targeting this instance must use this path.
+tailscale_mgmt_socket: "/run/tailscale-mgmt/tailscaled.sock"
+
+# State directory — tailscaled writes tailscaled.state + node key here.
+tailscale_mgmt_statedir: "/var/lib/tailscale-mgmt"
+
+# TUN interface name. Must differ from the default instance's "tailscale0".
+tailscale_mgmt_tun: "tsmgmt0"
+
+# UDP port. 0 = OS-assigned ephemeral port (avoids conflict with default 41641).
+tailscale_mgmt_port: 0
+
+# Set true (one-shot) after changing tag, hostname, or --ssh on an already-
+# Running mgmt instance. See tailscale role defaults for the same pattern.
+tailscale_mgmt_force_up: false

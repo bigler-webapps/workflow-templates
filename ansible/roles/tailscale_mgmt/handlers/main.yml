@@ -1,0 +1,13 @@
+---
+- name: systemd daemon-reload for tailscale-mgmt
+  become: true
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: tailscaled-mgmt unit changed
+
+- name: restart tailscaled-mgmt
+  become: true
+  ansible.builtin.systemd:
+    name: tailscaled-mgmt.service
+    state: restarted
+  listen: tailscaled-mgmt unit changed

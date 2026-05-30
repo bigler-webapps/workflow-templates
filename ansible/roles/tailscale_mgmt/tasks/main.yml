@@ -1,0 +1,141 @@
+---
+# tailscale_mgmt tasks
+#
+# Prerequisites (roles applied before this one in the play):
+#   tailscale — Tailscale package installed, DEFAULT daemon running but
+#               unregistered (tailscale_authkey: ""). The default daemon
+#               is intentionally left free for ephemeral per-job joins
+#               via tailscale/github-action.
+#
+# This role starts a SECOND tailscaled instance (tailscaled-mgmt.service)
+# on a separate socket, TUN interface, statedir, and port — following
+# Tailscale's official "multiple tailscaled instances" guidance.
+# After this role completes, the host is permanently reachable via
+# Tailscale-SSH at {{ tailscale_mgmt_hostname }}.<tailnet>.
+#
+# SECURITY NOTE: tailscale_mgmt_authkey is the management credential for
+# this host. It must be kept in host_vars (via sync-secrets) and is never
+# logged. See the `no_log: true` annotation on the `tailscale up` task.
+# The same callback-plugin caveat as roles/tailscale applies.
+
+- name: Assert tailscale_mgmt_authkey is set
+  ansible.builtin.assert:
+    that:
+      - tailscale_mgmt_authkey | string | length > 0
+    fail_msg: >-
+      tailscale_mgmt role: tailscale_mgmt_authkey is not set.
+      Set it in host_vars via sync-secrets (pre-authorised key for
+      {{ tailscale_mgmt_tag }}).
+
+- name: Ensure mgmt statedir exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ tailscale_mgmt_statedir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Deploy tailscaled-mgmt systemd unit
+  become: true
+  ansible.builtin.template:
+    src: tailscaled-mgmt.service.j2
+    dest: /etc/systemd/system/tailscaled-mgmt.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: tailscaled-mgmt unit changed
+
+- name: Flush handlers so daemon-reload completes before service management
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start tailscaled-mgmt service
+  become: true
+  ansible.builtin.systemd:
+    name: tailscaled-mgmt.service
+    enabled: true
+    state: started
+
+- name: Check mgmt tailscaled backend state
+  # Idempotency guard — mirrors roles/tailscale pattern.
+  # `tailscale --socket=<mgmt-socket> status --json` reads the mgmt daemon
+  # without touching the default instance.
+  # failed_when: false so a brand-new daemon (no state yet) doesn't abort.
+  become: true
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - --socket={{ tailscale_mgmt_socket }}
+      - status
+      - --json
+  register: _mgmt_status
+  changed_when: false
+  failed_when: false
+
+- name: Parse mgmt tailscaled backend state
+  ansible.builtin.set_fact:
+    _mgmt_backend_state: >-
+      {{ (_mgmt_status.stdout | from_json).BackendState
+         if (_mgmt_status.rc == 0 and (_mgmt_status.stdout | length) > 0)
+         else 'NoState' }}
+
+- name: Bring mgmt tailscaled up
+  # Registers this host as a persistent management node in the tailnet.
+  # --ssh enables Tailscale-SSH (keyless auth via Tailnet identity).
+  # --reset ensures the live flag set exactly matches the declared variables
+  # (no leftover state from previous invocations).
+  # --advertise-tags must match a tag declared in the tailnet ACL tagOwners.
+  #
+  # SECURITY: authkey is passed in argv (not shell interpolation) and
+  # suppressed by no_log. Third-party Ansible callback plugins (ARA,
+  # custom log shippers) may still capture argv from internal task data
+  # before no_log applies — vet any callbacks for this exposure.
+  become: true
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - --socket={{ tailscale_mgmt_socket }}
+      - up
+      - --authkey={{ tailscale_mgmt_authkey }}
+      - --advertise-tags={{ tailscale_mgmt_tag }}
+      - --hostname={{ tailscale_mgmt_hostname }}
+      - --ssh=true
+      - --reset
+  when:
+    - tailscale_mgmt_authkey | string | length > 0
+    - (_mgmt_backend_state != 'Running') or (tailscale_mgmt_force_up | bool)
+  no_log: true
+  changed_when: true
+
+- name: Re-check mgmt tailscaled state after up
+  become: true
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - --socket={{ tailscale_mgmt_socket }}
+      - status
+      - --json
+  register: _mgmt_status_post
+  changed_when: false
+  failed_when: false
+  when: tailscale_mgmt_authkey | string | length > 0
+
+- name: Assert mgmt tailscaled daemon responded with valid JSON
+  ansible.builtin.assert:
+    that:
+      - _mgmt_status_post.rc == 0
+      - (_mgmt_status_post.stdout | length) > 0
+    fail_msg: >-
+      tailscaled-mgmt daemon did not respond to status query after up
+      (rc={{ _mgmt_status_post.rc }}).
+  when: tailscale_mgmt_authkey | string | length > 0
+
+- name: Assert mgmt tailscaled BackendState is Running
+  ansible.builtin.assert:
+    that:
+      - (_mgmt_status_post.stdout | from_json).BackendState == 'Running'
+    fail_msg: >-
+      tailscaled-mgmt BackendState is
+      {{ (_mgmt_status_post.stdout | from_json).BackendState }},
+      expected Running.
+  when: tailscale_mgmt_authkey | string | length > 0
