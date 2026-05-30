@@ -55,6 +55,9 @@ on:
       VITE_APP_MUI_LICENSE_KEY:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     if: ${{ inputs.run-backend }}

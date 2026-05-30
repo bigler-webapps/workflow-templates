@@ -93,6 +93,9 @@ on:
           Required since restore-dest-import@v2.0.0.
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest

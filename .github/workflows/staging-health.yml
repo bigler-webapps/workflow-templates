@@ -27,6 +27,9 @@ on:
         type: string
         default: 'ubuntu-latest'
 
+permissions:
+  contents: read
+
 jobs:
   probe:
     runs-on: ${{ inputs.runs-on }}
