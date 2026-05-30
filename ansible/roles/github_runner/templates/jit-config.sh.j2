@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# jit-config.sh — GitHub App JIT-Config broker
+# Managed by Ansible (github_runner role). Do not edit manually.
+#
+# Usage:  jit-config.sh <runner-name>
+# Output: base64-encoded JIT config string on stdout (no trailing newline)
+#
+# Called by ExecStartPre in gh-runner@.service before every job. Algorithm:
+#   1. Build a signed RS256 JWT from the GitHub App credentials.
+#   2. Exchange the JWT for a short-lived installation access token.
+#   3. Call generate-jitconfig to obtain a one-time ephemeral runner token.
+#
+# Jinja2 variables ({{ ... }}) are expanded by Ansible at deploy time.
+# Shell variables (${VAR}) are resolved at runtime by bash.
+set -euo pipefail
+
+RUNNER_NAME="${1:?Usage: jit-config.sh <runner-name>}"
+
+APP_ID="{{ github_runner_app_id }}"
+INSTALLATION_ID="{{ github_runner_app_installation_id }}"
+ORG="{{ github_runner_org }}"
+PEM_FILE="{{ github_runner_base_dir }}/app.pem"
+RUNNER_GROUP_ID="{{ github_runner_group_id }}"
+LABELS="{{ github_runner_labels }}"
+GH_API="https://api.github.com"
+
+# ── base64url helper ──────────────────────────────────────────────────────────
+# RFC 4648 §5: strip padding (=), swap + → - and / → _
+b64url() {
+  openssl base64 -e | tr -d '=\n' | tr '+/' '-_'
+}
+
+# ── Step 1: Build RS256 JWT ───────────────────────────────────────────────────
+# iat 60 s in the past absorbs clock-skew between this host and GitHub's API.
+# exp 10 min in the future is GitHub App's maximum allowed JWT validity.
+now=$(date +%s)
+iat=$((now - 60))
+exp=$((now + 600))
+
+HEADER=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+PAYLOAD=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "${iat}" "${exp}" "${APP_ID}" | b64url)
+SIG=$(printf '%s' "${HEADER}.${PAYLOAD}" | openssl dgst -sha256 -sign "${PEM_FILE}" | b64url)
+JWT="${HEADER}.${PAYLOAD}.${SIG}"
+
+# ── Step 2: Exchange JWT for installation access token ────────────────────────
+# curl -sf: silent + fail on HTTP 4xx/5xx. The token has a 1-hour TTL;
+# we use it immediately so expiry is not a concern here.
+INSTALL_TOKEN=$(
+  curl -sf \
+    -X POST \
+    -H "Authorization: Bearer ${JWT}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${GH_API}/app/installations/${INSTALLATION_ID}/access_tokens" \
+  | jq -r '.token'
+)
+
+if [[ -z "${INSTALL_TOKEN}" || "${INSTALL_TOKEN}" == "null" ]]; then
+  echo "ERROR: jit-config.sh: failed to obtain installation access token" >&2
+  exit 1
+fi
+
+# ── Step 3: Generate one-time JIT runner config ───────────────────────────────
+# Labels are stored comma-separated in the Ansible variable; split to JSON array.
+# runner_group_id must be a JSON number — pass without quotes for --argjson.
+LABELS_JSON=$(printf '%s' "${LABELS}" | jq -Rc 'split(",")')
+
+JIT_PAYLOAD=$(
+  jq -n \
+    --arg     name  "${RUNNER_NAME}" \
+    --argjson group "${RUNNER_GROUP_ID}" \
+    --argjson lbls  "${LABELS_JSON}" \
+    '{name: $name, runner_group_id: $group, labels: $lbls, work_folder: "_work"}'
+)
+
+ENCODED=$(
+  curl -sf \
+    -X POST \
+    -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -H "Content-Type: application/json" \
+    -d "${JIT_PAYLOAD}" \
+    "${GH_API}/orgs/${ORG}/actions/runners/generate-jitconfig" \
+  | jq -r '.encoded_jit_config'
+)
+
+if [[ -z "${ENCODED}" || "${ENCODED}" == "null" ]]; then
+  echo "ERROR: jit-config.sh: generate-jitconfig returned empty config" >&2
+  exit 1
+fi
+
+# Output the JIT config for ExecStartPre to capture into /tmp/gh-runner-N.jitconfig
+printf '%s' "${ENCODED}"

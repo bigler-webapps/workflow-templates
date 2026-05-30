@@ -1,0 +1,45 @@
+[Unit]
+Description=GitHub Actions ephemeral runner — slot %i
+# Ephemeral runners exit after one job. Restart=always causes systemd to
+# re-launch, which triggers a fresh JIT-config registration (ExecStartPre)
+# before the next job pickup. No static registration token remains at rest.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ github_runner_user }}
+Group={{ github_runner_user }}
+WorkingDirectory={{ github_runner_base_dir }}/slot-%i
+
+# Private /tmp namespace per service invocation. The JIT-config token written
+# by ExecStartPre is invisible to any other process and is destroyed on stop —
+# defence in depth on top of the umask 0177 (0600) on the temp file itself.
+PrivateTmp=true
+
+# ExecStartPre: obtain a one-time JIT token and write it to a temp file.
+# Runner name encodes host + slot for easy identification in the GitHub UI.
+ExecStartPre=/bin/bash -c \
+  'umask 0177 && {{ github_runner_base_dir }}/bin/jit-config.sh "$(hostname -s)-slot%i" \
+   > /tmp/gh-runner-%i.jitconfig'
+
+# ExecStart: launch the runner, reading the JIT token from the temp file.
+ExecStart=/bin/bash -c \
+  '{{ github_runner_base_dir }}/slot-%i/run.sh \
+   --jitconfig "$(cat /tmp/gh-runner-%i.jitconfig)"'
+
+# Remove the one-time token after the runner exits (success or error).
+ExecStopPost=/bin/rm -f /tmp/gh-runner-%i.jitconfig
+
+# Restart immediately after each job. RestartSec=5 gives a short pause
+# for GitHub's backend to de-register the just-used ephemeral identity
+# before the next registration attempt.
+Restart=always
+RestartSec=5
+KillMode=process
+
+# Runners open many file descriptors (git pack objects, Docker layers).
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

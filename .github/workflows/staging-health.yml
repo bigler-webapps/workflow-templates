@@ -19,10 +19,17 @@ on:
         description: 'Seconds between probe attempts.'
         type: number
         default: 10
+      runs-on:
+        description: >
+          Runner label. Use 'ubuntu-latest' for GitHub-hosted runners (default).
+          For the self-hosted Netcup pool pass a single unique label (e.g. 'netcup').
+          Multi-label JSON arrays are not supported by this input.
+        type: string
+        default: 'ubuntu-latest'
 
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 

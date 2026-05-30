@@ -1,0 +1,56 @@
+---
+# github_runner role — defaults
+#
+# Required host_vars (populated via sync-secrets, never hardcoded):
+#   github_runner_app_id              — GitHub App numeric ID
+#   github_runner_app_private_key     — Full PEM content (use YAML block scalar |)
+#   github_runner_app_installation_id — Installation ID for the bigler-webapps org
+#
+# github_runner_sha256:
+#   SHA256 of the linux-x64 tarball for the pinned version.
+#   Find it at: https://github.com/actions/runner/releases
+#   Format: "sha256:<hexdigest>"
+#   Always update github_runner_version and github_runner_sha256 together.
+#
+# github_runner_slots:
+#   Number of concurrent ephemeral runner instances on this host.
+#   Each slot gets its own isolated copy of the runner dir and a dedicated
+#   systemd service unit (gh-runner@1.service, gh-runner@2.service, …).
+#   Each unit self-registers a fresh ephemeral runner before every job pickup.
+#
+# github_runner_group_id:
+#   Numeric ID of the GitHub org runner group (1 = Default group).
+#   Find it: org Settings → Actions → Runner groups → note the ID in the URL.
+#
+# OPERATIONAL NOTE — App registration:
+#   This role uses a GitHub App (not a PAT) to obtain ephemeral runner tokens
+#   via the generate-jitconfig API. The App must be installed on the org and
+#   granted "Self-hosted runners: write" permission. The installation ID lives
+#   in the App install URL (Settings → GitHub Apps → <name> → Installation).
+
+github_runner_org: bigler-webapps
+
+# GitHub App credentials — REQUIRED, set via host_vars / sync-secrets
+github_runner_app_id: ""
+github_runner_app_private_key: ""
+github_runner_app_installation_id: ""
+
+# Runner binary — pin both version and checksum together
+# Latest releases: https://github.com/actions/runner/releases
+github_runner_version: "2.321.0"
+# Fill in the SHA256 of the linux-x64 tarball for github_runner_version.
+# Find it at: https://github.com/actions/runner/releases  Format: sha256:<hex>
+github_runner_sha256: ""
+
+# System account and base path
+github_runner_user: gh-runner
+github_runner_base_dir: /opt/gh-runner
+
+# Number of parallel ephemeral runner slots on this host
+github_runner_slots: 3
+
+# Org runner group ID (1 = Default)
+github_runner_group_id: 1
+
+# Labels applied to all slots (comma-separated, no spaces around commas)
+github_runner_labels: "self-hosted,netcup"
