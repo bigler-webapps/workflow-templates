@@ -1,0 +1,215 @@
+---
+# github_runner tasks
+#
+# Play prerequisites (roles applied before this one):
+#   base      — OS baseline, locale, common packages
+#   docker    — docker daemon running, "docker" group exists
+#   tailscale — Tailscale BINARY installed + the runner user granted operator
+#               rights. The host is NOT a persistent tagged tailnet member.
+#               Per ARCHITECTURE.md §4.8, CI network identity is ephemeral and
+#               per-job: each deploy job brings up its own short-lived,
+#               correctly-tagged (tag:ci-deploy) Tailscale device via
+#               tailscale/github-action; test/lint jobs use tag:ci-readonly
+#               or no tailnet at all. A persistent tagged runner node would
+#               make EVERY job a standing prod-reachable principal — the
+#               documented anti-pattern.
+#
+# This role installs the actions/runner binary, a JIT-config broker script
+# (jit-config.sh), per-slot working directories, and a systemd template unit.
+# Each unit registers itself as a fresh ephemeral org runner before every job,
+# runs exactly one job, then exits — systemd restarts it and it re-registers.
+# No static runner registration; no persistent runner token at rest.
+
+- name: Assert required variables are set
+  # Fail early with a clear message before any package install or download.
+  # github_runner_sha256 must be the real SHA256 for the pinned version —
+  # an empty value would let get_url skip checksum validation entirely.
+  ansible.builtin.assert:
+    that:
+      - github_runner_app_id | string | length > 0
+      - github_runner_app_private_key | string | length > 0
+      - github_runner_app_installation_id | string | length > 0
+      - github_runner_sha256 is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: >-
+      github_runner role: required variable not set or has wrong format.
+      Set github_runner_app_id, github_runner_app_private_key,
+      github_runner_app_installation_id in host_vars.
+      github_runner_sha256 must be "sha256:<64 hex chars>" (from the releases page).
+
+- name: Ensure gh-runner system user exists
+  become: true
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ github_runner_base_dir }}"
+    create_home: true
+    state: present
+
+- name: Add gh-runner user to docker group
+  # CI jobs need docker access; the group is created by the docker role.
+  become: true
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    groups:
+      - docker
+    append: true
+
+- name: Install runner dependencies
+  # curl/jq/openssl: used by jit-config.sh for GitHub App JWT + API calls.
+  # git: required by many CI workflows (checkout action).
+  # update_cache: defends against stale apt indexes when this role runs
+  # standalone (without the base role having refreshed caches beforehand).
+  become: true
+  ansible.builtin.apt:
+    name:
+      - curl
+      - jq
+      - git
+      - openssl
+    state: present
+    update_cache: true
+
+- name: Ensure base directories exist
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0750"
+  loop:
+    - "{{ github_runner_base_dir }}/runner"
+    - "{{ github_runner_base_dir }}/bin"
+
+- name: Download actions/runner tarball and verify checksum
+  # get_url validates the sha256 before writing — the role aborts if
+  # checksum mismatches. Always update github_runner_version and
+  # github_runner_sha256 together when upgrading the runner binary.
+  become: true
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/actions/runner/releases/download/v{{ github_runner_version }}/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz
+    dest: "/tmp/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    checksum: "{{ github_runner_sha256 }}"
+    mode: "0644"
+
+- name: Read installed runner version (if any)
+  # Used to detect whether the runner binary needs to be updated.
+  # slurp returns failed=true when the file does not exist yet.
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ github_runner_base_dir }}/.runner-version"
+  register: _runner_installed_version
+  failed_when: false
+
+- name: Determine whether runner binary needs update
+  ansible.builtin.set_fact:
+    _runner_needs_update: >-
+      {{ _runner_installed_version.failed | default(true)
+         or (_runner_installed_version.content | b64decode | trim)
+            != github_runner_version }}
+
+- name: Extract actions/runner to base runner directory
+  # Runs only on first install or when github_runner_version changed.
+  # Does NOT use `creates:` — version-file controls idempotency so that
+  # version upgrades are applied correctly on re-runs.
+  become: true
+  ansible.builtin.unarchive:
+    src: "/tmp/actions-runner-linux-x64-{{ github_runner_version }}.tar.gz"
+    dest: "{{ github_runner_base_dir }}/runner"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+  when: _runner_needs_update | bool
+
+- name: Record installed runner version
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_version }}\n"
+    dest: "{{ github_runner_base_dir }}/.runner-version"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0644"
+  when: _runner_needs_update | bool
+
+- name: Deploy GitHub App private key
+  # PEM content comes from host_vars (populated by sync-secrets).
+  # Mode 0600 ensures only gh-runner can read it.
+  # no_log: true suppresses the PEM from standard task output; note that
+  # third-party callback plugins (ARA, custom log shippers) may still
+  # capture it from internal task data before no_log applies — vet any
+  # callbacks for this exposure (same caveat as tailscale role auth-key).
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_app_private_key }}"
+    dest: "{{ github_runner_base_dir }}/app.pem"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Deploy JIT-config broker script
+  become: true
+  ansible.builtin.template:
+    src: jit-config.sh.j2
+    dest: "{{ github_runner_base_dir }}/bin/jit-config.sh"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0750"
+
+- name: Check which per-slot directories already exist
+  # Idempotency: only initialise slots that have not been set up yet.
+  # become: true required — base_dir is mode 0750 owned by github_runner_user;
+  # the Ansible connection user cannot enter it without privilege escalation.
+  become: true
+  ansible.builtin.stat:
+    path: "{{ github_runner_base_dir }}/slot-{{ item }}/run.sh"
+  register: _slot_stat
+  loop: "{{ range(1, github_runner_slots + 1) | list }}"
+
+- name: Initialise per-slot runner directories (first run only)
+  # Each ephemeral slot needs its own isolated copy of the runner tree.
+  # ansible.builtin.copy with remote_src copies the extracted runner dir.
+  # The trailing slash on src copies contents (not the directory itself).
+  become: true
+  ansible.builtin.copy:
+    src: "{{ github_runner_base_dir }}/runner/"
+    dest: "{{ github_runner_base_dir }}/slot-{{ item.item }}/"
+    remote_src: true
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: preserve
+  when: not item.stat.exists or (_runner_needs_update | bool)
+  loop: "{{ _slot_stat.results }}"
+
+- name: Deploy systemd template unit for gh-runner
+  become: true
+  ansible.builtin.template:
+    src: gh-runner@.service.j2
+    dest: /etc/systemd/system/gh-runner@.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd daemon-reload
+
+- name: Flush handlers so daemon-reload runs before service management
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start gh-runner slot services
+  become: true
+  ansible.builtin.systemd:
+    name: "gh-runner@{{ item }}.service"
+    enabled: true
+    state: started
+  loop: "{{ range(1, github_runner_slots + 1) | list }}"
+
+- name: Restart gh-runner slot services after binary upgrade
+  # Only runs when github_runner_version changed — forces slots to pick up
+  # the new binary without requiring a separate manual restart.
+  become: true
+  ansible.builtin.systemd:
+    name: "gh-runner@{{ item }}.service"
+    state: restarted
+  loop: "{{ range(1, github_runner_slots + 1) | list }}"
+  when: _runner_needs_update | bool
