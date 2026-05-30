@@ -55,6 +55,22 @@
       - docker
     append: true
 
+- name: Grant gh-runner passwordless sudo
+  # GitHub-hosted runners give their user passwordless sudo; many actions assume
+  # it. Notably deploy-app's tailscale/github-action installs/manages tailscaled
+  # (sudo) → without this the deploy fails with "sudo: a password is required".
+  # Acceptable posture for a DEDICATED runner box: gh-runner already has the
+  # docker group (root-equivalent), jobs are ephemeral (JIT), and §4.8 keeps
+  # test/lint jobs off the prod tailnet. The box hosts no tenant data.
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    dest: "/etc/sudoers.d/90-{{ github_runner_user }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+
 - name: Install runner dependencies
   # curl/jq/openssl: used by jit-config.sh for GitHub App JWT + API calls.
   # git: required by many CI workflows (checkout action).
