@@ -11,7 +11,8 @@ Description=Tailscale management daemon (second instance, persistent)
 #   --tun       → separate TUN interface ({{ tailscale_mgmt_tun }})
 #   --port      → separate UDP port ({{ tailscale_mgmt_port }}, 0 = OS-assigned)
 #
-# Reference: https://tailscale.com/kb/1118/custom-derp-servers (multiple instances)
+# Reference: Tailscale docs on running multiple tailscaled instances
+# (separate --state/--socket/--tun/--port per instance).
 # tailscaled.service (default instance) is started by the tailscale role
 # with authkey="" — installed and running but unregistered. Ordering after
 # it ensures the TUN subsystem is ready before the mgmt instance starts.
@@ -37,7 +38,19 @@ RestartSec=5
 RuntimeDirectory=tailscale-mgmt
 RuntimeDirectoryMode=0750
 
-# Hardening — mirrors the upstream tailscaled.service unit
+# Persistent state directory — REQUIRED with ProtectSystem=strict, which
+# otherwise mounts /var read-only and would prevent tailscaled from writing
+# its node key/prefs to --statedir (losing identity on every restart).
+# StateDirectory= creates /var/lib/tailscale-mgmt and marks it read-write for
+# this unit. systemd owns it; Ansible does NOT pre-create it.
+StateDirectory=tailscale-mgmt
+StateDirectoryMode=0750
+
+# Hardening. NOTE: the upstream tailscaled.service does NOT use
+# ProtectSystem=strict; we add it here for defence in depth. tailscaled needs
+# RW access to its state dir (covered by StateDirectory above) and manages
+# kernel netfilter/routes (not blocked by ProtectSystem). Re-verify with a
+# real `tailscale up` if upstream hardening changes.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=true

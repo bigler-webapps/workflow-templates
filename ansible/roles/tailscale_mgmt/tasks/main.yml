@@ -27,14 +27,10 @@
       Set it in host_vars via sync-secrets (pre-authorised key for
       {{ tailscale_mgmt_tag }}).
 
-- name: Ensure mgmt statedir exists
-  become: true
-  ansible.builtin.file:
-    path: "{{ tailscale_mgmt_statedir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0750"
+# NOTE: the mgmt statedir ({{ tailscale_mgmt_statedir }}) is created and owned
+# by systemd via StateDirectory= in tailscaled-mgmt.service — NOT pre-created
+# here. StateDirectory also marks it read-write under ProtectSystem=strict
+# (a plain mkdir would stay read-only and break state persistence).
 
 - name: Deploy tailscaled-mgmt systemd unit
   become: true
