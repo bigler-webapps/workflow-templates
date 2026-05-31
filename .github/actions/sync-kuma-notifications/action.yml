@@ -11,9 +11,9 @@ inputs:
     required: false
     default: 'monitoring/notifications.yml'
   kuma_url:
-    description: 'Full URL to Kuma over Tailnet (e.g. https://staging.tail990d7f.ts.net:8443).'
+    description: 'Full URL to Kuma over Tailnet (e.g. https://monitoring.tail990d7f.ts.net:8443).'
     required: false
-    default: 'https://staging.tail990d7f.ts.net:8443'
+    default: 'https://monitoring.tail990d7f.ts.net:8443'
   kuma_user:
     description: 'Automation user in Kuma.'
     required: true
