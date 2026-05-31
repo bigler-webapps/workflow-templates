@@ -103,6 +103,10 @@ def _login():
                     api.disconnect()
                 except Exception:  # noqa: BLE001
                     pass
+            # Wrong credentials won't recover by retrying — fail fast instead
+            # of burning ~50s and spamming failed-login events on the server.
+            if any(s in str(exc).lower() for s in ("incorrect", "password", "credential")):
+                break
             if attempt < 5:
                 wait = min(5 * attempt, 25)
                 print(
