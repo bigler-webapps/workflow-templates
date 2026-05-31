@@ -70,7 +70,11 @@ jobs:
           POSTGRES_PASSWORD: test
           POSTGRES_DB: test
         ports:
-          - 5432:5432
+          # Dynamic host port (NOT 5432:5432): self-hosted runners run multiple
+          # jobs on ONE host, so a fixed host port collides ("port already
+          # allocated"). GitHub maps a random free host port, read below via
+          # job.services.postgres.ports['5432'].
+          - 5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -103,7 +107,7 @@ jobs:
             -e ENV_TYPE='local' \
             -e TEST_DB_HOST='localhost' \
             -e DB_HOST='localhost' \
-            -e DB_PORT='5432' \
+            -e DB_PORT="${{ job.services.postgres.ports['5432'] }}" \
             -e DB_NAME='test' \
             -e DB_USER='test' \
             -e DB_PASSWORD='test' \
