@@ -75,8 +75,8 @@ runs:
             exit 1
           fi
         done
-        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging)$' || {
-          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: main, staging)"
+        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging|monitoring)$' || {
+          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: main, staging, monitoring)"
           exit 1
         }
         echo "✅ Inputs validated."
