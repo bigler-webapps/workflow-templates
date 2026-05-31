@@ -29,9 +29,9 @@ inputs:
     required: false
     default: 'project.yaml'
   kuma_url:
-    description: 'Full URL to Kuma over Tailnet (e.g. https://staging.tail990d7f.ts.net:8443). Caller passes this; defaults to staging-tailnet-serve.'
+    description: 'Full URL to Kuma over Tailnet (e.g. https://monitoring.tail990d7f.ts.net:8443). Caller passes this; defaults to the dedicated monitoring-host tailnet-serve.'
     required: false
-    default: 'https://staging.tail990d7f.ts.net:8443'
+    default: 'https://monitoring.tail990d7f.ts.net:8443'
   kuma_user:
     description: 'Automation user in Kuma.'
     required: true
