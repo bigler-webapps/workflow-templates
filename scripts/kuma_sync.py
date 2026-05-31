@@ -40,6 +40,7 @@ Monitors (e.g. monitoring/monitor.yml):
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -84,9 +85,38 @@ def _login():
         print(f"❌ Missing env vars: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
-    api = UptimeKumaApi(url)
-    api.login(user, password)
-    return api
+    # Kuma's Socket.IO login is flaky under load: the server is a single Node
+    # process, so on a busy host the HTTP reachability check passes but the
+    # `login` Socket.IO call times out (socketio.exceptions.TimeoutError).
+    # Raise the per-call timeout and retry with linear backoff before failing.
+    last_exc = None
+    for attempt in range(1, 6):
+        api = None
+        try:
+            api = UptimeKumaApi(url, timeout=30)
+            api.login(user, password)
+            return api
+        except Exception as exc:  # noqa: BLE001 — socketio.TimeoutError et al.
+            last_exc = exc
+            if api is not None:
+                try:
+                    api.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+            # Wrong credentials won't recover by retrying — fail fast instead
+            # of burning ~50s and spamming failed-login events on the server.
+            if any(s in str(exc).lower() for s in ("incorrect", "password", "credential")):
+                break
+            if attempt < 5:
+                wait = min(5 * attempt, 25)
+                print(
+                    f"⚠️  Kuma login attempt {attempt}/5 failed "
+                    f"({type(exc).__name__}); retrying in {wait}s...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+    print(f"❌ Kuma login failed after 5 attempts: {last_exc}", file=sys.stderr)
+    sys.exit(1)
 
 
 def sync_notifications(api, config_path, prune=False):
