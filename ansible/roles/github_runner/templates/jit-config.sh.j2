@@ -60,6 +60,39 @@ if [[ -z "${INSTALL_TOKEN}" || "${INSTALL_TOKEN}" == "null" ]]; then
   exit 1
 fi
 
+# ── Step 2b: Remove a stale same-name registration ────────────────────────────
+# generate-jitconfig is a HARD create: if a runner with RUNNER_NAME already
+# exists it returns HTTP 409 and curl -sf aborts the script (exit 22), so the
+# slot never starts. Runner names are deterministic (<hostname>-slot<N>), so a
+# host re-image, a crashed prior ExecStartPre, or any run.sh that registered but
+# exited without completing a job leaves an offline/online leftover under the
+# SAME name → permanent crash-loop. Delete it first to keep registration
+# idempotent. There is no get-by-name endpoint, so list and filter.
+#   - select busy==false: never delete a runner that is mid-job (no job abort).
+#   - || true on DELETE: losing a delete race is non-fatal; the slot retries.
+#   - per_page=100: this is the ORG-WIDE runner count, not per-host. A single
+#     runner host with a few slots sits far below 100; add Link-header pagination
+#     only if the org ever registers >100 self-hosted runners total.
+#   - [ ... ][0] // empty: version-agnostic "first match or nothing" — avoids
+#     jq's first(expr) generator form (jq >= 1.6 only). Names are unique per org,
+#     so there is at most one match anyway.
+EXISTING_ID=$(
+  curl -sf \
+    -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${GH_API}/orgs/${ORG}/actions/runners?per_page=100" \
+  | jq -r --arg n "${RUNNER_NAME}" '[.runners[] | select(.name == $n and .busy == false) | .id][0] // empty'
+)
+if [[ -n "${EXISTING_ID}" ]]; then
+  curl -sf \
+    -X DELETE \
+    -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${GH_API}/orgs/${ORG}/actions/runners/${EXISTING_ID}" || true
+fi
+
 # ── Step 3: Generate one-time JIT runner config ───────────────────────────────
 # Labels are stored comma-separated in the Ansible variable; split to JSON array.
 # runner_group_id must be a JSON number — pass without quotes for --argjson.
