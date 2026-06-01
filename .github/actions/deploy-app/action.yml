@@ -116,7 +116,7 @@ runs:
         fi
         # SUBDIR may contain '/' (relative path like .ssh/app); check only for dangerous patterns.
         value="${INPUT_SUBDIR:-}"
-        if [ -n "$value" ] && printf '%s' "$value" | grep -qE '\.\.|[[:space:]]|[;&|`$]'; then
+        if [ -n "$value" ] && printf '%s' "$value" | grep -qE '\.\.|[[:space:]]|[;&|`$\\]'; then
           echo "❌ Invalid INPUT_SUBDIR (no traversal or shell metas)"
           exit 1
         fi
@@ -321,11 +321,10 @@ runs:
         F2_MODE="${F2_MODE}"
         F2_B64="${F2_B64}"
 
-        TARGET_DIR="\${REMOTE_PATH}/\${TARGET_SUBDIR}"
-        mkdir -p "\$TARGET_DIR"
-        chmod 700 "\$TARGET_DIR"
-
-        # S58: re-validate name+mode server-side (defense-in-depth).
+        # S58: re-validate subdir+name+mode server-side (defense-in-depth, before any fs ops).
+        if [[ ! "\${TARGET_SUBDIR}" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "\${TARGET_SUBDIR}" =~ \.\. ]]; then
+          echo "❌ invalid TARGET_SUBDIR on server"; exit 1
+        fi
         if [ -n "\${F1_NAME}" ]; then
           [[ "\${F1_NAME}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "❌ invalid F1_NAME on server"; exit 1; }
           [[ "\${F1_MODE}" =~ ^[0-7]{3,4}$ ]] || { echo "❌ invalid F1_MODE on server"; exit 1; }
@@ -334,6 +333,10 @@ runs:
           [[ "\${F2_NAME}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "❌ invalid F2_NAME on server"; exit 1; }
           [[ "\${F2_MODE}" =~ ^[0-7]{3,4}$ ]] || { echo "❌ invalid F2_MODE on server"; exit 1; }
         fi
+
+        TARGET_DIR="\${REMOTE_PATH}/\${TARGET_SUBDIR}"
+        mkdir -p "\$TARGET_DIR"
+        chmod 700 "\$TARGET_DIR"
 
         if [ -n "\${F1_B64}" ] && [ -n "\${F1_NAME}" ]; then
           printf '%s' "\$F1_B64" | base64 -d | tr -d '\r' > "\$TARGET_DIR/\$F1_NAME"
