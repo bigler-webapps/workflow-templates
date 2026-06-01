@@ -403,19 +403,21 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
 def sync_monitors_multi(project_yaml_paths, prune=False):
     """Sync monitors for multiple apps in ONE Kuma session (one login/disconnect).
 
-    Processes each project.yaml sequentially.  If the Socket.IO session drops
-    mid-run the function re-logs in and retries the current monitor before
-    continuing.  When prune=True, deletes any Kuma monitor whose name does not
-    appear in ANY of the synced project.yamls (combined declared set).
+    Processes each project.yaml sequentially.  Per-app errors are caught and
+    reported without aborting the remaining apps.  Prune is skipped when any
+    app failed — running it with an incomplete declared-name set would delete
+    valid monitors belonging to the failed apps.
     """
     api = _login()
     all_declared_names = set()
+    failed_apps = []
 
     try:
         for path_str in project_yaml_paths:
             path = Path(path_str)
             if not path.exists():
                 print(f"⚠️  project.yaml not found: {path} — skipping", file=sys.stderr)
+                failed_apps.append(str(path))
                 continue
 
             app_name = path.parent.name
@@ -423,11 +425,24 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
             print(f"📦  {app_name}")
             print(f"{'=' * 60}")
 
-            specs = monitors_from_project_yaml(path)
+            # Parse errors (missing project_name, empty domains, bad YAML) must not
+            # propagate into the prune block with an incomplete declared-name set.
+            try:
+                specs = monitors_from_project_yaml(path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"❌ Failed to parse {path}: {exc}", file=sys.stderr)
+                failed_apps.append(app_name)
+                continue
             print(f"ℹ️  Derived {len(specs)} monitor spec(s) from {path}")
 
-            existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
+            try:
+                existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
+            except Exception as exc:  # noqa: BLE001
+                print(f"❌ Failed to fetch monitors for {app_name}: {exc}", file=sys.stderr)
+                failed_apps.append(app_name)
+                continue
 
+            app_failed = False
             for raw_spec in specs:
                 spec = _expand_env(raw_spec)
                 name = spec["name"]
@@ -460,32 +475,57 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                                 api.disconnect()
                             except Exception:  # noqa: BLE001
                                 pass
-                            api = _login()
-                            existing = {
-                                m["name"]: m
-                                for m in _retry_call("get_monitors", api.get_monitors)
-                            }
+                            try:
+                                api = _login()
+                                existing = {
+                                    m["name"]: m
+                                    for m in _retry_call("get_monitors", api.get_monitors)
+                                }
+                            except Exception as rec_exc:  # noqa: BLE001
+                                print(f"❌ Recovery failed for {app_name}: {rec_exc}", file=sys.stderr)
+                                app_failed = True
+                                break
                         else:
-                            raise
+                            print(f"❌ Failed to sync monitor {name}: {exc}", file=sys.stderr)
+                            app_failed = True
+                            break
+
+                if app_failed:
+                    break
+
+            if app_failed:
+                failed_apps.append(app_name)
 
         if prune:
-            print(f"\n{'=' * 60}")
-            print("🗑️  Prune pass")
-            print(f"{'=' * 60}")
-            existing_all = {
-                m["name"]: m
-                for m in _retry_call("get_monitors", api.get_monitors)
-            }
-            for name, entry in existing_all.items():
-                if name not in all_declared_names:
-                    _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
-                    print(f"🗑️  deleted stale monitor: {name}")
+            if failed_apps:
+                print(
+                    f"\n⚠️  Prune skipped — {len(failed_apps)} app(s) failed: "
+                    f"{', '.join(failed_apps)}. "
+                    "Running prune with an incomplete declared-name set would delete valid monitors.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"\n{'=' * 60}")
+                print("🗑️  Prune pass")
+                print(f"{'=' * 60}")
+                existing_all = {
+                    m["name"]: m
+                    for m in _retry_call("get_monitors", api.get_monitors)
+                }
+                for name, entry in existing_all.items():
+                    if name not in all_declared_names:
+                        _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
+                        print(f"🗑️  deleted stale monitor: {name}")
 
     finally:
         try:
             api.disconnect()
         except Exception:  # noqa: BLE001
             pass
+
+    if failed_apps:
+        print(f"\n❌ {len(failed_apps)} app(s) failed: {', '.join(failed_apps)}", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():
