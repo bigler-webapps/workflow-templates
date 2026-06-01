@@ -168,6 +168,33 @@ def _monitor_changed(kwargs, existing_monitor):
     return False
 
 
+def _build_monitor_kwargs(spec):
+    """Build the kwargs dict for add/edit_monitor from a normalized spec dict."""
+    kwargs = {
+        "name": spec["name"],
+        "type": spec.get("type", "http"),
+        "url": spec.get("url"),
+        "interval": int(spec.get("interval", 60)),
+        "maxretries": int(spec.get("max_retries", 3)),
+        "retryInterval": int(spec.get("retry_interval", 60)),
+    }
+    if "accepted_statuscodes" in spec:
+        kwargs["accepted_statuscodes"] = spec["accepted_statuscodes"]
+    if "hostname" in spec:
+        kwargs["hostname"] = spec["hostname"]
+    if "port" in spec:
+        kwargs["port"] = int(spec["port"])
+    if "keyword" in spec:
+        kwargs["keyword"] = spec["keyword"]
+    if "method" in spec:
+        kwargs["method"] = spec["method"]
+    if "body" in spec:
+        kwargs["body"] = spec["body"]
+    if "headers" in spec:
+        kwargs["headers"] = spec["headers"]
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
 def sync_notifications(api, config_path, prune=False):
     with open(config_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -354,33 +381,7 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         name = spec["name"]
         declared_names.add(name)
 
-        kwargs = {
-            "name": name,
-            "type": spec.get("type", "http"),
-            "url": spec.get("url"),
-            "interval": int(spec.get("interval", 60)),
-            "maxretries": int(spec.get("max_retries", 3)),
-            "retryInterval": int(spec.get("retry_interval", 60)),
-        }
-        # Optional fields — only set if explicitly declared in the YAML.
-        # Backward-compatible: existing configs without these keys behave as before.
-        if "accepted_statuscodes" in spec:
-            kwargs["accepted_statuscodes"] = spec["accepted_statuscodes"]
-        if "hostname" in spec:
-            kwargs["hostname"] = spec["hostname"]
-        if "port" in spec:
-            kwargs["port"] = int(spec["port"])
-        if "keyword" in spec:
-            kwargs["keyword"] = spec["keyword"]
-        if "method" in spec:
-            kwargs["method"] = spec["method"]
-        if "body" in spec:
-            kwargs["body"] = spec["body"]
-        if "headers" in spec:
-            kwargs["headers"] = spec["headers"]
-
-        # Drop None to let Kuma defaults apply
-        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        kwargs = _build_monitor_kwargs(spec)
 
         if name in existing:
             if _monitor_changed(kwargs, existing[name]):
@@ -397,6 +398,94 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
             if name not in declared_names:
                 _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
                 print(f"🗑️  deleted stale monitor: {name}")
+
+
+def sync_monitors_multi(project_yaml_paths, prune=False):
+    """Sync monitors for multiple apps in ONE Kuma session (one login/disconnect).
+
+    Processes each project.yaml sequentially.  If the Socket.IO session drops
+    mid-run the function re-logs in and retries the current monitor before
+    continuing.  When prune=True, deletes any Kuma monitor whose name does not
+    appear in ANY of the synced project.yamls (combined declared set).
+    """
+    api = _login()
+    all_declared_names = set()
+
+    try:
+        for path_str in project_yaml_paths:
+            path = Path(path_str)
+            if not path.exists():
+                print(f"⚠️  project.yaml not found: {path} — skipping", file=sys.stderr)
+                continue
+
+            app_name = path.parent.name
+            print(f"\n{'=' * 60}")
+            print(f"📦  {app_name}")
+            print(f"{'=' * 60}")
+
+            specs = monitors_from_project_yaml(path)
+            print(f"ℹ️  Derived {len(specs)} monitor spec(s) from {path}")
+
+            existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
+
+            for raw_spec in specs:
+                spec = _expand_env(raw_spec)
+                name = spec["name"]
+                all_declared_names.add(name)
+                kwargs = _build_monitor_kwargs(spec)
+
+                for recovery_attempt in range(1, 3):
+                    try:
+                        if name in existing:
+                            if _monitor_changed(kwargs, existing[name]):
+                                _retry_call(
+                                    f"edit_monitor({name})",
+                                    api.edit_monitor,
+                                    existing[name]["id"],
+                                    **kwargs,
+                                )
+                                print(f"✏️  updated monitor: {name}")
+                            else:
+                                print(f"✓ unchanged: {name}")
+                        else:
+                            _retry_call(f"add_monitor({name})", api.add_monitor, **kwargs)
+                            print(f"➕ created monitor: {name}")
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        if recovery_attempt == 1 and any(
+                            s in str(exc).lower() for s in ("not logged in", "timeout")
+                        ):
+                            print("⚠️  Session drop, re-logging in...", file=sys.stderr)
+                            try:
+                                api.disconnect()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            api = _login()
+                            existing = {
+                                m["name"]: m
+                                for m in _retry_call("get_monitors", api.get_monitors)
+                            }
+                        else:
+                            raise
+
+        if prune:
+            print(f"\n{'=' * 60}")
+            print("🗑️  Prune pass")
+            print(f"{'=' * 60}")
+            existing_all = {
+                m["name"]: m
+                for m in _retry_call("get_monitors", api.get_monitors)
+            }
+            for name, entry in existing_all.items():
+                if name not in all_declared_names:
+                    _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
+                    print(f"🗑️  deleted stale monitor: {name}")
+
+    finally:
+        try:
+            api.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main():
@@ -426,7 +515,27 @@ def main():
     sm.add_argument("--prune", action="store_true",
                     help="Delete Kuma monitors absent from the config")
 
+    sm_multi = sub.add_parser(
+        "multi",
+        help="Sync monitors for multiple apps in one Kuma session (no concurrent connections)",
+    )
+    sm_multi.add_argument(
+        "project_yamls",
+        nargs="+",
+        metavar="PROJECT_YAML",
+        help="Paths to project.yaml files to process sequentially",
+    )
+    sm_multi.add_argument(
+        "--prune",
+        action="store_true",
+        help="Delete Kuma monitors absent from all declared configs (combined set)",
+    )
+
     args = parser.parse_args()
+
+    if args.command == "multi":
+        sync_monitors_multi(args.project_yamls, prune=args.prune)
+        return
 
     api = _login()
     try:
