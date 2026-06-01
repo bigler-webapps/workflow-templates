@@ -119,6 +119,55 @@ def _login():
     sys.exit(1)
 
 
+def _retry_call(label, fn, *args, **kwargs):
+    """Retry fn up to 5 times with linear backoff (mirrors the _login retry)."""
+    last = None
+    for attempt in range(1, 6):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if any(s in str(exc).lower() for s in ("not found", "does not exist", "permission")):
+                raise
+            if attempt < 5:
+                wait = attempt * 5
+                print(
+                    f"⚠️  Kuma {label} attempt {attempt}/5 failed "
+                    f"({type(exc).__name__}); retrying in {wait}s...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+    raise last
+
+
+def _monitor_changed(kwargs, existing_monitor):
+    """Return True if any key in kwargs differs from the existing monitor's value."""
+    for key, desired in kwargs.items():
+        current = existing_monitor.get(key)
+        if isinstance(desired, int):
+            try:
+                current = int(current)
+            except (TypeError, ValueError):
+                return True
+            if desired != current:
+                return True
+        elif isinstance(desired, list):
+            if not isinstance(current, list):
+                return True
+            if sorted(str(x) for x in desired) != sorted(str(x) for x in current):
+                return True
+        else:
+            # str() normalises enum types the Kuma API may return.
+            # Treat absent/None from Kuma as empty string so that optional
+            # fields not echoed back by the server don't trigger spurious edits
+            # when the desired value is also empty.
+            current_s = str(current) if current is not None else ""
+            desired_s = str(desired) if desired is not None else ""
+            if desired_s != current_s:
+                return True
+    return False
+
+
 def sync_notifications(api, config_path, prune=False):
     with open(config_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -297,7 +346,7 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         print("ℹ️  No monitors declared in config; nothing to do.")
         return
 
-    existing = {m["name"]: m for m in api.get_monitors()}
+    existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
     declared_names = set()
 
     for raw_spec in specs:
@@ -334,16 +383,19 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
         if name in existing:
-            api.edit_monitor(existing[name]["id"], **kwargs)
-            print(f"✏️  updated monitor: {name}")
+            if _monitor_changed(kwargs, existing[name]):
+                _retry_call(f"edit_monitor({name})", api.edit_monitor, existing[name]["id"], **kwargs)
+                print(f"✏️  updated monitor: {name}")
+            else:
+                print(f"✓ unchanged: {name}")
         else:
-            api.add_monitor(**kwargs)
+            _retry_call(f"add_monitor({name})", api.add_monitor, **kwargs)
             print(f"➕ created monitor: {name}")
 
     if prune:
         for name, entry in existing.items():
             if name not in declared_names:
-                api.delete_monitor(entry["id"])
+                _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
                 print(f"🗑️  deleted stale monitor: {name}")
 
 
