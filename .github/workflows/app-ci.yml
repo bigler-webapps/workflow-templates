@@ -19,6 +19,13 @@ on:
       pytest-args:
         type: string
         default: ''
+      pytest-import-mode:
+        description: >
+          pytest --import-mode value. Default 'importlib' avoids basename
+          collisions (e.g. multiple tests.py modules). Use 'prepend' only
+          if a specific repo's test layout requires it.
+        type: string
+        default: 'importlib'
       run-backend:
         type: boolean
         # Temporarily disabled by default to save GH Actions minutes. Callers
@@ -76,12 +83,15 @@ jobs:
           # job.services.postgres.ports['5432'].
           - 5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Clean stale Python byte-code
+        run: find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
@@ -114,7 +124,7 @@ jobs:
             -e EMAIL_PORT='25' \
             -e EMAIL_USE_TLS='False' \
             ci-backend:test \
-            pytest ${{ inputs.pytest-args }}
+            pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
 
   frontend:
     runs-on: ${{ inputs.runs-on }}
