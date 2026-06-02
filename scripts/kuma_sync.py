@@ -192,6 +192,10 @@ def _build_monitor_kwargs(spec):
         kwargs["body"] = spec["body"]
     if "headers" in spec:
         kwargs["headers"] = spec["headers"]
+    # notification_ids: list of Kuma notification IDs to assign to this monitor.
+    # Populated by sync_monitors after resolving notification names → IDs.
+    if "notification_ids" in spec:
+        kwargs["notificationIDList"] = spec["notification_ids"]
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
@@ -306,8 +310,13 @@ def monitors_from_project_yaml(project_yaml_path):
                 "add at least one domain."
             )
         primary = prod_domains[0]
-        specs.append({**base, "name": f"{name_prefix}-frontend", "url": f"https://{primary}"})
-        specs.append({**base, "name": f"{name_prefix}-healthz",  "url": f"https://{primary}{healthz_path}"})
+        # Derive the relay notification name from the production server so
+        # kuma_sync can assign the correct per-server relay to each monitor.
+        # Convention: claude-relay-{server} (e.g. claude-relay-main-prod).
+        prod_server = prod.get("server")
+        prod_relay = {"notification_name": f"claude-relay-{prod_server}"} if prod_server else {}
+        specs.append({**base, **prod_relay, "name": f"{name_prefix}-frontend", "url": f"https://{primary}"})
+        specs.append({**base, **prod_relay, "name": f"{name_prefix}-healthz",  "url": f"https://{primary}{healthz_path}"})
 
         # Staging monitors (opt-out via monitoring.skip_staging=true, or
         # implicit-skip when environments.staging.domains is missing/empty).
@@ -376,10 +385,30 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
     existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
     declared_names = set()
 
+    # Build name→id map for notifications once so per-monitor relay assignment
+    # can resolve names without a separate API call per monitor.
+    notifications_by_name = {
+        n["name"]: n["id"]
+        for n in _retry_call("get_notifications", api.get_notifications)
+    }
+
     for raw_spec in specs:
         spec = _expand_env(raw_spec)
         name = spec["name"]
         declared_names.add(name)
+
+        # Resolve notification_name → notification_ids before building kwargs.
+        if "notification_name" in spec:
+            notif_name = spec.pop("notification_name")
+            notif_id = notifications_by_name.get(notif_name)
+            if notif_id is not None:
+                spec["notification_ids"] = [notif_id]
+            else:
+                print(
+                    f"⚠️  notification '{notif_name}' not found in Kuma "
+                    f"(monitor: {name}) — skipping relay assignment",
+                    file=sys.stderr,
+                )
 
         kwargs = _build_monitor_kwargs(spec)
 
