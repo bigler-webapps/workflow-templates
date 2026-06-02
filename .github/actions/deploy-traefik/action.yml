@@ -102,9 +102,12 @@ runs:
         set -euo pipefail
         # S5/S21 partial mitigation: drop CI-only secret families before
         # generate-env sees them. TS_ added in v2.0.0 (Tailscale OAuth).
+        # S224: also drop CF account-level tokens and TF_CLOUD_TOKEN (exact
+        # match) — neither cloudflared nor Traefik needs them; only
+        # CLOUDFLARE_TUNNEL_TOKEN must stay (cloudflared auth).
         SECRETS_CONTEXT=$(
           printf '%s' "$SECRETS_CONTEXT_RAW" \
-            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
+            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)|^(CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCESS_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|TF_CLOUD_TOKEN)$") | not))'
         )
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
