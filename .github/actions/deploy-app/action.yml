@@ -6,6 +6,11 @@ description: 'Deploys a Django/React app via rsync + Docker Compose over Tailsca
 # the system OpenSSH client connects via Tailnet, Tailscale-SSH server-side
 # accepts the Tailnet identity (Authenticated="none" at WireGuard layer).
 # rsync uses `-e ssh` directly. ssh_private_key input remains absent.
+#
+# Tailnet suffix is parameterised via `tailnet_suffix` input (default keeps the
+# original `tail990d7f.ts.net` for backward compatibility). Callers in a
+# different tailnet can set the input once instead of hard-coding the FQDN
+# into every workflow's `ssh_host`.
 
 inputs:
   environment:
@@ -13,9 +18,13 @@ inputs:
     required: true
     default: 'staging'
   ssh_host:
-    description: 'Tailnet hostname to SSH to. Optional — when empty, derived from project.yaml/environments[env].server + `.tail990d7f.ts.net`.'
+    description: 'Tailnet hostname to SSH to. Optional — when empty, derived from project.yaml/environments[env].server + `.{tailnet_suffix}`.'
     required: false
     default: ''
+  tailnet_suffix:
+    description: 'Tailnet MagicDNS suffix appended to project.yaml `environments[env].server` when `ssh_host` is empty. Default is the bigler-webapps tailnet; non-bigler tenants override (e.g. `your-tailnet.ts.net`).'
+    required: false
+    default: 'tail990d7f.ts.net'
   ssh_user:
     description: 'Remote SSH user. Default `deploy` (matches biglerconsult.infra.deploy_user role default).'
     required: false
@@ -156,6 +165,7 @@ runs:
       env:
         TARGET_ENV: ${{ inputs.environment }}
         SSH_HOST_INPUT: ${{ inputs.ssh_host }}
+        TAILNET_SUFFIX: ${{ inputs.tailnet_suffix }}
       run: |
         python3 - <<'PYCODE'
         import os
@@ -164,6 +174,11 @@ runs:
 
         target_env = os.environ["TARGET_ENV"]
         ssh_host_input = os.environ.get("SSH_HOST_INPUT", "").strip()
+        # Backward-compat default lives on the input declaration in
+        # action.yml; the .strip() + fallback here is defensive against an
+        # empty-string override (a caller setting `tailnet_suffix: ''` would
+        # otherwise produce `<server>.` which is invalid).
+        tailnet_suffix = os.environ.get("TAILNET_SUFFIX", "").strip() or "tail990d7f.ts.net"
 
         try:
             with open("project.yaml") as f:
@@ -179,8 +194,11 @@ runs:
         # Derive Tailnet hostname from project.yaml when ssh_host input is
         # empty. environments[env].server is the physical host name (e.g.
         # 'main-prod', 'staging'); we add the MagicDNS suffix to get the
-        # Tailnet FQDN. When caller explicitly sets ssh_host, that value
-        # wins (lets callers override for ad-hoc targets).
+        # Tailnet FQDN. The suffix is parameterised (inputs.tailnet_suffix)
+        # so non-bigler tenants can use the same per-app project.yaml shape
+        # without hard-coding their FQDN into every caller workflow.
+        # When caller explicitly sets ssh_host, that value wins (lets
+        # callers override for ad-hoc targets).
         if ssh_host_input:
             resolved_host = ssh_host_input
             host_source = "input.ssh_host"
@@ -193,8 +211,8 @@ runs:
                     f"and inputs.ssh_host is empty. Provide one or the other."
                 )
                 raise SystemExit(1)
-            resolved_host = f"{server}.tail990d7f.ts.net"
-            host_source = f"project.yaml environments[{target_env}].server"
+            resolved_host = f"{server}.{tailnet_suffix}"
+            host_source = f"project.yaml environments[{target_env}].server + inputs.tailnet_suffix"
 
         print(f"✅ Environment:        {target_env}")
         print(f"✅ Project:            {project_name}")
