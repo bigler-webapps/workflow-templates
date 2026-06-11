@@ -113,6 +113,37 @@ runs:
         export SECRETS_CONTEXT
         generate-env --env ${{ inputs.target_environment }} --config project.yaml
 
+    - name: 🔌 Pre-flight Tailscale-SSH connectivity check
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+      run: |
+        set -euo pipefail
+        MAX_ATTEMPTS=5
+        SLEEP_BETWEEN=10
+        for attempt in $(seq 1 $MAX_ATTEMPTS); do
+          echo "→ Attempt ${attempt}/${MAX_ATTEMPTS}: ssh ${SSH_USER}@${SSH_HOST} true"
+          if ssh -o BatchMode=yes \
+                 -o StrictHostKeyChecking=accept-new \
+                 -o ConnectTimeout=15 \
+                 "${SSH_USER}@${SSH_HOST}" true 2>&1; then
+            echo "✅ Tailscale-SSH reachable as ${SSH_USER}@${SSH_HOST}"
+            exit 0
+          fi
+          if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+            echo "⏳ Attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying in ${SLEEP_BETWEEN}s..."
+            sleep "$SLEEP_BETWEEN"
+          fi
+        done
+        echo "❌ Tailscale-SSH pre-flight failed after ${MAX_ATTEMPTS} attempts."
+        echo "   Common causes:"
+        echo "   - MagicDNS not yet settled after runner joined the Tailnet (transient race)"
+        echo "   - Tailnet ACL ssh:-section missing rule for tag:ci-deploy → ${SSH_HOST} as ${SSH_USER}"
+        echo "   - tailscaled on target host not running with --ssh"
+        echo "   - Target host offline (check '${SSH_HOST}' in tailscale status)"
+        exit 1
+
     - name: 📂 Rsync project to server
       shell: bash
       env:
@@ -122,13 +153,13 @@ runs:
       run: |
         set -euo pipefail
         # Plain ssh over Tailnet — auth=none (Tailscale-SSH server-side).
-        rsync -rlvz \
+        rsync -rlvz --timeout=60 \
           --delete --delete-delay \
           --partial --delay-updates \
           --no-owner --no-group --no-perms --omit-dir-times \
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-          -e "ssh -o StrictHostKeyChecking=accept-new" \
+          -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15" \
           --exclude '.git' \
           --exclude '.github' \
           --exclude 'acme.json' \
@@ -147,7 +178,7 @@ runs:
         COMPOSE_PROFILES: ${{ inputs.compose_profiles }}
       run: |
         set -euo pipefail
-        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" bash <<EOF
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "${SSH_USER}@${SSH_HOST}" bash <<EOF
         set -euo pipefail
         cd "${REMOTE_PATH}"
 
