@@ -61,6 +61,8 @@ on:
     secrets:
       VITE_APP_MUI_LICENSE_KEY:
         required: false
+      HRAM_ENGINE_READ_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -106,6 +108,8 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VITE_APP_MUI_LICENSE_KEY=${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
+          secrets: |
+            hram_engine_token=${{ secrets.HRAM_ENGINE_READ_TOKEN }}
 
       - name: Run pytest
         run: |
