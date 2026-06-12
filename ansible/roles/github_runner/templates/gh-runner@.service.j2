@@ -31,12 +31,26 @@ ExecStart=/bin/bash -c \
 # Remove the one-time token after the runner exits (success or error).
 ExecStopPost=/bin/rm -f /tmp/gh-runner-%i.jitconfig
 
-# Restart immediately after each job. RestartSec=5 gives a short pause
-# for GitHub's backend to de-register the just-used ephemeral identity
-# before the next registration attempt.
+# KillMode=mixed: on stop, systemd sends SIGTERM to the main process and,
+# after TimeoutStopSec, SIGKILL to every remaining process in the cgroup.
+# With KillMode=process (the previous value) run-helper.sh and
+# Runner.Listener were left as orphan processes that stayed registered with
+# GitHub, causing HTTP 409 "Already exists" on the next ExecStartPre call.
+KillMode=mixed
+
+# Give the runner up to 2 minutes to finish job teardown and deregister
+# from GitHub before the SIGKILL fires.
+TimeoutStopSec=120
+
+# Restart after each job. RestartSec=30 gives GitHub enough time to
+# process the deregistration of the just-used ephemeral identity before
+# the next jit-config registration attempt.
 Restart=always
-RestartSec=5
-KillMode=process
+RestartSec=30
+
+# Disable the start-limit so transient 409 errors during the deregistration
+# window don't put the service into the dead/failed state permanently.
+StartLimitIntervalSec=0
 
 # Runners open many file descriptors (git pack objects, Docker layers).
 LimitNOFILE=65536

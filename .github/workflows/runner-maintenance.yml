@@ -1,0 +1,29 @@
+name: Runner maintenance (Docker prune)
+
+# Runs directly on the self-hosted runner — no SSH or Tailscale needed
+# because the runner IS the server. Prunes unused Docker images and stopped
+# containers weekly to prevent disk exhaustion from accumulated build layers.
+#
+# Background: deploy-app builds a fresh image on every staging/prod push.
+# Without cleanup, images pile up (observed: 116 images / 92 GB in Jun 2026).
+# docker system prune -f (used in janitor.sh) only removes dangling images;
+# tagged-but-unused images from old builds require `image prune -a`.
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'   # Sunday 03:00 UTC — low-traffic window
+  workflow_dispatch:        # also triggerable manually for emergency cleanup
+
+jobs:
+  docker-prune:
+    runs-on: [self-hosted, netcup]
+    steps:
+      - name: Prune images unused for more than 7 days
+        run: docker image prune -af --filter "until=168h"
+
+      - name: Prune stopped containers older than 24 h
+        run: docker container prune -f --filter "until=24h"
+
+      - name: Disk usage report
+        if: always()
+        run: df -h /
