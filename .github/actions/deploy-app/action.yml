@@ -74,6 +74,10 @@ inputs:
     description: 'Content of optional file secret 2'
     required: false
     default: ''
+  hram_engine_token:
+    description: 'BuildKit secret token for hram-engine private pip dependency. Injected as HRAM_ENGINE_READ_TOKEN before docker compose build.'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -374,6 +378,7 @@ runs:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
+        HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
       run: |
         set -euo pipefail
         # Heredoc pattern (same as file-secrets step above):
@@ -388,6 +393,7 @@ runs:
         set -euo pipefail
 
         REMOTE_PATH="${REMOTE_PATH}"
+        HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
 
         cd "\$REMOTE_PATH"
 
@@ -416,6 +422,7 @@ runs:
           DOCKER="sudo -n docker"
         fi
 
+        if [ -n "\${HRAM_ENGINE_READ_TOKEN}" ]; then export HRAM_ENGINE_READ_TOKEN="\${HRAM_ENGINE_READ_TOKEN}"; fi
         export DOCKER_BUILDKIT=1
         COMPOSE_FILES="-f docker-compose.yml"
 
