@@ -2,6 +2,15 @@ name: Staging Health Check
 
 on:
   workflow_call:
+    secrets:
+      ts_oauth_client_id:
+        required: false
+        description: >
+          Tailscale OAuth client ID (from the repo's staging environment secrets).
+          When absent the Tailnet probe is skipped and the job exits green.
+      ts_oauth_secret:
+        required: false
+        description: 'Tailscale OAuth client secret (from the repo''s staging environment secrets).'
     inputs:
       staging-domain:
         description: 'Override staging domain. If empty, reads environments.staging.domains[0] from project.yaml.'
@@ -11,6 +20,23 @@ on:
         description: 'Path of the health endpoint relative to the domain.'
         type: string
         default: '/api/healthz'
+      tailnet_suffix:
+        description: >
+          Tailnet MagicDNS suffix appended to project.yaml environments.staging.server
+          when ssh_host is empty. Default is the bigler-webapps tailnet; non-bigler
+          tenants override (e.g. your-tailnet.ts.net).
+        type: string
+        default: 'tail990d7f.ts.net'
+      ssh_user:
+        description: 'SSH user on the staging host. Default matches the biglerconsult.infra deploy_user role.'
+        type: string
+        default: 'deploy'
+      ssh_host:
+        description: >
+          Override Tailnet SSH hostname. When empty, derived from
+          project.yaml environments.staging.server + tailnet_suffix.
+        type: string
+        default: ''
       max-retries:
         description: 'Maximum probe attempts before failing.'
         type: number
@@ -33,6 +59,18 @@ permissions:
 jobs:
   probe:
     runs-on: ${{ inputs.runs-on }}
+    # Per GitHub Actions docs, `environment:` in a reusable-workflow job uses
+    # the CALLING REPOSITORY's environment (not this repo's). So `staging` here
+    # resolves to the caller's `staging` environment and injects its secrets
+    # (TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET) into this job's secrets context.
+    # Combined with the caller's `secrets: inherit`, this is the mechanism that
+    # makes env-level TS_OAUTH available without explicit secret mapping in each
+    # caller's workflow file.
+    #
+    # IMPORTANT: never create a `staging` environment in the workflow-templates
+    # repo itself — if one exists here with protection rules, all callers'
+    # health gates would be blocked by those rules instead of the caller's.
+    environment: staging
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
@@ -62,17 +100,105 @@ jobs:
           fi
           printf 'domain=%s\n' "${DOMAIN}" >> "$GITHUB_OUTPUT"
 
-      - name: Probe /api/healthz
+      # Map secrets to env vars — secrets.* cannot be used in `if:` expressions
+      # directly. Once HAS_TS is in GITHUB_ENV it is available for step-level
+      # `if: env.HAS_TS == 'true'` guards in subsequent steps.
+      - name: Map Tailscale credentials
+        env:
+          TS_ID: ${{ secrets.ts_oauth_client_id }}
+          TS_SECRET: ${{ secrets.ts_oauth_secret }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TS_ID}" ] && [ -n "${TS_SECRET}" ]; then
+            echo "HAS_TS=true" >> "$GITHUB_ENV"
+            echo "✅ Tailscale credentials found — Tailnet probe enabled."
+          else
+            echo "HAS_TS=false" >> "$GITHUB_ENV"
+            echo "ℹ️  No Tailscale credentials — probe will be skipped."
+          fi
+
+      - name: Skip — no Tailscale credentials
+        if: env.HAS_TS != 'true'
+        run: |
+          echo "Skipped — TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET not found in this"
+          echo "repo's staging environment secrets. Add them via sync-secrets to"
+          echo "enable the Tailnet probe. Job exits green (no false-red)."
+
+      - name: Join Tailnet
+        if: env.HAS_TS == 'true'
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
+        with:
+          oauth-client-id: ${{ secrets.ts_oauth_client_id }}
+          oauth-secret: ${{ secrets.ts_oauth_secret }}
+          tags: tag:ci-deploy
+          version: "1.98.3"
+
+      - name: Resolve Tailscale SSH host
+        if: env.HAS_TS == 'true'
+        env:
+          OVERRIDE_HOST: ${{ inputs.ssh_host }}
+          TAILNET_SUFFIX: ${{ inputs.tailnet_suffix }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE_HOST}" ]; then
+            TS_HOST="${OVERRIDE_HOST}"
+            echo "Using override host: ${TS_HOST}"
+          else
+            SERVER=$(python3 -c "
+          import sys, yaml
+          with open('project.yaml', encoding='utf-8') as f:
+              d = yaml.safe_load(f)
+          try:
+              print(d['environments']['staging']['server'])
+          except (KeyError, TypeError) as e:
+              sys.stderr.write(f'project.yaml missing environments.staging.server: {e}\n')
+              sys.exit(2)
+          ")
+            TS_HOST="${SERVER}.${TAILNET_SUFFIX}"
+            echo "Resolved host from project.yaml: ${TS_HOST}"
+          fi
+          printf 'TS_HOST=%s\n' "${TS_HOST}" >> "$GITHUB_ENV"
+
+      - name: Pre-flight SSH check
+        if: env.HAS_TS == 'true'
+        env:
+          SSH_USER: ${{ inputs.ssh_user }}
+        run: |
+          set -euo pipefail
+          echo "→ ssh ${SSH_USER}@${TS_HOST} true"
+          if ! ssh \
+              -o StrictHostKeyChecking=accept-new \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              "${SSH_USER}@${TS_HOST}" true; then
+            echo "❌ Tailscale-SSH pre-flight failed."
+            echo "   Common causes:"
+            echo "   - Tailnet ACL missing ssh rule: tag:ci-deploy → ${TS_HOST} as ${SSH_USER}"
+            echo "   - tailscaled not started with --ssh on the target host"
+            echo "   - Host not joined to tailnet (${TS_HOST} not reachable)"
+            exit 1
+          fi
+          echo "✅ Tailscale-SSH reachable: ${SSH_USER}@${TS_HOST}"
+
+      # Probes the origin (Traefik → App) via SSH+curl on the staging server.
+      # Curl runs *on the remote*, hitting Traefik's HTTPS listener on localhost
+      # with a Host header so Traefik routes to the correct app. -k skips cert
+      # verification (origin cert won't match "localhost"). This path bypasses
+      # Cloudflare entirely, which is correct for a pre-promotion smoke gate.
+      - name: Probe /api/healthz via Tailnet
+        if: env.HAS_TS == 'true'
         env:
           DOMAIN: ${{ steps.domain.outputs.domain }}
           HEALTH_PATH: ${{ inputs.health-path }}
           MAX_RETRIES: ${{ inputs.max-retries }}
           RETRY_INTERVAL: ${{ inputs.retry-interval }}
+          SSH_USER: ${{ inputs.ssh_user }}
         run: |
           set -euo pipefail
-          URL="https://${DOMAIN}${HEALTH_PATH}"
-          echo "Probing: ${URL}"
-          echo "Strategy: up to ${MAX_RETRIES} attempts, ${RETRY_INTERVAL}s between"
+          echo "Probing origin via SSH: ${SSH_USER}@${TS_HOST}"
+          echo "Remote curl target:  https://localhost${HEALTH_PATH}"
+          echo "Host header:         ${DOMAIN}"
+          echo "Strategy:            up to ${MAX_RETRIES} attempts, ${RETRY_INTERVAL}s between"
           echo ""
 
           last_body=""
@@ -80,8 +206,19 @@ jobs:
           for attempt in $(seq 1 "${MAX_RETRIES}"); do
             printf '── Attempt %s/%s ──\n' "${attempt}" "${MAX_RETRIES}"
 
-            # -m 15: per-request timeout 15s
-            response=$(curl -sS -m 15 -w '\n%{http_code}' "${URL}" || true)
+            # Run curl on the remote; capture stdout (body + http_code) locally.
+            # ${DOMAIN} and ${HEALTH_PATH} are interpolated by the LOCAL shell
+            # inside the double-quoted SSH argument before sending to remote.
+            # Single quotes around -w format and URL are processed by the REMOTE shell.
+            response=$(ssh \
+              -o StrictHostKeyChecking=accept-new \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              "${SSH_USER}@${TS_HOST}" \
+              "curl -s -k --max-time 15 -w '\n%{http_code}' \
+                -H 'Host: ${DOMAIN}' \
+                'https://localhost${HEALTH_PATH}'" 2>/dev/null || true)
+
             last_body=$(printf '%s' "${response}" | sed '$d')
             last_code=$(printf '%s' "${response}" | tail -n1)
 
@@ -97,7 +234,7 @@ jobs:
                 echo "✅ Staging is healthy."
                 exit 0
               fi
-              echo "⚠️ HTTP 200 but status != ok — retrying."
+              echo "⚠️ HTTP 200 but status != ok (degraded) — retrying."
             fi
 
             if [ "${attempt}" -lt "${MAX_RETRIES}" ]; then
