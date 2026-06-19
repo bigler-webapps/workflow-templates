@@ -181,10 +181,12 @@ jobs:
           echo "✅ Tailscale-SSH reachable: ${SSH_USER}@${TS_HOST}"
 
       # Probes the origin (Traefik → App) via SSH+curl on the staging server.
-      # Curl runs *on the remote*, hitting Traefik's HTTPS listener on localhost
-      # with a Host header so Traefik routes to the correct app. -k skips cert
-      # verification (origin cert won't match "localhost"). This path bypasses
-      # Cloudflare entirely, which is correct for a pre-promotion smoke gate.
+      # Curl runs *on the remote*, hitting Traefik's HTTPS listener via
+      # --resolve <domain>:443:127.0.0.1 so the request carries the real domain
+      # as TLS SNI *and* Host — Traefik routes HTTPS by SNI, so "localhost" would
+      # not match any router. 127.0.0.1 also forces IPv4 (localhost resolves to
+      # ::1 first, where Traefik does not listen → curl returns 000). -k skips
+      # cert verification. Bypasses Cloudflare — correct for a pre-promotion gate.
       - name: Probe /api/healthz via Tailnet
         if: env.HAS_TS == 'true'
         env:
@@ -196,8 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Probing origin via SSH: ${SSH_USER}@${TS_HOST}"
-          echo "Remote curl target:  https://localhost${HEALTH_PATH}"
-          echo "Host header:         ${DOMAIN}"
+          echo "Remote curl target:  https://${DOMAIN}${HEALTH_PATH}  (--resolve ${DOMAIN}:443:127.0.0.1)"
           echo "Strategy:            up to ${MAX_RETRIES} attempts, ${RETRY_INTERVAL}s between"
           echo ""
 
@@ -216,8 +217,8 @@ jobs:
               -o ConnectTimeout=15 \
               "${SSH_USER}@${TS_HOST}" \
               "curl -s -k --max-time 15 -w '\n%{http_code}' \
-                -H 'Host: ${DOMAIN}' \
-                'https://localhost${HEALTH_PATH}'" 2>/dev/null || true)
+                --resolve '${DOMAIN}:443:127.0.0.1' \
+                'https://${DOMAIN}${HEALTH_PATH}'" 2>/dev/null || true)
 
             last_body=$(printf '%s' "${response}" | sed '$d')
             last_code=$(printf '%s' "${response}" | tail -n1)
