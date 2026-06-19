@@ -28,6 +28,16 @@ No consumers remained at deletion time (verified across all repos). Existing
 release tags (≤ v2.0.4) still contain these actions, so pinned references are
 unaffected; only `@main` consumers — of which there are none — would break.
 
+## [2.4.0] - 2026-06-19
+
+### Added
+
+**`deploy-app`: `skip_migrate` input** — new optional boolean input (default `false`).
+When set to `true`, the post-deploy `manage.py migrate --noinput` step is skipped.
+Use for non-Django apps (static sites, pure-frontend services) that have no `backend`
+service in their `docker-compose.yml`. All existing callers are unaffected (default
+preserves previous behaviour).
+
 ## [2.0.3] - 2026-05-24
 
 ### Added

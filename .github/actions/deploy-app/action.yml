@@ -78,6 +78,10 @@ inputs:
     description: 'BuildKit secret token for hram-engine private pip dependency. Injected as HRAM_ENGINE_READ_TOKEN before docker compose build.'
     required: false
     default: ''
+  skip_migrate:
+    description: 'Skip the post-deploy `manage.py migrate` step. Set to `true` for non-Django apps (e.g. static sites) that have no backend service.'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -379,6 +383,7 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
+        SKIP_MIGRATE: ${{ inputs.skip_migrate }}
       run: |
         set -euo pipefail
         # Heredoc pattern (same as file-secrets step above):
@@ -394,6 +399,7 @@ runs:
 
         REMOTE_PATH="${REMOTE_PATH}"
         HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
+        SKIP_MIGRATE="${SKIP_MIGRATE}"
 
         cd "\$REMOTE_PATH"
 
@@ -432,11 +438,13 @@ runs:
         echo "🔥 Recreating containers..."
         \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
 
-        echo "⏳ Waiting for backend to initialize..."
-        sleep 3
+        if [ "\${SKIP_MIGRATE}" != "true" ]; then
+          echo "⏳ Waiting for backend to initialize..."
+          sleep 3
 
-        echo "🔄 Running migrations..."
-        \$DOCKER compose \$COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
+          echo "🔄 Running migrations..."
+          \$DOCKER compose \$COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
+        fi
 
         echo "✅ Deployment finished successfully!"
         EOF
