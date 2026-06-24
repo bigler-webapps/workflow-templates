@@ -92,7 +92,7 @@ runs:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}
-        version: "1.98.3"
+        version: "1.98.4"
 
     - name: 🔎 Validate inputs
       shell: bash
