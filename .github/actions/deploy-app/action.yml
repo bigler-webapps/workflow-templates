@@ -86,6 +86,14 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: ⚡ Reset Tailscale daemon state
+      shell: bash
+      run: |
+        # Self-hosted runners keep a persistent tailscaled with non-default settings
+        # (--accept-routes, --advertise-tags, --operator). Without --reset, the
+        # subsequent tailscale up fails with "requires mentioning all non-default flags".
+        sudo tailscale up --reset 2>/dev/null || true
+
     - name: 🔗 Join Tailnet
       uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
       with:
