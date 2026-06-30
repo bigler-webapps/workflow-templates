@@ -1,0 +1,68 @@
+name: 'Tailnet Connect'
+description: 'Idempotently ensure the runner is on the tailnet: reuse the warm persistent daemon when already connected + tagged, only join when genuinely disconnected.'
+
+# Shared connect logic for all composites that need the tailnet (backup, restore,
+# maintenance, janitor, deploy-traefik, register-kuma, sync-kuma, …). Extracted
+# from the deploy-app v2.4.4 fix so the whole fleet gets the same robust path.
+#
+# Why a probe instead of always joining: self-hosted runners keep a persistent,
+# already-authenticated tailscaled. tailscale/github-action's `tailscale up` on a
+# warm daemon collides with its existing non-default prefs (intermittent
+# "requires mentioning all non-default flags" / hostname-validation failures +
+# ~75s retry backoff). We reuse the warm, tagged daemon and only join when down.
+
+inputs:
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID (used only when a join is needed).'
+    required: true
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret.'
+    required: true
+  ts_tag:
+    description: 'Tailnet tag the ephemeral CI node carries / the warm daemon is expected to have.'
+    required: false
+    default: 'tag:ci-deploy'
+  version:
+    description: 'Tailscale CLI version for the join path.'
+    required: false
+    default: '1.98.4'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Probe existing tailnet connection
+      id: ts_probe
+      shell: bash
+      env:
+        TS_TAG: ${{ inputs.ts_tag }}
+      run: |
+        set -uo pipefail
+        # Reads tolerate a reset --operator (gh-runner may have lost CLI rights)
+        # via non-interactive sudo; both paths read-only. No `set -e`, so a failed
+        # substitution yields empty json and falls through to a clean join.
+        ts_status_json() {
+          tailscale status --json 2>/dev/null || sudo -n tailscale status --json 2>/dev/null
+        }
+        connected=false
+        if command -v tailscale >/dev/null 2>&1; then
+          json="$(ts_status_json)" || true
+          state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
+          tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
+          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
+          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+            connected=true
+          fi
+        else
+          echo "tailscale CLI not present yet"
+        fi
+        echo "connected=${connected}" >> "$GITHUB_OUTPUT"
+        echo "reuse existing tailnet connection: ${connected}"
+
+    - name: Join Tailnet
+      if: steps.ts_probe.outputs.connected != 'true'
+      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: ${{ inputs.version }}
