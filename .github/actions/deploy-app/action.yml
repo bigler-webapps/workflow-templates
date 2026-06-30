@@ -102,6 +102,14 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: "1.98.4"
 
+    - name: ⚡ Re-enable route acceptance after join
+      shell: bash
+      run: |
+        # --reset cleared --accept-routes; re-enable so the runner can reach
+        # subnet-routed tailnet peers (e.g. staging/prod servers).
+        # `tailscale set` changes a single preference without requiring all flags.
+        sudo tailscale set --accept-routes=true 2>/dev/null || true
+
     - name: 🔎 Validate inputs
       shell: bash
       env:
