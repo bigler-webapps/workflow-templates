@@ -42,13 +42,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: 🔗 Join Tailnet
-      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
+    - name: Connect to tailnet
+      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.5.0
       with:
-        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
-        oauth-secret: ${{ inputs.ts_oauth_secret }}
-        tags: ${{ inputs.ts_tag }}
-        version: "1.98.3"
+        ts_oauth_client_id: ${{ inputs.ts_oauth_client_id }}
+        ts_oauth_secret: ${{ inputs.ts_oauth_secret }}
+        ts_tag: ${{ inputs.ts_tag }}
 
     - name: 🔎 Validate inputs
       shell: bash
