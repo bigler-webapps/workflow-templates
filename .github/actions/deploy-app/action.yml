@@ -86,15 +86,49 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: ⚡ Reset Tailscale daemon state
+    - name: 🔎 Probe existing tailnet connection
+      id: ts_probe
       shell: bash
+      env:
+        TS_TAG: ${{ inputs.ts_tag }}
       run: |
-        # Self-hosted runners keep a persistent tailscaled with non-default settings
-        # (--accept-routes, --advertise-tags, --operator). Without --reset, the
-        # subsequent tailscale up fails with "requires mentioning all non-default flags".
-        sudo tailscale up --reset 2>/dev/null || true
+        set -uo pipefail
+        # Self-hosted runners keep a persistent, already-authenticated tailscaled.
+        # Reusing it avoids tailscale/github-action's `tailscale up`, which on a
+        # warm daemon collides with its existing non-default prefs — that failure
+        # costs ~75s of retry backoff plus log noise, and forcing it via `--reset`
+        # tears down the warm datapath (cold first-connect → SSH timeout). So we
+        # probe first and only join when genuinely disconnected.
+        #
+        # Reads tolerate a reset `--operator` (gh-runner may have lost CLI rights)
+        # by falling back to non-interactive sudo; both paths are read-only.
+        #
+        # Topology note: reuse is keyed on connection + tag only — NOT on routes.
+        # Deploy targets here are DIRECT tailnet nodes (e.g. staging 100.100.1.1),
+        # so `--accept-routes` is irrelevant. A future SUBNET-ROUTED target would
+        # need accept-routes re-established and this assumption revisited.
+        ts_status_json() {
+          tailscale status --json 2>/dev/null || sudo -n tailscale status --json 2>/dev/null
+        }
+        connected=false
+        if command -v tailscale >/dev/null 2>&1; then
+          # No `set -e`, so a failed substitution simply yields empty json and
+          # falls through to a clean join; `|| true` makes that intent explicit.
+          json="$(ts_status_json)" || true
+          state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
+          tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
+          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
+          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+            connected=true
+          fi
+        else
+          echo "tailscale CLI not present yet"
+        fi
+        echo "connected=${connected}" >> "$GITHUB_OUTPUT"
+        echo "→ reuse existing tailnet connection: ${connected}"
 
     - name: 🔗 Join Tailnet
+      if: steps.ts_probe.outputs.connected != 'true'
       uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
@@ -102,13 +136,21 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: "1.98.4"
 
-    - name: ⚡ Re-enable route acceptance after join
+    - name: 🩺 Tailnet diagnostics (read-only)
       shell: bash
       run: |
-        # --reset cleared --accept-routes; re-enable so the runner can reach
-        # subnet-routed tailnet peers (e.g. staging/prod servers).
-        # `tailscale set` changes a single preference without requiring all flags.
-        sudo tailscale set --accept-routes=true 2>/dev/null || true
+        set -uo pipefail
+        # Read-only — NO `up`, `set`, or `reset`. Captures the runner-side truth
+        # (warm vs cold node, DNS, NAT/DERP datapath) so a connectivity failure is
+        # diagnosable from this log instead of guessed at. Never fails the step.
+        # `timeout` bounds netcheck, which can hang on a congested DERP mesh.
+        ts() { timeout 20 tailscale "$@" 2>/dev/null || timeout 20 sudo -n tailscale "$@" 2>/dev/null || true; }
+        echo "::group::tailscale status"
+        ts status
+        echo "::endgroup::"
+        echo "::group::tailscale netcheck"
+        ts netcheck
+        echo "::endgroup::"
 
     - name: 🔎 Validate inputs
       shell: bash
@@ -261,6 +303,16 @@ runs:
         # if the tailnet ACL doesn't permit tag:ci-deploy → this host as
         # ${SSH_USER}, or tailscaled isn't running on the target with
         # --ssh, or any other policy/connectivity issue.
+        #
+        # Datapath probe BEFORE the SSH attempt — non-fatal. It disambiguates
+        # the two failure modes a bare SSH timeout cannot: ping failing points
+        # at a broken tailnet path or a network-ACL drop (tag:ci-deploy not
+        # permitted to the target); ping succeeding while SSH fails points at
+        # the SSH layer (sshd / Tailscale-SSH ACL).
+        echo "→ tailscale ping ${TAILNET_HOST}"
+        timeout 25 tailscale ping --c 3 "${TAILNET_HOST}" \
+          || timeout 25 sudo -n tailscale ping --c 3 "${TAILNET_HOST}" \
+          || echo "⚠️ tailscale ping failed (datapath or network-ACL?) — continuing to SSH probe"
         echo "→ ssh ${SSH_USER}@${TAILNET_HOST} true"
         if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${SSH_USER}@${TAILNET_HOST}" true; then
           echo "❌ Tailscale-SSH pre-flight failed."
