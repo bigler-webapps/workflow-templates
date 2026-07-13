@@ -116,45 +116,41 @@
     name: gh
     state: present
 
-- name: Check for an existing NodeSource apt repository
-  # The setup script is only needed initially or after a deliberate Node major
-  # bump; checking its source file keeps ordinary role re-runs unchanged.
-  become: true
-  ansible.builtin.stat:
-    path: /etc/apt/sources.list.d/nodesource.list
-  register: _nodesource_apt_source
-
-- name: Read existing NodeSource apt repository
-  become: true
-  ansible.builtin.slurp:
-    src: /etc/apt/sources.list.d/nodesource.list
-  register: _nodesource_apt_source_content
-  when: _nodesource_apt_source.stat.exists
-
-- name: Determine whether the NodeSource setup script is needed
-  ansible.builtin.set_fact:
-    _nodesource_needs_setup: >-
-      {{ (not _nodesource_apt_source.stat.exists)
-         or (('node_' ~ github_runner_node_major ~ '.x') not in
-             (_nodesource_apt_source_content.content | default('') | b64decode)) }}
-
-- name: Download NodeSource setup script for requested Node.js major
-  # NodeSource owns both the repository definition and its signing-key setup;
-  # use its versioned script only when the configured major is not present.
+- name: Download NodeSource archive signing key
+  # Static keyring + apt source, same verifiable pattern as the GitHub CLI
+  # install above — deliberately NOT executing NodeSource's setup_*.x.sh
+  # (that script runs arbitrary unverified shell as root; this role otherwise
+  # requires checksum verification for downloaded artifacts, see github_runner_sha256).
   become: true
   ansible.builtin.get_url:
-    url: "https://deb.nodesource.com/setup_{{ github_runner_node_major }}.x"
-    dest: "/tmp/nodesource-setup-{{ github_runner_node_major }}.x.sh"
-    owner: root
-    group: root
-    mode: "0755"
-  when: _nodesource_needs_setup | bool
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /tmp/nodesource-repo.gpg.key
+    mode: "0644"
 
-- name: Configure NodeSource apt repository for requested Node.js major
+- name: Dearmor NodeSource signing key into apt keyring
   become: true
   ansible.builtin.command:
-    cmd: "bash /tmp/nodesource-setup-{{ github_runner_node_major }}.x.sh"
-  when: _nodesource_needs_setup | bool
+    cmd: gpg --dearmor -o /usr/share/keyrings/nodesource.gpg /tmp/nodesource-repo.gpg.key
+  args:
+    creates: /usr/share/keyrings/nodesource.gpg
+
+- name: Remove downloaded NodeSource signing key artifact
+  become: true
+  ansible.builtin.file:
+    path: /tmp/nodesource-repo.gpg.key
+    state: absent
+
+- name: Configure NodeSource apt repository for requested Node.js major
+  # apt_repository is natively idempotent (tracks the configured source
+  # itself) — no manual stat/slurp guard needed, unlike a script re-run.
+  become: true
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/keyrings/nodesource.gpg]
+      https://deb.nodesource.com/node_{{ github_runner_node_major }}.x nodistro main
+    filename: nodesource
+    state: present
+    update_cache: true
 
 - name: Install Node.js and npm from NodeSource
   # The NodeSource nodejs package includes npm; apt applies a new configured
@@ -173,17 +169,28 @@
     name: python3
     state: present
 
+- name: Check installed OpenAI Codex CLI version
+  become: true
+  ansible.builtin.command:
+    cmd: npm list -g @openai/codex --depth=0 --json
+  register: _github_runner_codex_installed
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether OpenAI Codex CLI needs installation
+  ansible.builtin.set_fact:
+    _github_runner_codex_needs_install: >-
+      {{ github_runner_codex_version
+         not in (_github_runner_codex_installed.stdout | default('')) }}
+
 - name: Install configured OpenAI Codex CLI release
-  # npm resolves "latest" on every run, but reports changed only when it
-  # actually updates the global package. Use a concrete default override to
-  # make a runner fleet fully reproducible.
+  # Gated by the version check above rather than a fragile string-match on
+  # npm's console output — re-running with the same pinned version is a no-op.
   become: true
   ansible.builtin.command:
     cmd: "npm install -g @openai/codex@{{ github_runner_codex_version }}"
+  when: _github_runner_codex_needs_install | bool
   register: _github_runner_codex_npm_install
-  changed_when: >-
-    'changed' in ((_github_runner_codex_npm_install.stdout | default(''))
-    ~ (_github_runner_codex_npm_install.stderr | default('')))
 
 - name: Verify pre-baked runner tooling versions
   # Keep these checks read-only: their output appears in the provision log and
@@ -199,8 +206,12 @@
   changed_when: false
 
 - name: Show pre-baked runner tooling versions
+  # github_runner_gh_version is recorded for humans to compare against the
+  # actual installed gh below — the apt repo itself cannot be pinned to it.
   ansible.builtin.debug:
-    msg: "{{ item.item }}: {{ item.stdout }}"
+    msg: >-
+      recorded github_runner_gh_version={{ github_runner_gh_version }} (informational,
+      compare against actual): {{ item.item }}: {{ item.stdout }}
   loop: "{{ _github_runner_tool_versions.results }}"
 
 - name: Ensure base directories exist

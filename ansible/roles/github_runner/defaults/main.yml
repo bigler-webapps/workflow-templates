@@ -51,9 +51,9 @@ github_runner_gh_version: "2.63.0"
 # requirement). Change this deliberately so the role updates the apt source.
 github_runner_node_major: "20"
 
-# @openai/codex npm package version. Prefer a concrete version for a fully
-# reproducible runner; when bumping it, update this value together with tests.
-github_runner_codex_version: "latest"
+# @openai/codex npm package version — pinned for a reproducible runner fleet.
+# When bumping it, update this value together with tests.
+github_runner_codex_version: "0.144.3"
 
 # System account and base path
 github_runner_user: gh-runner
