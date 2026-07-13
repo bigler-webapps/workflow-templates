@@ -42,6 +42,19 @@ github_runner_version: "2.321.0"
 # Find it at: https://github.com/actions/runner/releases  Format: sha256:<hex>
 github_runner_sha256: ""
 
+# GitHub CLI — the apt repository normally publishes only the current release;
+# this installation method cannot reliably pin a specific version. This value
+# records the last known version and should be reviewed when this role changes.
+github_runner_gh_version: "2.63.0"
+
+# Node.js major version for the NodeSource setup repository (Codex CLI runtime
+# requirement). Change this deliberately so the role updates the apt source.
+github_runner_node_major: "20"
+
+# @openai/codex npm package version. Prefer a concrete version for a fully
+# reproducible runner; when bumping it, update this value together with tests.
+github_runner_codex_version: "latest"
+
 # System account and base path
 github_runner_user: gh-runner
 github_runner_base_dir: /opt/gh-runner

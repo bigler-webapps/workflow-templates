@@ -86,6 +86,123 @@
     state: present
     update_cache: true
 
+- name: Install GitHub CLI archive keyring
+  # gh is installed from GitHub's official apt repository rather than Ubuntu's
+  # distribution package, so the runner gets the current GitHub CLI release.
+  become: true
+  ansible.builtin.get_url:
+    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    dest: /usr/share/keyrings/githubcli-archive-keyring.gpg
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure GitHub CLI apt repository
+  # The runner binary is linux-x64, so this host uses GitHub's amd64 archive.
+  # github_runner_gh_version is informational: this repository does not offer
+  # reliable version pinning through this installation method.
+  become: true
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]
+      https://cli.github.com/packages stable main
+    filename: github-cli
+    state: present
+    update_cache: true
+
+- name: Install GitHub CLI
+  become: true
+  ansible.builtin.apt:
+    name: gh
+    state: present
+
+- name: Check for an existing NodeSource apt repository
+  # The setup script is only needed initially or after a deliberate Node major
+  # bump; checking its source file keeps ordinary role re-runs unchanged.
+  become: true
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/nodesource.list
+  register: _nodesource_apt_source
+
+- name: Read existing NodeSource apt repository
+  become: true
+  ansible.builtin.slurp:
+    src: /etc/apt/sources.list.d/nodesource.list
+  register: _nodesource_apt_source_content
+  when: _nodesource_apt_source.stat.exists
+
+- name: Determine whether the NodeSource setup script is needed
+  ansible.builtin.set_fact:
+    _nodesource_needs_setup: >-
+      {{ (not _nodesource_apt_source.stat.exists)
+         or (('node_' ~ github_runner_node_major ~ '.x') not in
+             (_nodesource_apt_source_content.content | default('') | b64decode)) }}
+
+- name: Download NodeSource setup script for requested Node.js major
+  # NodeSource owns both the repository definition and its signing-key setup;
+  # use its versioned script only when the configured major is not present.
+  become: true
+  ansible.builtin.get_url:
+    url: "https://deb.nodesource.com/setup_{{ github_runner_node_major }}.x"
+    dest: "/tmp/nodesource-setup-{{ github_runner_node_major }}.x.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: _nodesource_needs_setup | bool
+
+- name: Configure NodeSource apt repository for requested Node.js major
+  become: true
+  ansible.builtin.command:
+    cmd: "bash /tmp/nodesource-setup-{{ github_runner_node_major }}.x.sh"
+  when: _nodesource_needs_setup | bool
+
+- name: Install Node.js and npm from NodeSource
+  # The NodeSource nodejs package includes npm; apt applies a new configured
+  # major on the next run while remaining unchanged when it is already current.
+  become: true
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+
+- name: Ensure Python 3 is installed for workflow preflight tooling
+  # Base normally supplies Python already, but this keeps the runner contract
+  # explicit when github_runner is applied in a different role composition.
+  become: true
+  ansible.builtin.apt:
+    name: python3
+    state: present
+
+- name: Install configured OpenAI Codex CLI release
+  # npm resolves "latest" on every run, but reports changed only when it
+  # actually updates the global package. Use a concrete default override to
+  # make a runner fleet fully reproducible.
+  become: true
+  ansible.builtin.command:
+    cmd: "npm install -g @openai/codex@{{ github_runner_codex_version }}"
+  register: _github_runner_codex_npm_install
+  changed_when: >-
+    'changed' in ((_github_runner_codex_npm_install.stdout | default(''))
+    ~ (_github_runner_codex_npm_install.stderr | default('')))
+
+- name: Verify pre-baked runner tooling versions
+  # Keep these checks read-only: their output appears in the provision log and
+  # confirms the commands available to every persistent runner slot.
+  become: true
+  ansible.builtin.command:
+    cmd: "{{ item }}"
+  loop:
+    - gh --version
+    - codex --version
+    - python3 --version
+  register: _github_runner_tool_versions
+  changed_when: false
+
+- name: Show pre-baked runner tooling versions
+  ansible.builtin.debug:
+    msg: "{{ item.item }}: {{ item.stdout }}"
+  loop: "{{ _github_runner_tool_versions.results }}"
+
 - name: Ensure base directories exist
   become: true
   ansible.builtin.file:
