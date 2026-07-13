@@ -169,28 +169,31 @@
     name: python3
     state: present
 
-- name: Check installed OpenAI Codex CLI version
+- name: Check installed Claude Code CLI version
   become: true
   ansible.builtin.command:
-    cmd: npm list -g @openai/codex --depth=0 --json
-  register: _github_runner_codex_installed
+    cmd: npm list -g @anthropic-ai/claude-code --depth=0 --json
+  register: _github_runner_claude_installed
   changed_when: false
   failed_when: false
 
-- name: Determine whether OpenAI Codex CLI needs installation
+- name: Determine whether Claude Code CLI needs installation
+  # Install when absent (rc != 0), or when a concrete pinned version differs
+  # from what's installed. With the default 'latest' an already-present CLI is
+  # left untouched — pin a version to control upgrades deterministically.
   ansible.builtin.set_fact:
-    _github_runner_codex_needs_install: >-
-      {{ github_runner_codex_version
-         not in (_github_runner_codex_installed.stdout | default('')) }}
+    _github_runner_claude_needs_install: >-
+      {{ _github_runner_claude_installed.rc != 0
+         or (github_runner_claude_code_version != 'latest'
+             and github_runner_claude_code_version
+                 not in (_github_runner_claude_installed.stdout | default(''))) }}
 
-- name: Install configured OpenAI Codex CLI release
-  # Gated by the version check above rather than a fragile string-match on
-  # npm's console output — re-running with the same pinned version is a no-op.
+- name: Install configured Claude Code CLI release
   become: true
   ansible.builtin.command:
-    cmd: "npm install -g @openai/codex@{{ github_runner_codex_version }}"
-  when: _github_runner_codex_needs_install | bool
-  register: _github_runner_codex_npm_install
+    cmd: "npm install -g @anthropic-ai/claude-code@{{ github_runner_claude_code_version }}"
+  when: _github_runner_claude_needs_install | bool
+  register: _github_runner_claude_npm_install
 
 - name: Verify pre-baked runner tooling versions
   # Keep these checks read-only: their output appears in the provision log and
@@ -200,7 +203,7 @@
     cmd: "{{ item }}"
   loop:
     - gh --version
-    - codex --version
+    - claude --version
     - python3 --version
   register: _github_runner_tool_versions
   changed_when: false

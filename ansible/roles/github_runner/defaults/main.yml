@@ -47,13 +47,13 @@ github_runner_sha256: ""
 # records the last known version and should be reviewed when this role changes.
 github_runner_gh_version: "2.63.0"
 
-# Node.js major version for the NodeSource setup repository (Codex CLI runtime
-# requirement). Change this deliberately so the role updates the apt source.
+# Node.js major version for the NodeSource setup repository (Claude Code CLI
+# runtime requirement). Change this deliberately so the role updates the apt source.
 github_runner_node_major: "20"
 
-# @openai/codex npm package version — pinned for a reproducible runner fleet.
-# When bumping it, update this value together with tests.
-github_runner_codex_version: "0.144.3"
+# @anthropic-ai/claude-code npm package version — 'latest' by default; pin to a
+# concrete version for a reproducible runner fleet and update together with tests.
+github_runner_claude_code_version: "latest"
 
 # System account and base path
 github_runner_user: gh-runner
