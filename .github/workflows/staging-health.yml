@@ -124,14 +124,13 @@ jobs:
           echo "repo's staging environment secrets. Add them via sync-secrets to"
           echo "enable the Tailnet probe. Job exits green (no false-red)."
 
-      - name: Join Tailnet
+      - name: Ensure tailnet (reuse warm daemon; join only if down)
         if: env.HAS_TS == 'true'
-        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
+        uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@main
         with:
-          oauth-client-id: ${{ secrets.ts_oauth_client_id }}
-          oauth-secret: ${{ secrets.ts_oauth_secret }}
-          tags: tag:ci-deploy
-          version: "1.98.3"
+          ts_oauth_client_id: ${{ secrets.ts_oauth_client_id }}
+          ts_oauth_secret: ${{ secrets.ts_oauth_secret }}
+          ts_tag: tag:ci-deploy
 
       - name: Resolve Tailscale SSH host
         if: env.HAS_TS == 'true'

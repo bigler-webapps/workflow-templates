@@ -10,6 +10,8 @@ description: 'Idempotently ensure the runner is on the tailnet: reuse the warm p
 # warm daemon collides with its existing non-default prefs (intermittent
 # "requires mentioning all non-default flags" / hostname-validation failures +
 # ~75s retry backoff). We reuse the warm, tagged daemon and only join when down.
+# Cold joins use the action cache and, after one failed attempt, a single
+# re-probe-gated retry so an already-connected daemon is never joined again.
 
 inputs:
   ts_oauth_client_id:
@@ -58,11 +60,53 @@ runs:
         echo "connected=${connected}" >> "$GITHUB_OUTPUT"
         echo "reuse existing tailnet connection: ${connected}"
 
-    - name: Join Tailnet
+    - name: Join Tailnet (attempt 1)
+      id: ts_join_1
       if: steps.ts_probe.outputs.connected != 'true'
+      continue-on-error: true
       uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
       with:
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}
         version: ${{ inputs.version }}
+        use-cache: 'true'
+
+    - name: Backoff and re-probe after failed join
+      id: ts_probe_2
+      if: steps.ts_probe.outputs.connected != 'true' && steps.ts_join_1.outcome == 'failure'
+      shell: bash
+      env:
+        TS_TAG: ${{ inputs.ts_tag }}
+      run: |
+        set -uo pipefail
+        # Attempt 1 failed. Wait out a short CDN/control-plane blip (the action's
+        # internal curl retries only cover ~30s), then re-probe: if the failure was
+        # late/cosmetic and the daemon actually connected, attempt 2 must be skipped
+        # -- never `up` against an already-connected daemon (regression 40c70c4).
+        sleep 90
+        ts_status_json() {
+          tailscale status --json 2>/dev/null || sudo -n tailscale status --json 2>/dev/null
+        }
+        connected=false
+        if command -v tailscale >/dev/null 2>&1; then
+          json="$(ts_status_json)" || true
+          state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
+          tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
+          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
+          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+            connected=true
+          fi
+        fi
+        echo "connected=${connected}" >> "$GITHUB_OUTPUT"
+        echo "re-probe after failed attempt 1: connected=${connected}"
+
+    - name: Join Tailnet (attempt 2)
+      if: steps.ts_join_1.outcome == 'failure' && steps.ts_probe_2.outputs.connected != 'true'
+      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
+      with:
+        oauth-client-id: ${{ inputs.ts_oauth_client_id }}
+        oauth-secret: ${{ inputs.ts_oauth_secret }}
+        tags: ${{ inputs.ts_tag }}
+        version: ${{ inputs.version }}
+        use-cache: 'true'

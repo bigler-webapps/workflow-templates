@@ -40,7 +40,7 @@ runs:
   using: 'composite'
   steps:
     - name: Connect to tailnet
-      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.5.0
+      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.5.2
       with:
         ts_oauth_client_id: ${{ inputs.ts_oauth_client_id }}
         ts_oauth_secret: ${{ inputs.ts_oauth_secret }}
