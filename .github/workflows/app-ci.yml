@@ -71,6 +71,11 @@ jobs:
   backend:
     if: ${{ inputs.run-backend }}
     runs-on: ${{ inputs.runs-on }}
+    env:
+      # Unique per-run tag: the self-hosted runner's Docker daemon is shared by
+      # 3 slots across ALL repos -- a fixed tag races between concurrent backend
+      # jobs and executes the WRONG repo's tests.
+      CI_IMAGE: ci-backend:${{ github.run_id }}-${{ github.run_attempt }}
     services:
       postgres:
         image: ${{ inputs.db-image }}
@@ -103,7 +108,7 @@ jobs:
           context: ${{ inputs.build-context }}
           file: ${{ inputs.dockerfile }}
           load: true
-          tags: ci-backend:test
+          tags: ${{ env.CI_IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -127,8 +132,12 @@ jobs:
             -e DB_PASSWORD='test' \
             -e EMAIL_PORT='25' \
             -e EMAIL_USE_TLS='False' \
-            ci-backend:test \
+            "$CI_IMAGE" \
             pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
+
+      - name: Remove CI image
+        if: always()
+        run: docker rmi -f "$CI_IMAGE" 2>/dev/null || true
 
   frontend:
     runs-on: ${{ inputs.runs-on }}
