@@ -76,50 +76,118 @@ runs:
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
 
-    - name: 🛠️ Install system updates
+    - name: 🛠️ Kick off system updates
       if: ${{ inputs.apply_updates == 'true' }}
       shell: bash
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
+        RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         set -euo pipefail
-        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" 'bash -s' << "EOF"
+        # apt-get upgrade can restart sshd (needrestart) mid-session, which
+        # drops this ssh connection with exit 255 even though the upgrade
+        # itself succeeds on the remote host. Decouple the upgrade from this
+        # SSH session entirely: write a script, launch it detached
+        # (setsid + nohup, disowned) so a dropped connection cannot kill it,
+        # and let the next step poll for completion with reconnect tolerance.
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" bash -s -- "/tmp/gha-maintenance-${RUN_TOKEN}" << "EOF"
         set -euo pipefail
+        STATUS_DIR="$1"
+        mkdir -p "$STATUS_DIR"
+        rm -f "$STATUS_DIR/done" "$STATUS_DIR/exit_code" "$STATUS_DIR/log"
 
+        cat > "$STATUS_DIR/run.sh" << "SCRIPT"
+        #!/bin/bash
+        set -uo pipefail
+        STATUS_DIR="$(cd "$(dirname "$0")" && pwd)"
         SUDO=""
         if [ "$(id -u)" -ne 0 ]; then
           SUDO="sudo -n"
         fi
+        (
+          set -e
+          echo "Refreshing apt index..."
+          $SUDO apt-get update -y
 
-        echo "Refreshing apt index..."
-        $SUDO apt-get update -y
+          BEFORE_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
+          echo "Upgradable packages before upgrade: ${BEFORE_COUNT}"
 
-        BEFORE_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
-        echo "Upgradable packages before upgrade: ${BEFORE_COUNT}"
+          if [ "${BEFORE_COUNT}" -gt 0 ]; then
+            echo "Installing upgrades..."
+            # Avoid relying on DEBIAN_FRONTEND via sudo (requires SETENV: in
+            # sudoers). Pass non-interactive behaviour as apt/dpkg options
+            # directly so this works on every provisioned server.
+            APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+            $SUDO apt-get "${APT_OPTS[@]}" upgrade
+            $SUDO apt-get "${APT_OPTS[@]}" autoremove
+            $SUDO apt-get -y autoclean
+          else
+            echo "No package upgrades required."
+          fi
 
-        if [ "${BEFORE_COUNT}" -gt 0 ]; then
-          echo "Installing upgrades..."
-          # Avoid relying on DEBIAN_FRONTEND via sudo (requires SETENV: in
-          # sudoers). Pass non-interactive behaviour as apt/dpkg options
-          # directly so this works on every provisioned server.
-          APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
-          $SUDO apt-get "${APT_OPTS[@]}" upgrade
-          $SUDO apt-get "${APT_OPTS[@]}" autoremove
-          $SUDO apt-get -y autoclean
-        else
-          echo "No package upgrades required."
-        fi
+          AFTER_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
+          echo "Upgradable packages after upgrade: ${AFTER_COUNT}"
+        ) > "$STATUS_DIR/log" 2>&1
+        # Capture the subshell's own exit code, not the last redirected
+        # command's — the subshell runs its own `set -e` so it stops (and
+        # exits non-zero) on the first failing apt/dpkg command instead of
+        # silently continuing to the final (near-always-zero) echo.
+        RC=$?
+        echo "$RC" > "$STATUS_DIR/exit_code"
+        touch "$STATUS_DIR/done"
+        SCRIPT
+        chmod +x "$STATUS_DIR/run.sh"
 
-        AFTER_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
-        echo "Upgradable packages after upgrade: ${AFTER_COUNT}"
-
-        if [ -f /var/run/reboot-required ]; then
-          echo "reboot_required=yes"
-        else
-          echo "reboot_required=no"
-        fi
+        setsid nohup "$STATUS_DIR/run.sh" >/dev/null 2>&1 < /dev/null &
+        disown
+        echo "Upgrade kicked off in background (status dir: $STATUS_DIR)."
         EOF
+
+    - name: ⏳ Wait for system updates to finish
+      if: ${{ inputs.apply_updates == 'true' }}
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        STATUS_DIR="/tmp/gha-maintenance-${RUN_TOKEN}"
+
+        echo "Waiting for the remote apt upgrade to finish..."
+        DONE="no"
+        for i in $(seq 1 60); do
+          if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "${SSH_USER}@${SSH_HOST}" "test -f '${STATUS_DIR}/done'" 2>/dev/null; then
+            DONE="yes"
+            break
+          fi
+          sleep 10
+        done
+
+        if [ "$DONE" != "yes" ]; then
+          # Do not clean up STATUS_DIR here: the detached run.sh may still be
+          # legitimately mid-upgrade on a slow box. Deleting it now would not
+          # stop that process but would make its later log/exit_code/done
+          # writes fail silently, destroying the only postmortem evidence for
+          # a genuinely stuck run.
+          echo "::error::Remote apt upgrade did not finish within timeout."
+          exit 1
+        fi
+
+        echo "--- remote apt log ---"
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "cat '${STATUS_DIR}/log'" || true
+        echo "--- end log ---"
+
+        EXIT_CODE="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "cat '${STATUS_DIR}/exit_code'")"
+        echo "Remote apt upgrade exit code: ${EXIT_CODE}"
+
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "rm -rf '${STATUS_DIR}'" || true
+
+        if [ "$EXIT_CODE" != "0" ]; then
+          echo "::error::Remote apt upgrade failed with exit code ${EXIT_CODE}."
+          exit 1
+        fi
 
     - name: 🤔 Decide whether reboot is needed
       id: decision
@@ -146,7 +214,10 @@ runs:
         echo "reason=$REASON" >> "$GITHUB_OUTPUT"
 
         echo "Decision: need_reboot=$NEED_REBOOT (reason=$REASON)"
-        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uname -a; uptime"
+        # Informational only — the decision above is already final, so a
+        # transient connection drop here (e.g. a sshd restart from the prior
+        # apt upgrade) must not fail this step.
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uname -a; uptime" || true
 
     - name: ⏭️ Skip reboot
       if: steps.decision.outputs.need_reboot != 'yes'
