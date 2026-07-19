@@ -175,7 +175,12 @@ def _build_monitor_kwargs(spec):
         "type": spec.get("type", "http"),
         "url": spec.get("url"),
         "interval": int(spec.get("interval", 60)),
-        "maxretries": int(spec.get("max_retries", 3)),
+        # Default 5 (was 3): a monitored box surviving a maintenance reboot cycle
+        # (kernel reboot + Docker + container warmup) is briefly unreachable for
+        # several minutes; 5 x 60s of confirmed failures before firing "down" rides
+        # that out without masking a real outage for long. Per-monitor override via
+        # `max_retries` in project.yaml still wins.
+        "maxretries": int(spec.get("max_retries", 5)),
         "retryInterval": int(spec.get("retry_interval", 60)),
     }
     if "accepted_statuscodes" in spec:
