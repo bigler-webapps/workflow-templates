@@ -235,6 +235,7 @@ runs:
       run: |
         python3 - <<'PYCODE'
         import os
+        import re
         import sys
         import yaml
 
@@ -253,6 +254,36 @@ runs:
         except FileNotFoundError:
             print("❌ Error: project.yaml not found!")
             raise SystemExit(1)
+
+        infra = config.get("infra") or {}
+        if not isinstance(infra, dict):
+            print("❌ Error: infra must be a mapping when declared.")
+            raise SystemExit(1)
+        persistent_dirs = infra.get("persistent_dirs", [])
+        if not isinstance(persistent_dirs, list):
+            print("❌ Error: infra.persistent_dirs must be a list of relative paths.")
+            raise SystemExit(1)
+
+        safe_persistent_dir = re.compile(
+            r"^[A-Za-z0-9._/-]+$"
+        )
+        for persistent_dir in persistent_dirs:
+            segments = persistent_dir.split("/") if isinstance(persistent_dir, str) else []
+            if (
+                not isinstance(persistent_dir, str)
+                or not safe_persistent_dir.fullmatch(persistent_dir)
+                or persistent_dir.startswith("/")
+                or ".." in segments
+                or "." in segments
+                or any(segment.startswith("-") for segment in segments)
+            ):
+                print(
+                    "❌ Error: invalid infra.persistent_dirs entry. Entries must be safe "
+                    "relative paths: no '..' or '.' segments, no leading '/', no segment "
+                    "starting with '-' (would be misread as an option by remote commands)."
+                )
+                raise SystemExit(1)
+        persistent_dirs_value = " ".join(persistent_dirs)
 
         suffix = "_stage" if target_env == "staging" else ""
         remote_path = f"/srv/apps/{project_name}{suffix}"
@@ -290,6 +321,7 @@ runs:
             f.write(f"REMOTE_PATH={remote_path}\n")
             f.write(f"PROJECT_NAME={project_name}\n")
             f.write(f"RESOLVED_SSH_HOST={resolved_host}\n")
+            f.write(f"PERSISTENT_DIRS={persistent_dirs_value}\n")
         PYCODE
 
     - name: 🔌 Pre-flight Tailscale-SSH connectivity check
@@ -350,29 +382,36 @@ runs:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
+        PERSISTENT_DIRS: ${{ env.PERSISTENT_DIRS }}
       run: |
         set -euo pipefail
-        rsync -rlvz \
-          --delete --delete-delay \
-          --partial --delay-updates \
-          --no-owner --no-group --no-perms --omit-dir-times \
-          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
-          --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
-          -e "ssh -o StrictHostKeyChecking=accept-new" \
-          --exclude=certbot/letsencrypt \
-          --exclude=docker-compose.override.yml \
-          --exclude=.git \
-          --exclude=.github \
-          --exclude=frontend/node_modules \
-          --exclude=frontend/build \
-          --exclude=frontend/build_current \
-          --exclude=backend/media \
-          --exclude='**/__pycache__/' \
-          --exclude=*.pyc \
-          --exclude='model/.$*.drawio.dtmp' \
-          --exclude='model/.$*.drawio.bkp' \
-          --exclude=backups \
-          ./ "${SSH_USER}@${TAILNET_HOST}:${REMOTE_PATH}"
+        rsync_args=(
+          -rlvz
+          --delete --delete-delay
+          --partial --delay-updates
+          --no-owner --no-group --no-perms --omit-dir-times
+          --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r
+          --rsync-path="mkdir -p ${REMOTE_PATH} && rsync"
+          -e "ssh -o StrictHostKeyChecking=accept-new"
+          --exclude=certbot/letsencrypt
+          --exclude=docker-compose.override.yml
+          --exclude=.git
+          --exclude=.github
+          --exclude=frontend/node_modules
+          --exclude=frontend/build
+          --exclude=frontend/build_current
+          --exclude=backend/media
+          --exclude='**/__pycache__/'
+          --exclude=*.pyc
+          --exclude='model/.$*.drawio.dtmp'
+          --exclude='model/.$*.drawio.bkp'
+          --exclude=backups
+        )
+        read -r -a persistent_dirs <<< "${PERSISTENT_DIRS}"
+        for dir in "${persistent_dirs[@]}"; do
+          rsync_args+=(--exclude="$dir")
+        done
+        rsync "${rsync_args[@]}" ./ "${SSH_USER}@${TAILNET_HOST}:${REMOTE_PATH}"
 
     - name: 🔐 Provision optional file secrets (via plain ssh over Tailnet)
       if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
@@ -452,6 +491,7 @@ runs:
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
         SKIP_MIGRATE: ${{ inputs.skip_migrate }}
+        PERSISTENT_DIRS: ${{ env.PERSISTENT_DIRS }}
       run: |
         set -euo pipefail
         # Heredoc pattern (same as file-secrets step above):
@@ -468,6 +508,7 @@ runs:
         REMOTE_PATH="${REMOTE_PATH}"
         HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
         SKIP_MIGRATE="${SKIP_MIGRATE}"
+        PERSISTENT_DIRS="${PERSISTENT_DIRS}"
 
         cd "\$REMOTE_PATH"
 
@@ -504,6 +545,9 @@ runs:
         \$DOCKER image prune -f
 
         echo "🔥 Recreating containers..."
+        for dir in \$PERSISTENT_DIRS; do
+          mkdir -p -- "\$dir"
+        done
         \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
 
         if [ "\${SKIP_MIGRATE}" != "true" ]; then
