@@ -145,17 +145,47 @@ jobs:
   security:
     if: ${{ inputs.run-security }}
     runs-on: ${{ inputs.runs-on }}
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      # sha256 of gitleaks_8.30.1_linux_x64.tar.gz, from the release's checksums.txt
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0
 
+      - name: Install gitleaks
+        # Free OSS binary, not the gitleaks/gitleaks-action wrapper: that Action
+        # now requires a paid GITLEAKS_LICENSE for GitHub organizations (breaking
+        # change), which this org does not have. The gitleaks CLI itself stays free.
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+
+      - name: Determine gitleaks scan range
+        id: range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "log_opts=${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "log_opts=HEAD~1..HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: gitleaks (secret scan, blocking)
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
-          GITLEAKS_ENABLE_COMMENTS: "false"
+        # History-aware scan of exactly the incoming commit range (PR base..head,
+        # or the latest commit on a manual/non-PR trigger) -- NOT the full repo
+        # history (would block on pre-existing, already-known secret-shaped
+        # strings) and NOT just the final working tree (misses a secret added
+        # then removed within the same range, which still lands permanently in
+        # merged history/blame). Auto-discovers a repo-root .gitleaks.toml.
+        shell: bash
+        run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="${{ steps.range.outputs.log_opts }}" --redact --verbose'
 
       - name: pip-audit (report-only)
         shell: bash
