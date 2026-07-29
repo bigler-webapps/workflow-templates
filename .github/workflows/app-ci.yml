@@ -32,6 +32,9 @@ on:
         # that want backend CI must opt in with `run-backend: true`. Flip back
         # to true when budget allows.
         default: false
+      run-security:
+        type: boolean
+        default: true
       # Frontend
       node-version:
         type: string
@@ -138,6 +141,39 @@ jobs:
       - name: Remove CI image
         if: always()
         run: docker rmi -f "$CI_IMAGE" 2>/dev/null || true
+
+  security:
+    if: ${{ inputs.run-security }}
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks (secret scan, blocking)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+      - name: pip-audit (report-only)
+        shell: bash
+        run: |
+          if [ -f backend/requirements.txt ]; then
+            pip install pip-audit
+            pip-audit -r backend/requirements.txt || echo "::warning::pip-audit findings (non-blocking v1)"
+          fi
+        continue-on-error: true
+
+      - name: pnpm audit (report-only)
+        shell: bash
+        run: |
+          if [ -f ${{ inputs.frontend-path }}/pnpm-lock.yaml ]; then
+            corepack enable
+            (cd ${{ inputs.frontend-path }} && pnpm audit --audit-level high) || echo "::warning::pnpm audit findings (non-blocking v1)"
+          fi
+        continue-on-error: true
 
   frontend:
     runs-on: ${{ inputs.runs-on }}
