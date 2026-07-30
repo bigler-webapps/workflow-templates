@@ -14,8 +14,9 @@ inputs:
     default: 'production'
   compose_profiles:
     description: >-
-      Docker Compose profile(s) to activate on the destination host. Must be in
-      the allowlist '^(main|staging)$'. Defaults to "main" for backward-compat
+      Docker Compose profile(s) to activate on the destination host. Single value
+      or comma-separated list; every element must be in the allowlist
+      (main, staging, monitoring, geo). Defaults to "main" for backward-compat
       with callers that pre-date the profile refactor.
     required: false
     default: 'main'
@@ -74,8 +75,13 @@ runs:
             exit 1
           fi
         done
-        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging|monitoring)$' || {
-          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: main, staging, monitoring)"
+        # Comma-separated list allowed (Docker Compose reads COMPOSE_PROFILES the
+        # same way), so one server can activate several profiles -- e.g. "main,geo"
+        # for the single prod host that carries the Valhalla tile data, while the
+        # other "main" hosts stay without it. Still a strict allowlist: every
+        # element must match, so no shell metacharacters can reach the SSH heredoc.
+        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging|monitoring|geo)(,(main|staging|monitoring|geo))*$' || {
+          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: comma-separated list of main, staging, monitoring, geo)"
           exit 1
         }
         echo "✅ Inputs validated."
