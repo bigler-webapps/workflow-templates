@@ -130,6 +130,31 @@ def test_absent_and_none_are_treated_as_empty_string():
     assert kuma_sync._monitor_changed(kwargs, existing) is False
 
 
+@pytest.mark.parametrize(
+    "desired,current,changed",
+    [(False, 0, False), (True, 1, False), (True, 0, True), (False, 1, True)],
+)
+def test_boolean_values_go_through_the_int_branch(desired, current, changed):
+    """A YAML value CAN arrive as a Python bool: PyYAML resolves an unquoted
+    `keyword: off` in `monitoring.extra` to False. `bool` is an `int` subclass,
+    so it lands in the int branch — the behaviour that predates this WO.
+
+    A dedicated bool branch was added during CI-4 and then removed, because it
+    silently changed that behaviour (`bool("true")` is True where `int("true")`
+    raises). This pins the surviving semantics so the branch is not reintroduced
+    on the assumption that bools never occur.
+    """
+    kwargs = base_kwargs(keyword=desired)
+    existing = existing_from(kwargs, keyword=current)
+    assert kuma_sync._monitor_changed(kwargs, existing) is changed
+
+
+def test_yaml_really_can_produce_a_bool_for_a_whitelisted_key():
+    """Guards the rationale above from drifting back to 'bools never occur'."""
+    import yaml
+    assert yaml.safe_load("keyword: off")["keyword"] is False
+
+
 def test_a_real_url_change_is_detected():
     kwargs = base_kwargs()
     assert kuma_sync._monitor_changed(kwargs, existing_from(kwargs, url="https://other.ch")) is True
@@ -303,7 +328,14 @@ def test_multi_aborts_with_the_budget_message_not_a_per_app_failure(
 
 def test_multi_budget_abort_skips_the_prune(tmp_path, monkeypatch, capsys, wedged_kuma):
     """An aborted run has an incomplete declared-name set; pruning against it
-    would delete valid monitors — the same safety the failed_apps guard gives."""
+    would delete valid monitors — the same safety the failed_apps guard gives.
+
+    The prune-skip alone is NOT enough to assert: a BudgetExceeded that is
+    mis-caught as a per-app failure also lands in `failed_apps`, which already
+    skips the prune via the pre-existing safety net. So this asserts the abort
+    was *identified as a budget abort*, otherwise it would pass even with the
+    guard removed and pin nothing.
+    """
     apps = [_project_yaml(tmp_path, "app0")]
     real_budget = kuma_sync.Budget
     monkeypatch.setattr(
@@ -314,8 +346,86 @@ def test_multi_budget_abort_skips_the_prune(tmp_path, monkeypatch, capsys, wedge
     with pytest.raises(SystemExit):
         kuma_sync.sync_monitors_multi(apps, prune=True)
 
-    out = capsys.readouterr().out
-    assert "Prune pass" not in out
+    captured = capsys.readouterr()
+    assert "Prune pass" not in captured.out
+    assert "Aborted:" in captured.err and "run budget" in captured.err
+    assert "app(s) failed" not in captured.err
+
+
+def test_multi_budget_abort_survives_the_recovery_branch(tmp_path, monkeypatch, capsys):
+    """The SECOND swallow site: the recovery branch's re-fetch of `existing`.
+
+    Its guard was originally untested — removing it left the whole suite green.
+    Arming the budget on a *reconnect* does not reach it, because `_retry_call`
+    reconnects too, so the budget fires during the write's own retries and never
+    gets as far as the recovery branch. Arming it on the SECOND `get_monitors`
+    pins the re-fetch exactly: call 1 is the per-app fetch, call 2 can only be
+    the recovery re-fetch.
+    """
+    monkeypatch.setattr(kuma_sync.time, "sleep", lambda _s: None)
+
+    budget = kuma_sync.Budget(seconds=1)
+    budget.armed = False
+    monkeypatch.setattr(budget, "exceeded", lambda: budget.armed)
+    monkeypatch.setattr(kuma_sync, "Budget", lambda *a, **k: budget)
+
+    # Shared across reconnects: _login hands back a fresh object each time.
+    state = {"get_calls": 0}
+
+    class RecoveryPathApi:
+        def get_monitors(self):
+            state["get_calls"] += 1
+            if state["get_calls"] == 1:
+                return []      # empty -> the monitor takes the add_monitor path
+            budget.armed = True   # the re-fetch is where the budget lands
+            raise RuntimeError("timeout")
+
+        def add_monitor(self, **_kwargs):
+            raise RuntimeError("timeout")
+
+        def disconnect(self):
+            pass
+
+    monkeypatch.setattr(kuma_sync, "_login", RecoveryPathApi)
+
+    with pytest.raises(SystemExit) as exc:
+        kuma_sync.sync_monitors_multi([_project_yaml(tmp_path, "app0")], prune=True)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert state["get_calls"] >= 2, "the recovery re-fetch never ran — the guard is not reached"
+    assert "Aborted:" in err and "run budget" in err
+    assert "Recovery failed" not in err, "budget abort was swallowed as a recovery failure"
+    assert "app(s) failed" not in err
+
+
+def test_prune_checks_the_budget_before_each_delete(monkeypatch):
+    """Without a proactive check the budget can only fire reactively, from
+    inside a delete's retry — i.e. after a delete already failed — so an abort
+    would stop at an arbitrary point mid-prune."""
+    checked = []
+
+    class RecordingBudget(kuma_sync.Budget):
+        def check(self, where):
+            checked.append(where)
+
+    class PruneApi:
+        def get_monitors(self):
+            return [{"name": "stale-1", "id": 1}, {"name": "stale-2", "id": 2}]
+
+        def delete_monitor(self, _id):
+            return None
+
+        def disconnect(self):
+            pass
+
+    monkeypatch.setattr(kuma_sync, "_login", PruneApi)
+    monkeypatch.setattr(kuma_sync, "Budget", lambda *a, **k: RecordingBudget(seconds=600))
+
+    kuma_sync.sync_monitors_multi([], prune=True)
+
+    deletes = [w for w in checked if w.startswith("before delete_monitor(")]
+    assert len(deletes) == 2, f"expected a check before each delete, got {checked}"
 
 
 def test_multi_still_reports_ordinary_app_failures_normally(tmp_path, capsys, monkeypatch):

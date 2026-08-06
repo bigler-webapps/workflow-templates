@@ -716,6 +716,16 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                 }
                 for name, entry in existing_all.items():
                     if name not in all_declared_names:
+                        # Same proactive check as the sync loop. Without it the
+                        # budget could only fire reactively, from inside a
+                        # delete's retry — i.e. only after a delete had already
+                        # failed — so an abort here would stop at an arbitrary
+                        # point mid-prune. Checking first makes the stop
+                        # deterministic. Deletions already made stand (they only
+                        # ever remove monitors absent from the declared set, so
+                        # nothing valid is lost); the remainder is simply left
+                        # for the next run.
+                        session.budget.check(f"before delete_monitor({name})")
                         session.call(f"delete_monitor({name})", "delete_monitor", entry["id"])
                         print(f"🗑️  deleted stale monitor: {name}")
 
