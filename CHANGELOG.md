@@ -14,6 +14,32 @@ tag, not `@main`. The current stable tag is documented below.
 
 ### Fixed
 
+**`kuma_sync.py`: stop rewriting every monitor on every run** (CI-4). The client
+library converts a monitor's `type` into a `MonitorType` enum **on read**, while
+the script sends the plain string `"http"`. `_monitor_changed` compared
+`str(current)`, and for a `(str, Enum)` member that is `"MonitorType.HTTP"` — so
+every monitor differed on every run, `unchanged` was never reported once, and
+each sync performed a full write pass of all ~57 monitors against Kuma's
+single-threaded Socket.IO server. Enum values are now compared by `.value`.
+
+Also in this fix:
+
+- `notificationIDList` is compared as an id **set**, equal across the list,
+  dict-keyed-by-id and dict-of-bool forms. A `false` value means *not assigned*
+  and still counts as drift, so un-assigning a relay in the Kuma UI is corrected
+  rather than ignored.
+- `_monitor_changed` now logs which key differed and both values, so the next
+  permanent diff is answered by reading the run log.
+- `_retry_call` reconnects between attempts. It previously received an
+  already-bound method of the dead api object, so once the socket wedged every
+  remaining attempt was a guaranteed failure; retries now resolve the method by
+  name against a `Session` holding the live connection.
+- New overall run budget (`KUMA_SYNC_BUDGET_SECONDS`, default 600) aborts a
+  wedged run in a minute or two with a clear message and a non-zero exit instead
+  of grinding for 24 minutes. The abort deliberately skips the prune, matching
+  the existing incomplete-declared-set safety.
+- First tests for this script: `scripts/tests/` (30 cases).
+
 **`base` role: stop upgrading the transport the play runs over** (collection
 `0.5.1` → `0.5.2`). The role's "Apt update and upgrade" task upgraded the
 `tailscale` package; its postinst restarts `tailscaled`, which serves the

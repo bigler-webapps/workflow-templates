@@ -41,6 +41,7 @@ import argparse
 import os
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 
 import yaml
@@ -119,52 +120,204 @@ def _login():
     sys.exit(1)
 
 
-def _retry_call(label, fn, *args, **kwargs):
-    """Retry fn up to 5 times with linear backoff (mirrors the _login retry)."""
+class BudgetExceeded(Exception):
+    """The run's overall wall-clock ceiling was reached (CI-4 scope 3)."""
+
+
+class Budget:
+    """Wall-clock ceiling for one sync run.
+
+    CI-4: a wedged Kuma used to produce a 24-minute red run (57 monitors x up to
+    ~50s of retries each) instead of a fast, legible failure. Calibrated against
+    the observed runs rather than a round number: the healthy run in the CI-4
+    evidence performed a FULL write pass of all 57 monitors and finished well
+    inside 10 minutes, while the failing run burned 24. Once the permanent diff
+    is fixed a healthy run writes almost nothing and should be far quicker
+    still, so 10 minutes stays a generous ceiling for the worst legitimate case
+    while cutting the pathological one to well under half.
+    """
+
+    def __init__(self, seconds=None):
+        if seconds is None:
+            seconds = int(os.environ.get("KUMA_SYNC_BUDGET_SECONDS", "600"))
+        self.seconds = seconds
+        self._start = time.monotonic()
+
+    def elapsed(self):
+        return time.monotonic() - self._start
+
+    def exceeded(self):
+        return self.seconds > 0 and self.elapsed() > self.seconds
+
+    def check(self, where):
+        if self.exceeded():
+            raise BudgetExceeded(
+                f"run budget of {self.seconds}s exhausted after "
+                f"{self.elapsed():.0f}s (at: {where}). Kuma is not keeping up — "
+                "failing fast instead of retrying a wedged server."
+            )
+
+
+class Session:
+    """Holds the LIVE api object so a retry can re-resolve its target after a
+    reconnect.
+
+    CI-4 scope 2: `_retry_call` used to receive an already-bound method
+    (`api.edit_monitor`). Reconnecting inside the retry loop produced a new api
+    object, but the bound method still pointed at the dead one — so every
+    remaining attempt was a guaranteed failure, and a local rebind could not
+    propagate back to the caller either. Retries now resolve the method by NAME
+    against whatever connection this holder currently owns.
+    """
+
+    def __init__(self, api, budget=None):
+        self.api = api
+        self.budget = budget or Budget()
+
+    def reconnect(self):
+        try:
+            self.api.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        # _login() is terminal on unrecoverable failure (it sys.exit()s after
+        # its own 5 attempts, fast-pathing bad credentials). That is the same
+        # behaviour every other _login() call site in this script already has.
+        self.api = _login()
+        return self.api
+
+    def call(self, label, method, *args, **kwargs):
+        return _retry_call(label, self, method, *args, **kwargs)
+
+    def disconnect(self):
+        try:
+            self.api.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _retry_call(label, session, method, *args, **kwargs):
+    """Retry `session.api.<method>` up to 5 times, RECONNECTING between attempts.
+
+    Mirrors _login's disconnect-before-retry, but the reconnect has to live on
+    the session (see Session) — retrying a wedged Socket.IO connection with the
+    same object is time spent on a guaranteed failure.
+    """
     last = None
     for attempt in range(1, 6):
         try:
-            return fn(*args, **kwargs)
+            return getattr(session.api, method)(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001
             last = exc
             if any(s in str(exc).lower() for s in ("not found", "does not exist", "permission")):
                 raise
             if attempt < 5:
+                # Don't spend the backoff on a run that is already over budget.
+                session.budget.check(f"{label} attempt {attempt}/5")
                 wait = attempt * 5
                 print(
                     f"⚠️  Kuma {label} attempt {attempt}/5 failed "
-                    f"({type(exc).__name__}); retrying in {wait}s...",
+                    f"({type(exc).__name__}); reconnecting and retrying in {wait}s...",
                     file=sys.stderr,
                 )
                 time.sleep(wait)
+                session.reconnect()
     raise last
 
 
-def _monitor_changed(kwargs, existing_monitor):
-    """Return True if any key in kwargs differs from the existing monitor's value."""
+def _unwrap(value):
+    """Enum members compare by VALUE, never by str().
+
+    CI-4 root cause: `uptime_kuma_api` converts a monitor's `type` into a
+    `MonitorType` enum ON READ, while we send the plain string "http". The old
+    comparison used `str(current)`, and for a `(str, Enum)` member that is
+    "MonitorType.HTTP" — not "http". So every monitor differed on `type` on
+    every run, `unchanged` was never reported once, and each run performed a
+    full write pass of the whole monitor set against Kuma's single-threaded
+    Socket.IO server. Comparing `.value` is what the old comment at this spot
+    only claimed to do.
+    """
+    return value.value if isinstance(value, Enum) else value
+
+
+def _norm_scalar(value):
+    """Normalise one scalar for comparison.
+
+    Absent/None from Kuma is treated as empty string so optional fields the
+    server does not echo back don't trigger spurious edits when the desired
+    value is empty too (pre-existing behaviour, deliberately preserved).
+    """
+    value = _unwrap(value)
+    return "" if value is None else str(value)
+
+
+def _norm_id_set(value):
+    """Normalise a notification-id collection to a set of id strings.
+
+    Kuma represents `notificationIDList` as an object keyed by id; the client
+    library converts it to a list of ints on read; older/other paths may hand
+    back either. All three forms must compare equal when they name the same ids.
+
+    A dict value of `false` means the notification is NOT assigned, so it is
+    excluded — otherwise un-assigning a notification in the Kuma UI would stop
+    being detected as drift, which is exactly the correction this sync exists to
+    make (CI-4 Risk 1).
+    """
+    value = _unwrap(value)
+    if value is None:
+        return set()
+    if isinstance(value, dict):
+        return {str(_unwrap(k)) for k, v in value.items() if v}
+    if isinstance(value, (list, tuple, set)):
+        return {str(_unwrap(v)) for v in value}
+    return {str(value)}
+
+
+# Fields holding a collection of notification ids, compared as an id SET.
+_ID_SET_KEYS = frozenset({"notificationIDList"})
+
+
+def _monitor_changed(kwargs, existing_monitor, monitor_name=""):
+    """Return True if any key in kwargs differs from the existing monitor's value.
+
+    Logs WHICH key differed and both values (CI-4 scope 0): when this reports a
+    change, the reason must be visible in the run log rather than inferred from
+    the code months later.
+    """
+    def differs(key, desired_repr, current_repr):
+        label = f" [{monitor_name}]" if monitor_name else ""
+        print(
+            f"↻ diff{label} on '{key}': desired={desired_repr!r} current={current_repr!r}",
+            file=sys.stderr,
+        )
+        return True
+
     for key, desired in kwargs.items():
         current = existing_monitor.get(key)
-        if isinstance(desired, int):
+
+        if key in _ID_SET_KEYS:
+            desired_ids, current_ids = _norm_id_set(desired), _norm_id_set(current)
+            if desired_ids != current_ids:
+                return differs(key, sorted(desired_ids), sorted(current_ids))
+        elif isinstance(desired, int):
             try:
-                current = int(current)
+                current_i = int(_unwrap(current))
             except (TypeError, ValueError):
-                return True
-            if desired != current:
-                return True
+                return differs(key, desired, current)
+            if desired != current_i:
+                return differs(key, desired, current_i)
         elif isinstance(desired, list):
-            if not isinstance(current, list):
-                return True
-            if sorted(str(x) for x in desired) != sorted(str(x) for x in current):
-                return True
+            current_u = _unwrap(current)
+            if not isinstance(current_u, list):
+                return differs(key, desired, current)
+            desired_l = sorted(_norm_scalar(x) for x in desired)
+            current_l = sorted(_norm_scalar(x) for x in current_u)
+            if desired_l != current_l:
+                return differs(key, desired_l, current_l)
         else:
-            # str() normalises enum types the Kuma API may return.
-            # Treat absent/None from Kuma as empty string so that optional
-            # fields not echoed back by the server don't trigger spurious edits
-            # when the desired value is also empty.
-            current_s = str(current) if current is not None else ""
-            desired_s = str(desired) if desired is not None else ""
+            desired_s, current_s = _norm_scalar(desired), _norm_scalar(current)
             if desired_s != current_s:
-                return True
+                return differs(key, desired_s, current_s)
+
     return False
 
 
@@ -387,14 +540,16 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         print("ℹ️  No monitors declared in config; nothing to do.")
         return
 
-    existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
+    session = api if isinstance(api, Session) else Session(api)
+
+    existing = {m["name"]: m for m in session.call("get_monitors", "get_monitors")}
     declared_names = set()
 
     # Build name→id map for notifications once so per-monitor relay assignment
     # can resolve names without a separate API call per monitor.
     notifications_by_name = {
         n["name"]: n["id"]
-        for n in _retry_call("get_notifications", api.get_notifications)
+        for n in session.call("get_notifications", "get_notifications")
     }
 
     for raw_spec in specs:
@@ -418,19 +573,19 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         kwargs = _build_monitor_kwargs(spec)
 
         if name in existing:
-            if _monitor_changed(kwargs, existing[name]):
-                _retry_call(f"edit_monitor({name})", api.edit_monitor, existing[name]["id"], **kwargs)
+            if _monitor_changed(kwargs, existing[name], name):
+                session.call(f"edit_monitor({name})", "edit_monitor", existing[name]["id"], **kwargs)
                 print(f"✏️  updated monitor: {name}")
             else:
                 print(f"✓ unchanged: {name}")
         else:
-            _retry_call(f"add_monitor({name})", api.add_monitor, **kwargs)
+            session.call(f"add_monitor({name})", "add_monitor", **kwargs)
             print(f"➕ created monitor: {name}")
 
     if prune:
         for name, entry in existing.items():
             if name not in declared_names:
-                _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
+                session.call(f"delete_monitor({name})", "delete_monitor", entry["id"])
                 print(f"🗑️  deleted stale monitor: {name}")
 
 
@@ -442,9 +597,10 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
     app failed — running it with an incomplete declared-name set would delete
     valid monitors belonging to the failed apps.
     """
-    api = _login()
+    session = Session(_login())
     all_declared_names = set()
     failed_apps = []
+    budget_hit = None
 
     try:
         for path_str in project_yaml_paths:
@@ -470,7 +626,14 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
             print(f"ℹ️  Derived {len(specs)} monitor spec(s) from {path}")
 
             try:
-                existing = {m["name"]: m for m in _retry_call("get_monitors", api.get_monitors)}
+                existing = {m["name"]: m for m in session.call("get_monitors", "get_monitors")}
+            except BudgetExceeded:
+                # A blown run budget is NOT a per-app failure. Without this the
+                # generic handler below would rewrite it as "failed to fetch
+                # monitors", append to failed_apps, and CONTINUE to the next app
+                # — turning the intended fast abort into a slow limp through the
+                # remaining apps with a misleading final message.
+                raise
             except Exception as exc:  # noqa: BLE001
                 print(f"❌ Failed to fetch monitors for {app_name}: {exc}", file=sys.stderr)
                 failed_apps.append(app_name)
@@ -483,13 +646,17 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                 all_declared_names.add(name)
                 kwargs = _build_monitor_kwargs(spec)
 
+                # Fail fast rather than grinding through the remaining monitors
+                # once the run is already over its ceiling.
+                session.budget.check(f"before monitor {name}")
+
                 for recovery_attempt in range(1, 3):
                     try:
                         if name in existing:
-                            if _monitor_changed(kwargs, existing[name]):
-                                _retry_call(
+                            if _monitor_changed(kwargs, existing[name], name):
+                                session.call(
                                     f"edit_monitor({name})",
-                                    api.edit_monitor,
+                                    "edit_monitor",
                                     existing[name]["id"],
                                     **kwargs,
                                 )
@@ -497,24 +664,25 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                             else:
                                 print(f"✓ unchanged: {name}")
                         else:
-                            _retry_call(f"add_monitor({name})", api.add_monitor, **kwargs)
+                            session.call(f"add_monitor({name})", "add_monitor", **kwargs)
                             print(f"➕ created monitor: {name}")
                         break
+                    except BudgetExceeded:
+                        # Not a per-monitor failure — the whole run is over.
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         if recovery_attempt == 1 and any(
                             s in str(exc).lower() for s in ("not logged in", "timeout")
                         ):
                             print("⚠️  Session drop, re-logging in...", file=sys.stderr)
                             try:
-                                api.disconnect()
-                            except Exception:  # noqa: BLE001
-                                pass
-                            try:
-                                api = _login()
+                                session.reconnect()
                                 existing = {
                                     m["name"]: m
-                                    for m in _retry_call("get_monitors", api.get_monitors)
+                                    for m in session.call("get_monitors", "get_monitors")
                                 }
+                            except BudgetExceeded:
+                                raise  # see the guard above — not an app failure
                             except Exception as rec_exc:  # noqa: BLE001
                                 print(f"❌ Recovery failed for {app_name}: {rec_exc}", file=sys.stderr)
                                 app_failed = True
@@ -544,18 +712,24 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                 print(f"{'=' * 60}")
                 existing_all = {
                     m["name"]: m
-                    for m in _retry_call("get_monitors", api.get_monitors)
+                    for m in session.call("get_monitors", "get_monitors")
                 }
                 for name, entry in existing_all.items():
                     if name not in all_declared_names:
-                        _retry_call(f"delete_monitor({name})", api.delete_monitor, entry["id"])
+                        session.call(f"delete_monitor({name})", "delete_monitor", entry["id"])
                         print(f"🗑️  deleted stale monitor: {name}")
 
+    except BudgetExceeded as exc:
+        # The prune block is intentionally skipped: an aborted run has an
+        # incomplete declared-name set, and pruning against it would delete
+        # valid monitors — the same safety the failed_apps guard provides.
+        budget_hit = exc
     finally:
-        try:
-            api.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
+        session.disconnect()
+
+    if budget_hit is not None:
+        print(f"\n❌ Aborted: {budget_hit}", file=sys.stderr)
+        sys.exit(1)
 
     if failed_apps:
         print(f"\n❌ {len(failed_apps)} app(s) failed: {', '.join(failed_apps)}", file=sys.stderr)
@@ -611,23 +785,29 @@ def main():
         sync_monitors_multi(args.project_yamls, prune=args.prune)
         return
 
-    api = _login()
+    session = Session(_login())
     try:
         if args.command == "notifications":
             config_path = Path(args.config)
             if not config_path.exists():
                 print(f"❌ Config file not found: {config_path}", file=sys.stderr)
                 sys.exit(1)
-            sync_notifications(api, config_path, prune=args.prune)
+            sync_notifications(session.api, config_path, prune=args.prune)
         elif args.command == "monitors":
             sync_monitors(
-                api,
+                session,
                 config_path=args.config,
                 project_yaml_path=args.project_yaml,
                 prune=args.prune,
             )
+    except BudgetExceeded as exc:
+        print(f"\n❌ Aborted: {exc}", file=sys.stderr)
+        sys.exit(1)
     finally:
-        api.disconnect()
+        # Via the session, not the original api: a reconnect inside _retry_call
+        # swaps session.api, and disconnecting the stale object would leak the
+        # live one (R3).
+        session.disconnect()
 
 
 if __name__ == "__main__":
