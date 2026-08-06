@@ -133,5 +133,191 @@ to one host; this narrows it to none.
 
 ## B. Implementation map
 
-*(To be filled by the Orchestrator on `git pull` — context package, target working directory,
-progress contract, execution directive, mini-handover. Not authored by the Expertenchat.)*
+### Execution directive (read this FIRST)
+
+> **If you are the implementer reading this work order as your own specification: this section is
+> NOT addressed to you.** It tells the Orchestrator how to invoke you. **You ARE that invocation —
+> do NOT shell out to `codex exec`.**
+>
+> Implement through `codex exec` in the background — invoked directly via Bash (never the
+> `debugger`/`*_coder` Agent wrappers) with BOTH flags `--skip-git-repo-check` and
+> `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from a file.
+> (Fallback to direct Claude implementation only on Codex quota / rate-limit / non-zero exit.)
+
+### Context package
+
+**Target file:** `scripts/kuma_sync.py` (only this file + its tests — no other repo needs a change,
+see "Why no webapp-management change" below).
+
+**Design decision already made (do not re-derive):** resolve which notifications are `isDefault`
+from the **declared `notifications.yml` file**, not from Kuma's live `isDefault` field on
+`get_notifications()` — Risk 4 in Part A explicitly requires this, so the declared config stays the
+source of truth even if someone flips a toggle by hand in the Kuma UI.
+
+**Why no webapp-management change is needed:** the only caller that matters in production is
+`webapp-management/.github/workflows/kuma-sync.yml`, which invokes
+`python _workflow-templates/scripts/kuma_sync.py multi $PRUNE_FLAG $PROJECT_YAMLS` with **cwd = the
+webapp-management checkout root** (the first checkout step, unqualified). `monitoring/notifications.yml`
+already exists at exactly that relative path in that checkout. So a `--notifications-config` CLI flag
+defaulting to `monitoring/notifications.yml` (same convention as the existing `--project-yaml` default
+of `project.yaml`) resolves correctly with **zero workflow-file changes**. Do not touch anything under
+`webapp-management/` or `webapp-management-template/`.
+
+**Named changes in `scripts/kuma_sync.py`:**
+
+1. **New helper — resolve declared defaults from the file**, near `sync_notifications` (~line 360):
+   ```python
+   def _load_default_notification_names(config_path):
+       """Names of notifications declared `default: true` in notifications.yml.
+
+       Read from the FILE, not from Kuma's live isDefault — see CI-5 Risk 4: the
+       declared config must stay the source of truth even if someone flips a
+       toggle by hand in the Kuma UI.
+       """
+       path = Path(config_path)
+       if not path.exists():
+           print(f"⚠️  notifications config not found: {path} — no default "
+                 "notifications will be attached", file=sys.stderr)
+           return set()
+       with open(path, "r", encoding="utf-8") as fh:
+           data = yaml.safe_load(fh) or {}
+       return {n["name"] for n in data.get("notifications", []) if n.get("default")}
+   ```
+
+2. **New helper — resolve one spec's notification ids**, replacing the ad hoc block at
+   `sync_monitors:560-565` (delete that block, call this instead) and used identically inside
+   `sync_monitors_multi`'s per-monitor loop (~line 643-647), which today does **not** resolve
+   `notification_name` at all — that asymmetry is CI-5 scope item 2:
+   ```python
+   def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_name=""):
+       """Mutates spec in place: sets spec['notification_ids'] to the union of the
+       declared defaults and (if present) the resolved notification_name — so every
+       monitor gets at least the defaults, and an unresolvable explicit relay never
+       silently produces an EMPTY assignment (CI-5 required test)."""
+       relay_ids = []
+       if "notification_name" in spec:
+           notif_name = spec.pop("notification_name")
+           notif_id = notifications_by_name.get(notif_name)
+           if notif_id is not None:
+               relay_ids.append(notif_id)
+           else:
+               print(f"⚠️  notification '{notif_name}' not found in Kuma "
+                     f"(monitor: {monitor_name}) — skipping relay assignment",
+                     file=sys.stderr)
+       combined = sorted(set(default_ids) | set(relay_ids))
+       if combined:
+           spec["notification_ids"] = combined
+       return spec
+   ```
+   This one helper closes scope items 1, 2 AND 3 together: item 3 ("`monitoring.extra` entries carry
+   a `notification_name`") needs no separate code — `monitors_from_project_yaml`'s `merged = {**base,
+   **entry}` (line 500) already lets an `extra` entry set `notification_name` in YAML; the only reason
+   it never worked is that the `multi` path never resolved the key at all (item 2). Fixing item 2
+   generically (same helper, same call site, no `if auto-derived` branch) fixes item 3 for free. Do
+   not add a separate "extra can carry a relay" code path.
+
+3. **Wire the helper into `sync_monitors`** (~line 543-583): compute `default_names =
+   _load_default_notification_names(notifications_config_path)` once, then after the existing
+   `notifications_by_name = {...}` fetch (line 550-553) compute
+   `default_ids = sorted(notifications_by_name[n] for n in default_names if n in notifications_by_name)`
+   — warn (`print(..., file=sys.stderr)`) for any declared default name absent from Kuma (means the
+   notifications-sync workflow hasn't run yet). Replace the current `if "notification_name" in spec:
+   ...` block (560-571) with `_resolve_notification_ids(spec, notifications_by_name, default_ids,
+   name)`. Add a `notifications_config_path=None` parameter to `sync_monitors`, defaulting (inside the
+   function, mirroring the existing `config_path`/`project_yaml_path` default pattern) to
+   `"monitoring/notifications.yml"` when not passed.
+
+4. **Wire the helper into `sync_monitors_multi`** (~line 592-746): it currently never calls
+   `get_notifications()` at all. Add, once before the per-app `for path_str in project_yaml_paths:`
+   loop (after `session = Session(_login())`): fetch `default_names` (pure file read, no Kuma call
+   needed — can happen before login too) and `notifications_by_name = {n["name"]: n["id"] for n in
+   session.call("get_notifications", "get_notifications")}`, then `default_ids` the same way as (3).
+   Inside the per-monitor loop (~line 643-647, right after `spec = _expand_env(raw_spec)` /
+   `name = spec["name"]`), call `_resolve_notification_ids(spec, notifications_by_name, default_ids,
+   name)` **before** `kwargs = _build_monitor_kwargs(spec)`. Add a `notifications_config_path=None`
+   parameter to `sync_monitors_multi`, same default as (3).
+
+5. **Item 4 (repair existing monitors) needs NO separate code.** Both `add_monitor` and
+   `edit_monitor` already go through the same `kwargs = _build_monitor_kwargs(spec)` built from the
+   same resolved `spec["notification_ids"]`, and `_monitor_changed` already compares
+   `notificationIDList` as an id-set (existing CI-4 logic, `_ID_SET_KEYS`/`_norm_id_set`). Once step
+   3/4 make `notification_ids` populated for every spec (not just ones with an explicit
+   `notification_name`), an existing monitor whose Kuma-side channels don't match the declared set is
+   detected as changed and corrected automatically — same as any other drifted field. Do not add a
+   dedicated "repair" pass.
+
+6. **CLI wiring** in `main()` (~line 749-816): add `--notifications-config` to the `sm` (monitors)
+   subparser (default `"monitoring/notifications.yml"`, same style as `--project-yaml`'s default) and
+   to the `sm_multi` subparser (same default). Pass through to `sync_monitors(...,
+   notifications_config_path=args.notifications_config)` and `sync_monitors_multi(...,
+   notifications_config_path=args.notifications_config)`.
+
+**Do NOT touch:** `_build_monitor_kwargs`'s existing `if "notification_ids" in spec:` line (356) —
+it already does the right thing once `spec["notification_ids"]` is populated correctly upstream.
+Do NOT change the prune / retry / budget logic (CI-4) at all — only the notification-resolution
+seams named above.
+
+**Invariant to preserve:** `_resolve_notification_ids` must `pop()` `notification_name` off `spec`
+(not just read it) — `_build_monitor_kwargs` has no `notification_name` key in its allowlist, so an
+un-popped key would silently just sit unused, but popping matches the existing convention at the old
+560-565 site and keeps `spec` clean for logging/debugging.
+
+### Required tests to WRITE
+
+Add to `scripts/tests/test_kuma_sync.py` (new section, mirror existing style — plain functions,
+`monkeypatch`/`tmp_path` fixtures already available in the file):
+
+1. `_load_default_notification_names`: given a temp YAML file with two notifications, one
+   `default: true` and one `default: false` (or omitted), returns a set containing only the
+   `default: true` name. Given a missing path, returns `set()` and prints a warning to stderr.
+2. `_resolve_notification_ids`: a spec with no `notification_name` and non-empty `default_ids` ends
+   up with `spec["notification_ids"] == sorted(default_ids)`.
+3. `_resolve_notification_ids`: a spec with `notification_name` resolving to an id present in
+   `notifications_by_name` ends up with BOTH the default id(s) and the resolved relay id in
+   `spec["notification_ids"]` (union, sorted) — mirrors WO's "created monitor's kwargs contain the
+   default notification ids; with an explicit notification_name, they contain that id too."
+4. `_resolve_notification_ids`: an unresolvable `notification_name` (not in `notifications_by_name`)
+   still leaves `spec["notification_ids"]` containing the default ids (not empty, not missing) and
+   prints the existing "not found ... skipping relay assignment" warning — WO's "unknown
+   notification_name warns and does not silently produce an empty assignment."
+5. A `sync_monitors_multi` integration test (extend the existing `FakeApi`/`WedgedApi`-style fakes
+   already in the file, add a minimal fake with `get_notifications`/`get_monitors`/`add_monitor` that
+   records kwargs) proving the `multi` path resolves `notification_name` identically to the single
+   path — WO's "the multi path resolves notification_name identically to the single path." Use a
+   temp `notifications.yml` (via `tmp_path`) with one `default: true` entry and check the kwargs
+   passed to `add_monitor` include its id.
+6. Reuse/extend an existing `existing_from(...)`-style fixture to prove an existing monitor whose
+   `notificationIDList` differs from the newly-resolved declared set is detected as changed by
+   `_monitor_changed` (this should already pass given CI-4's existing `_ID_SET_KEYS` logic — write it
+   as a regression pin, not new logic) — WO's "existing monitor whose channels differ from the
+   declared set is detected as changed and corrected."
+
+Do not write a test that opens a real Kuma connection (conftest.py stubs `uptime_kuma_api` and
+asserts on this).
+
+### Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\workflow-templates`
+
+### Preamble (append verbatim)
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review).
+> The orchestrator re-runs the authoritative set + does the independent review after you finish —
+> those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
+### Mini-handover
+
+Repo: `C:\Users\biglmi\Documents\webapps\workflow-templates` (branch `main`). WO:
+`work-orders/CI-5.md`. Follow `orchestrate-codex`. Only `scripts/kuma_sync.py` +
+`scripts/tests/test_kuma_sync.py` change; run `pytest scripts/tests/` as the affected-areas gate.

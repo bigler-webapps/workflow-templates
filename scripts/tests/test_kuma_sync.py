@@ -441,3 +441,193 @@ def test_multi_still_reports_ordinary_app_failures_normally(tmp_path, capsys, mo
     err = capsys.readouterr().err
     assert "app(s) failed" in err
     assert "Aborted:" not in err
+
+
+# --- CI-5: default + relay notification resolution ------------------------
+#
+# Kuma does not apply a `default: true` notification to a monitor created
+# through the socket API, so every monitor the sync created had an
+# explicitly EMPTY notificationIDList. `_load_default_notification_names` +
+# `_resolve_notification_ids` close that, resolving defaults from the
+# declared notifications.yml (not Kuma's live isDefault — Risk 4: the
+# declared config must stay the source of truth) and resolving
+# `notification_name` identically on both the single-app and `multi` paths.
+
+
+def test_load_default_notification_names_from_file(tmp_path):
+    path = tmp_path / "notifications.yml"
+    path.write_text(
+        "notifications:\n"
+        "  - name: discord-alerts\n"
+        "    type: discord\n"
+        "    default: true\n"
+        "  - name: claude-relay-main-prod\n"
+        "    type: webhook\n"
+        "    default: false\n",
+        encoding="utf-8",
+    )
+    assert kuma_sync._load_default_notification_names(path) == {"discord-alerts"}
+
+
+def test_load_default_notification_names_missing_file_warns(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist.yml"
+    assert kuma_sync._load_default_notification_names(missing) == set()
+    err = capsys.readouterr().err
+    assert "not found" in err
+
+
+def test_resolve_notification_ids_attaches_defaults_with_no_relay():
+    """A created monitor's kwargs must contain the default notification ids
+    even when it declares no explicit relay (CI-5 scope 1)."""
+    spec = {"name": "hram-frontend"}
+    kuma_sync._resolve_notification_ids(spec, {}, [1, 2])
+    assert spec["notification_ids"] == [1, 2]
+
+
+def test_resolve_notification_ids_unions_default_and_relay():
+    """With an explicit notification_name, kwargs contain BOTH the default
+    ids and the resolved relay id (CI-5 scope 1)."""
+    spec = {"name": "hram-frontend", "notification_name": "claude-relay-main-prod"}
+    notifications_by_name = {"claude-relay-main-prod": 5}
+    kuma_sync._resolve_notification_ids(spec, notifications_by_name, [1])
+    assert spec["notification_ids"] == [1, 5]
+    assert "notification_name" not in spec  # popped, not just read
+
+
+def test_resolve_notification_ids_unresolvable_relay_keeps_defaults(capsys):
+    """An unknown notification_name warns and does NOT silently produce an
+    empty assignment — the declared defaults still land."""
+    spec = {"name": "hram-frontend", "notification_name": "claude-relay-ghost"}
+    kuma_sync._resolve_notification_ids(spec, {}, [1], monitor_name="hram-frontend")
+    assert spec["notification_ids"] == [1]
+    err = capsys.readouterr().err
+    assert "hram-frontend" in err and "claude-relay-ghost" in err and "not found" in err
+
+
+def test_resolve_notification_ids_no_defaults_no_relay_sets_nothing():
+    """Neither defaults nor a relay declared: no notification_ids key at all
+    (not an empty list) — matches _build_monitor_kwargs' existing
+    `if "notification_ids" in spec` gate."""
+    spec = {"name": "hram-frontend"}
+    kuma_sync._resolve_notification_ids(spec, {}, [])
+    assert "notification_ids" not in spec
+
+
+def test_extra_entry_notification_name_flows_through_to_notification_id_list(tmp_path):
+    """A `monitoring.extra` entry can declare a `notification_name` and it
+    reaches `notificationIDList` (CI-5 scope 3) — no separate code path is
+    needed once resolution is generic; `monitors_from_project_yaml` already
+    passes arbitrary extra keys through."""
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text(
+        "project_name: infrastructure\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  extra:\n"
+        "    - name: main-prod-health-disk\n"
+        "      url: http://main-prod.example.ts.net/health/disk\n"
+        "      notification_name: claude-relay-main-prod\n",
+        encoding="utf-8",
+    )
+    specs = kuma_sync.monitors_from_project_yaml(project_yaml)
+    assert specs[0]["notification_name"] == "claude-relay-main-prod"
+
+    notifications_by_name = {"claude-relay-main-prod": 9}
+    kuma_sync._resolve_notification_ids(specs[0], notifications_by_name, [1])
+    kwargs = kuma_sync._build_monitor_kwargs(specs[0])
+    assert kwargs["notificationIDList"] == [1, 9]
+
+
+def test_existing_monitor_missing_declared_defaults_is_detected_as_changed():
+    """CI-5 scope 4: a monitor created before this fix has an empty
+    notificationIDList in Kuma. Once defaults are resolved into kwargs, that
+    monitor must be reported as changed so the sync repairs it — no separate
+    'repair' code path, this is the pre-existing CI-4 id-set comparison
+    doing its job once the field is actually populated."""
+    kwargs = base_kwargs(notificationIDList=[7])
+    existing = existing_from(kwargs, notificationIDList={})
+    assert kuma_sync._monitor_changed(kwargs, existing) is True
+
+
+class RecordingApi:
+    """Records every add_monitor call's kwargs; used to prove the `multi`
+    path resolves notification_name identically to the single path."""
+
+    def __init__(self, notifications):
+        self._notifications = notifications
+        self.added = []
+
+    def get_notifications(self):
+        return self._notifications
+
+    def get_monitors(self):
+        return []
+
+    def add_monitor(self, **kwargs):
+        self.added.append(kwargs)
+
+    def disconnect(self):
+        pass
+
+
+def test_multi_resolves_default_notifications_like_single_path(tmp_path, monkeypatch):
+    """The `multi` path never called get_notifications() at all before this
+    WO — every CI-created monitor had an empty notificationIDList. This
+    proves it now resolves the same declared default as sync_monitors()."""
+    notif_path = tmp_path / "notifications.yml"
+    notif_path.write_text(
+        "notifications:\n"
+        "  - name: discord-alerts\n"
+        "    type: discord\n"
+        "    default: true\n",
+        encoding="utf-8",
+    )
+    api = RecordingApi([{"name": "discord-alerts", "id": 7}])
+    monkeypatch.setattr(kuma_sync, "_login", lambda: api)
+    monkeypatch.setenv("KUMA_SYNC_BUDGET_SECONDS", "0")
+
+    app_path = _project_yaml(tmp_path, "app0")
+    kuma_sync.sync_monitors_multi([app_path], notifications_config_path=str(notif_path))
+
+    assert api.added, "add_monitor was never called"
+    for kwargs in api.added:
+        assert kwargs["notificationIDList"] == [7]
+
+
+def test_multi_resolves_extra_entry_relay_like_single_path(tmp_path, monkeypatch):
+    """The multi path resolves an explicit notification_name (declared on a
+    monitoring.extra entry) exactly like sync_monitors() does — union with
+    the declared default, not a replacement of it."""
+    notif_path = tmp_path / "notifications.yml"
+    notif_path.write_text(
+        "notifications:\n"
+        "  - name: discord-alerts\n"
+        "    type: discord\n"
+        "    default: true\n",
+        encoding="utf-8",
+    )
+    project_yaml = tmp_path / "app0" / "project.yaml"
+    project_yaml.parent.mkdir()
+    project_yaml.write_text(
+        "project_name: app0\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  extra:\n"
+        "    - name: app0-relay-monitor\n"
+        "      url: http://app0.example.ch/health\n"
+        "      notification_name: claude-relay-main-prod\n",
+        encoding="utf-8",
+    )
+    api = RecordingApi([
+        {"name": "discord-alerts", "id": 7},
+        {"name": "claude-relay-main-prod", "id": 9},
+    ])
+    monkeypatch.setattr(kuma_sync, "_login", lambda: api)
+    monkeypatch.setenv("KUMA_SYNC_BUDGET_SECONDS", "0")
+
+    kuma_sync.sync_monitors_multi(
+        [str(project_yaml)], notifications_config_path=str(notif_path)
+    )
+
+    assert len(api.added) == 1
+    assert api.added[0]["notificationIDList"] == [7, 9]

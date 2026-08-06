@@ -357,6 +357,56 @@ def _build_monitor_kwargs(spec):
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
+def _load_default_notification_names(config_path):
+    """Names of notifications declared `default: true` in notifications.yml.
+
+    Read from the FILE, not from Kuma's live isDefault — see CI-5 Risk 4: the
+    declared config must stay the source of truth even if someone flips a
+    toggle by hand in the Kuma UI.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        print(
+            f"⚠️  notifications config not found: {path} — no default "
+            "notifications will be attached",
+            file=sys.stderr,
+        )
+        return set()
+    with open(path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    return {n["name"] for n in data.get("notifications", []) if n.get("default")}
+
+
+def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_name=""):
+    """Mutate `spec` in place: set `spec['notification_ids']` to the union of the
+    declared defaults and (if present) the resolved `notification_name`.
+
+    Every monitor gets at least the defaults, and — as long as at least one
+    default resolved — an unresolvable explicit relay never silently
+    produces an EMPTY assignment on its own (CI-5 scope 1 + 2). If
+    `default_ids` is itself empty (e.g. notifications.yml missing/
+    misconfigured) AND the relay doesn't resolve either, no
+    `notification_ids` key is set at all — same as before this WO, and
+    already warned about separately by `_load_default_notification_names`.
+    """
+    relay_ids = []
+    if "notification_name" in spec:
+        notif_name = spec.pop("notification_name")
+        notif_id = notifications_by_name.get(notif_name)
+        if notif_id is not None:
+            relay_ids.append(notif_id)
+        else:
+            print(
+                f"⚠️  notification '{notif_name}' not found in Kuma "
+                f"(monitor: {monitor_name}) — skipping relay assignment",
+                file=sys.stderr,
+            )
+    combined = sorted(set(default_ids) | set(relay_ids))
+    if combined:
+        spec["notification_ids"] = combined
+    return spec
+
+
 def sync_notifications(api, config_path, prune=False):
     with open(config_path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -514,13 +564,16 @@ def monitors_from_project_yaml(project_yaml_path):
     return specs
 
 
-def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
+def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False,
+                   notifications_config_path=None):
     """Sync monitors. Source is either a monitor.yml or a project.yaml.
 
     If config_path is given and exists → use legacy monitor.yml format.
     Else if project_yaml_path is given → derive monitors from project.yaml.
     Else → error.
     """
+    if notifications_config_path is None:
+        notifications_config_path = "monitoring/notifications.yml"
     if config_path and Path(config_path).exists():
         with open(config_path, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
@@ -552,23 +605,25 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
         for n in session.call("get_notifications", "get_notifications")
     }
 
+    default_names = _load_default_notification_names(notifications_config_path)
+    default_ids = sorted(
+        notifications_by_name[n] for n in default_names if n in notifications_by_name
+    )
+    for n in default_names:
+        if n not in notifications_by_name:
+            print(
+                f"⚠️  default notification '{n}' not found in Kuma — has "
+                "the notifications sync run yet?",
+                file=sys.stderr,
+            )
+
     for raw_spec in specs:
         spec = _expand_env(raw_spec)
         name = spec["name"]
         declared_names.add(name)
 
         # Resolve notification_name → notification_ids before building kwargs.
-        if "notification_name" in spec:
-            notif_name = spec.pop("notification_name")
-            notif_id = notifications_by_name.get(notif_name)
-            if notif_id is not None:
-                spec["notification_ids"] = [notif_id]
-            else:
-                print(
-                    f"⚠️  notification '{notif_name}' not found in Kuma "
-                    f"(monitor: {name}) — skipping relay assignment",
-                    file=sys.stderr,
-                )
+        _resolve_notification_ids(spec, notifications_by_name, default_ids, name)
 
         kwargs = _build_monitor_kwargs(spec)
 
@@ -589,7 +644,7 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False):
                 print(f"🗑️  deleted stale monitor: {name}")
 
 
-def sync_monitors_multi(project_yaml_paths, prune=False):
+def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_path=None):
     """Sync monitors for multiple apps in ONE Kuma session (one login/disconnect).
 
     Processes each project.yaml sequentially.  Per-app errors are caught and
@@ -597,12 +652,55 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
     app failed — running it with an incomplete declared-name set would delete
     valid monitors belonging to the failed apps.
     """
+    if notifications_config_path is None:
+        notifications_config_path = "monitoring/notifications.yml"
+    default_names = _load_default_notification_names(notifications_config_path)
+
     session = Session(_login())
     all_declared_names = set()
     failed_apps = []
     budget_hit = None
 
     try:
+        # Build name→id map for notifications once so per-monitor relay/default
+        # assignment can resolve names without a separate API call per monitor.
+        # CI-5: this path never resolved notification_name at all before — the
+        # asymmetry with sync_monitors() that left every CI-created monitor
+        # with an empty notificationIDList.
+        #
+        # A BudgetExceeded here must propagate (same fast-abort contract as
+        # every other Kuma call in this run). Any other failure must NOT be
+        # fatal to the whole run — it degrades to "no default/relay
+        # resolution this pass" and lets each app's own get_monitors() call
+        # (below) surface and report the same underlying outage through the
+        # existing per-app failure path, rather than a raw traceback here.
+        try:
+            notifications_by_name = {
+                n["name"]: n["id"]
+                for n in session.call("get_notifications", "get_notifications")
+            }
+        except BudgetExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"❌ Failed to fetch notifications: {exc}", file=sys.stderr)
+            print(
+                "⚠️  Continuing without default/relay notification resolution "
+                "for this run.",
+                file=sys.stderr,
+            )
+            notifications_by_name = {}
+
+        default_ids = sorted(
+            notifications_by_name[n] for n in default_names if n in notifications_by_name
+        )
+        for n in default_names:
+            if n not in notifications_by_name:
+                print(
+                    f"⚠️  default notification '{n}' not found in Kuma — has "
+                    "the notifications sync run yet?",
+                    file=sys.stderr,
+                )
+
         for path_str in project_yaml_paths:
             path = Path(path_str)
             if not path.exists():
@@ -644,6 +742,11 @@ def sync_monitors_multi(project_yaml_paths, prune=False):
                 spec = _expand_env(raw_spec)
                 name = spec["name"]
                 all_declared_names.add(name)
+
+                # Resolve notification_name → notification_ids before building
+                # kwargs, same as sync_monitors() (CI-5 scope 2).
+                _resolve_notification_ids(spec, notifications_by_name, default_ids, name)
+
                 kwargs = _build_monitor_kwargs(spec)
 
                 # Fail fast rather than grinding through the remaining monitors
@@ -772,6 +875,14 @@ def main():
     )
     sm.add_argument("--prune", action="store_true",
                     help="Delete Kuma monitors absent from the config")
+    sm.add_argument(
+        "--notifications-config",
+        required=False,
+        default="monitoring/notifications.yml",
+        help="Path to notifications.yml, used to resolve which notifications are "
+             "default:true (CI-5) — Kuma does not auto-apply defaults to "
+             "monitors created via the API.",
+    )
 
     sm_multi = sub.add_parser(
         "multi",
@@ -788,11 +899,23 @@ def main():
         action="store_true",
         help="Delete Kuma monitors absent from all declared configs (combined set)",
     )
+    sm_multi.add_argument(
+        "--notifications-config",
+        required=False,
+        default="monitoring/notifications.yml",
+        help="Path to notifications.yml, used to resolve which notifications are "
+             "default:true (CI-5) — Kuma does not auto-apply defaults to "
+             "monitors created via the API.",
+    )
 
     args = parser.parse_args()
 
     if args.command == "multi":
-        sync_monitors_multi(args.project_yamls, prune=args.prune)
+        sync_monitors_multi(
+            args.project_yamls,
+            prune=args.prune,
+            notifications_config_path=args.notifications_config,
+        )
         return
 
     session = Session(_login())
@@ -809,6 +932,7 @@ def main():
                 config_path=args.config,
                 project_yaml_path=args.project_yaml,
                 prune=args.prune,
+                notifications_config_path=args.notifications_config,
             )
     except BudgetExceeded as exc:
         print(f"\n❌ Aborted: {exc}", file=sys.stderr)
