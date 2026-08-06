@@ -12,6 +12,33 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Fixed
+
+**`base` role: stop upgrading the transport the play runs over** (collection
+`0.5.1` → `0.5.2`). The role's "Apt update and upgrade" task upgraded the
+`tailscale` package; its postinst restarts `tailscaled`, which serves the
+Tailscale-SSH session Ansible connects through, so the play terminated its own
+connection (`UNREACHABLE! "Data could not be sent to remote host"`). Every
+first `ansible-provision` run against a host failed this way, and the retry only
+passed because the package was already current.
+
+New role variable `base_apt_hold_packages` (default `[tailscale]`): those
+packages are `dpkg`-held for the duration of the apt upgrade and released in an
+`always` block, so no failure path can leave a host frozen on an old daemon.
+Only installed packages are held, so a fresh host is a clean no-op. Their
+upgrade path is unchanged and unaffected — the weekly `maintenance` workflow
+runs apt detached with reconnect-tolerant polling, and the CI runner has its own
+local os-maintenance timer; neither goes through Ansible.
+
+`always` cannot run if the Ansible controller itself dies (CI cancellation,
+runner crash), which would leave a real hold behind — and both upgrade paths
+above respect dpkg holds silently. A host-side `systemd-run` timer
+(`base_apt_hold_safety_net`, default `60min`) releases the holds independently
+of the controller, bounding that window instead of leaving the host frozen
+until the next operator-gated provision.
+
+Root cause and evidence: `webapp-management/work-orders/INF-5.md`.
+
 ### Removed (BREAKING)
 
 Deleted the three deprecated root-SSH provisioning composite actions, fully

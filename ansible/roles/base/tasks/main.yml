@@ -2,11 +2,85 @@
 - name: Base server bootstrap (requires root)
   become: true
   block:
-    - name: Apt update and upgrade
-      ansible.builtin.apt:
-        update_cache: true
-        upgrade: "{{ base_apt_upgrade }}"
-        cache_valid_time: "{{ base_apt_cache_valid_time }}"
+    # INF-5: some packages must NOT be upgraded by this play, because their
+    # postinst restarts a daemon the play itself is running over. `tailscale`
+    # is the proven case: CI connects via Tailscale SSH (the session is served
+    # by tailscaled, not sshd), so an apt upgrade of that package TERMINATES
+    # Ansible's own connection mid-play — root-caused to the second on staging
+    # 2026-08-05, see webapp-management/work-orders/INF-5.md.
+    #
+    # The hold is TRANSIENT by construction: it is set immediately before the
+    # upgrade and released in `always`, so an apt failure or a mid-play error
+    # cannot leave a host frozen on an old daemon.
+    #
+    # `always` does not run if the CONTROLLER dies (workflow cancellation, GH
+    # runner crash, network partition) — Ansible is no longer there to execute
+    # it. That would leave a real hold behind, and both upgrade paths below
+    # silently respect dpkg holds, so the host would stop getting tailscale
+    # updates with nothing surfacing it until someone re-dispatched the
+    # operator-gated provision. A safety-net timer armed ON THE HOST closes
+    # that window: it survives the controller, so the worst case is bounded at
+    # one hour instead of "until an operator notices".
+    #
+    # These packages are still upgraded, just somewhere that tolerates losing
+    # the session: the weekly `maintenance` workflow runs apt detached
+    # (setsid nohup + marker-file polling with reconnect tolerance, see
+    # .github/actions/maintenance/action.yml), and the CI runner has its own
+    # local `runner-os-maintenance.timer`. Neither path goes through Ansible,
+    # so neither is affected by this hold.
+    - name: Apt update and upgrade, excluding transport-critical packages
+      block:
+        # dpkg_selections on a package that is not installed would report a
+        # spurious change (a fresh host has no tailscale yet — the tailscale
+        # role runs later in the play), so hold only what is actually present.
+        - name: Gather apt package facts (to hold only installed packages)
+          ansible.builtin.package_facts:
+            manager: apt
+          when: base_apt_hold_packages | default([]) | length > 0
+
+        - name: Determine the effective hold set
+          ansible.builtin.set_fact:
+            base_apt_hold_effective: >-
+              {{ base_apt_hold_packages | default([])
+                 | select('in', ansible_facts.packages | default({})) | list }}
+
+        - name: Hold packages excluded from this play's apt upgrade
+          ansible.builtin.dpkg_selections:
+            name: "{{ item }}"
+            selection: hold
+          loop: "{{ base_apt_hold_effective }}"
+
+        # Deliberately anonymous (no --unit): systemd generates a unique
+        # run-<id>.timer, so back-to-back provisions can never collide on a
+        # unit name. Nothing disarms it either — when the play completes
+        # normally the hold is already released, and the timer firing an hour
+        # later just unholds an unheld package, which is a no-op. Transient
+        # units clean themselves up after they run.
+        # changed_when: false — this reports host state that the play restores
+        # itself; counting it as a change would make every provision run look
+        # dirty.
+        - name: Arm a host-side safety net that releases the hold even if the controller dies
+          ansible.builtin.command:
+            cmd: >-
+              systemd-run --on-active={{ base_apt_hold_safety_net }}
+              /usr/bin/apt-mark unhold {{ item }}
+          loop: "{{ base_apt_hold_effective }}"
+          changed_when: false
+
+        - name: Apt update and upgrade
+          ansible.builtin.apt:
+            update_cache: true
+            upgrade: "{{ base_apt_upgrade }}"
+            cache_valid_time: "{{ base_apt_cache_valid_time }}"
+      always:
+        # Unconditional: this role OWNS the hold state of these packages. A
+        # hold set manually by an operator on one of them would be released
+        # here — deliberate, the fleet is infrastructure-as-code.
+        - name: Release the transient package holds
+          ansible.builtin.dpkg_selections:
+            name: "{{ item }}"
+            selection: install
+          loop: "{{ base_apt_hold_effective | default([]) }}"
 
     - name: Install common base packages
       ansible.builtin.apt:

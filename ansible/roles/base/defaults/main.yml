@@ -2,6 +2,27 @@
 base_apt_upgrade: dist
 base_apt_cache_valid_time: 3600
 
+# INF-5 — packages held for the duration of the apt upgrade above (and only
+# for that duration; see tasks/main.yml). Upgrading `tailscale` restarts
+# tailscaled, which serves the Tailscale-SSH session Ansible itself connects
+# through, so the play would kill its own transport. Their upgrade path is the
+# weekly `maintenance` workflow / the runner's local os-maintenance timer,
+# both of which run apt detached and tolerate losing the session.
+# Empty list = no holds, a clean no-op.
+# Candidate for a future addition (Risk 2, deliberately NOT added here):
+# `docker-ce` restarts the Docker daemon and interrupts running containers.
+base_apt_hold_packages:
+  - tailscale
+
+# Upper bound on how long a hold can outlive the play that set it. The role
+# releases its holds in an `always` block, but `always` cannot run if the
+# Ansible CONTROLLER dies mid-play (CI cancellation, runner crash). A
+# host-side `systemd-run --on-active=<this>` timer releases them regardless,
+# so a lost controller costs at most this much delay on a package upgrade
+# rather than freezing the host until the next operator-gated provision.
+# Must comfortably exceed the play's own runtime (~5 min today).
+base_apt_hold_safety_net: 60min
+
 base_packages:
   - curl
   - git
