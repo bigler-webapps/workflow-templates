@@ -141,5 +141,156 @@ exactly the one INF-3's Risk 2 asks to be checked anyway.
 
 ## B. Implementation map
 
-*(To be filled by the Orchestrator on `git pull` — context package, target working directory,
-progress contract, execution directive, mini-handover. Not authored by the Expertenchat.)*
+### Execution directive
+
+> **If you are the implementer reading this work order as your own specification: this section is
+> NOT addressed to you.** It tells the Orchestrator how to invoke you. **You ARE that invocation —
+> do NOT shell out to `codex exec`.**
+>
+> Implement through `codex exec` in the background — invoked directly via Bash (never the
+> `debugger`/`*_coder` Agent wrappers) with BOTH flags `--skip-git-repo-check` and
+> `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from this
+> file. Fallback to direct Claude implementation only on Codex quota / rate-limit / non-zero exit.
+
+### Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\workflow-templates`
+
+### The Envelope's prime suspect is ruled out for the failing path — read this first
+
+Part A names `notificationIDList` as the prime suspect, flagged "reasoned from the code, **not
+proven**". Reading the landed code rules it out **for the path that actually failed**, and Part A's
+scope item 0 explicitly anticipates this ("if the differing key turns out to be something else, fix
+that instead and say so"). This is that correction; it is not a scope change.
+
+`kuma-sync` runs the **`multi`** subcommand (one session, all ~57 monitors — that is the run in the
+evidence). The two paths differ:
+
+| | `sync_monitors` (single app) | `sync_monitors_multi` (what runs in CI) |
+|---|---|---|
+| resolves `notification_name` → `notification_ids` | **yes**, `kuma_sync.py:405-416` | **no** |
+| so `notificationIDList` reaches `kwargs` | yes | **never** |
+
+`_build_monitor_kwargs:202-203` only maps `notification_ids` → `notificationIDList`; a spec carrying
+`notification_name` is silently dropped. `sync_monitors_multi:480-484` goes straight from
+`_expand_env` to `_build_monitor_kwargs` with no resolution step. And `_monitor_changed:145` iterates
+**`kwargs.items()`** only — a key that is never sent can never be compared, so it cannot be the
+permanent diff in these runs.
+
+**Therefore: do not start by normalising `notificationIDList`.** Scope item 0 is now load-bearing,
+not a formality — instrument first, then fix what the log names.
+
+**Ranked candidates for what the log will actually show.** Every monitor in the failing run sends
+exactly these keys (`_build_monitor_kwargs:173-185`, from the `base` dict at `kuma_sync.py:296-302`
+which sets only type/interval/max_retries/retry_interval): `name`, `type`, `url`, `interval`,
+`maxretries`, `retryInterval`. The optional keys (`accepted_statuscodes`, `hostname`, `port`,
+`keyword`, `method`, `body`, `headers`) appear only when declared in `monitoring.defaults`/`extra`,
+so they cannot explain a diff on *every* monitor.
+
+1. **`type`** — the strongest remaining candidate. We send the string `"http"`. If
+   `api.get_monitors()` echoes it as a `MonitorType` enum member, `_monitor_changed`'s else-branch
+   computes `str(current)`, which for an `(str, Enum)` mixin yields `"MonitorType.HTTP"`, not
+   `"http"` → mismatch on every monitor, every run. That is exactly the observed signature (0
+   `unchanged`, ever, in both runs). The comment at `kuma_sync.py:160` claims `str()` "normalises
+   enum types" — if this is the cause, that comment is precisely the wrong assumption. **Unverified**:
+   `uptime-kuma-api-v2` is not installed on the maintainer machine and may well return a plain
+   string, in which case this is wrong too. Prove it, do not assume it.
+2. **`url`** — server-side normalisation (a trailing slash) would also hit every monitor.
+3. `interval` / `maxretries` / `retryInterval` — unlikely; these go through the int-coercion branch
+   (`_monitor_changed:147-153`), which is robust.
+
+If the log shows something else again, fix that and record it — the instrumentation is the point.
+
+### The `_retry_call` trap (scope item 2)
+
+Part A says to mirror `_login`'s `api.disconnect()`. **That alone does not work**, and the reason is
+structural:
+
+```python
+# kuma_sync.py:122-140
+def _retry_call(label, fn, *args, **kwargs):
+    for attempt in range(1, 6):
+        try:
+            return fn(*args, **kwargs)
+```
+
+`fn` arrives as an **already-bound method of the old api object** — `api.edit_monitor`,
+`api.get_monitors`, `api.add_monitor`, `api.delete_monitor` (call sites: `473`, `490`, `500`, `516`,
+`547`, `551`, and `390`, `397`, `422`, `427`, `433` in the single-app path). Reconnecting inside
+`_retry_call` produces a *new* api object, but `fn` still points at the dead one, so every retry
+still fails — and the local rebind cannot propagate to the caller, which holds its own `api`.
+
+So the seam is the **call convention**, not the retry body: `_retry_call` needs a way to re-resolve
+the callable against a fresh connection (e.g. take the method *name* plus a holder/accessor for the
+current api, or a `reconnect` callable it can invoke and then re-bind through). Pick one and apply
+it consistently at every call site.
+
+**Do not add a third retry layer.** There are already two, and they overlap:
+- `_retry_call` (5 attempts, linear backoff, ~50 s) — the inner one;
+- the `recovery_attempt` loop at `sync_monitors_multi:486-528`, which already detects
+  `"not logged in"`/`"timeout"`, disconnects, re-logins, **and re-fetches `existing`** — the outer one.
+
+Whatever you change, that outer loop's re-fetch of `existing` must stay correct (monitor ids come
+from it). Preserve `_login`'s credential fast-path (`kuma_sync.py:108-109`) — Part A Risk 4.
+
+### Scope item 3 — the budget
+
+Bound the whole run in `sync_monitors_multi` (437-562). Pick the ceiling against the observed healthy
+duration, not a round number (Part A Risk 3): the passing run in the evidence did 57 monitors and the
+failing one burned 24 minutes. Note that a healthy run **after** the item-1 fix should be far faster
+than either, since it will issue almost no writes — so do not calibrate against today's numbers
+alone; say what you calibrated against. The budget must produce a clear message and a non-zero exit,
+and it must NOT bypass the prune-skip safety at `533-540` (explicit non-goal).
+
+### Testing — the import guard blocks `import kuma_sync`
+
+`scripts/kuma_sync.py:48-60` does `from uptime_kuma_api import UptimeKumaApi` at module level and
+**`sys.exit(1)`** on ImportError. `uptime_kuma_api` is NOT installed on the maintainer machine
+(verified), so a test that simply imports the module kills the test process.
+
+Default approach: inject a stub into `sys.modules["uptime_kuma_api"]` in a `conftest.py` **before**
+importing `kuma_sync`, so no production code changes for testability. (Alternative: make the guard
+lazy by moving the exit into `_login`. Cleaner production hygiene but a behaviour change to the
+import path — if you take it, say so.)
+
+There is no pytest infrastructure for `scripts/` yet. The repo's only precedent is
+`ansible/roles/base/tests/` (added by INF-5). Put the new suite somewhere consistent, e.g.
+`scripts/tests/`.
+
+### Context package — named seams
+
+- `_monitor_changed` `scripts/kuma_sync.py:143-168` — scope 0 (log the differing key **and both
+  values**) and scope 1 (normalise).
+- `_retry_call` `scripts/kuma_sync.py:122-140` — scope 2, per the trap above.
+- `_login` `scripts/kuma_sync.py:74-119` — the reconnect pattern to mirror; keep the credential
+  fast-path.
+- `_build_monitor_kwargs` `scripts/kuma_sync.py:171-204` — what is actually sent.
+- `sync_monitors_multi` `scripts/kuma_sync.py:437-562` — the CI path; budget goes here; prune safety
+  at `533-540` is a non-goal.
+- `sync_monitors` `scripts/kuma_sync.py:364-435` — the single-app path; the only place
+  `notification_name` is resolved.
+- `monitors_from_project_yaml` `scripts/kuma_sync.py:248-361` — where specs (and `notification_name`
+  at `322`) come from.
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify.
+
+### Out of scope — surfaced, not fixed here
+
+While mapping: because `sync_monitors_multi` never resolves `notification_name`, monitors synced by
+the CI path appear to get **no relay notification assigned at all**. If so, that is a separate and
+arguably more serious defect than the one this WO fixes (a monitor that goes down with no
+notification attached alerts nobody), and it is NOT in this Envelope's scope. Do not fix it here —
+it needs its own WO and an operator decision. Flag it, do not touch it.
+
+### Progress contract
+
+Emit a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+`PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+`RESULT: DONE|BLOCKED <reason>`.
+
+### Mini-handover
+
+> Orchestrator: implement `work-orders/CI-4.md` in `workflow-templates` (`main`). Read Part B's
+> "prime suspect is ruled out" and "`_retry_call` trap" sections before planning — the Envelope's
+> stated suspect cannot be the cause on the CI path. `git pull`, follow `orchestrate-codex`.
