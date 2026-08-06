@@ -12,6 +12,22 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Added
+
+**`sync-kuma-notifications`: SMTP inputs** (INF-8). Seven new optional inputs
+(`smtp_host`, `smtp_port`, `smtp_secure`, `smtp_username`, `smtp_password`,
+`smtp_from`, `smtp_to`), each exposed to `kuma_sync.py notifications` as the
+matching `SMTP_*` environment variable — same contract as the existing
+`discord_webhook_url` → `${DISCORD_WEBHOOK_URL}` mapping. All optional with an
+empty default, so an existing caller that never sets them sees no behaviour
+change. Lets a consumer's `notifications.yml` declare an `smtp`-type
+notification without embedding credentials in the file.
+
+Background: `notifications.yml`'s only `default: true` channel was Discord,
+which the operator does not read — the estate's alerting looked complete while
+routing into a void. This is the plumbing for repointing that default to email;
+the consumer-side wiring (webapp-management) is a separate change.
+
 ### Fixed
 
 **`kuma_sync.py`: stop rewriting every monitor on every run** (CI-4). The client

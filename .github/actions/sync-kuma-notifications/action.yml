@@ -24,6 +24,34 @@ inputs:
     description: 'Discord webhook URL — exposed to the script via ${DISCORD_WEBHOOK_URL} so the config can reference it.'
     required: false
     default: ''
+  smtp_host:
+    description: 'SMTP host — exposed to the script via ${SMTP_HOST}.'
+    required: false
+    default: ''
+  smtp_port:
+    description: 'SMTP port — exposed to the script via ${SMTP_PORT}.'
+    required: false
+    default: ''
+  smtp_secure:
+    description: 'SMTP security mode, as Kuma stores it — exposed to the script via ${SMTP_SECURE}.'
+    required: false
+    default: ''
+  smtp_username:
+    description: 'SMTP username — exposed to the script via ${SMTP_USERNAME}.'
+    required: false
+    default: ''
+  smtp_password:
+    description: 'SMTP password — exposed to the script via ${SMTP_PASSWORD}.'
+    required: false
+    default: ''
+  smtp_from:
+    description: 'SMTP From address — exposed to the script via ${SMTP_FROM}.'
+    required: false
+    default: ''
+  smtp_to:
+    description: 'SMTP To address (alert recipient) — exposed to the script via ${SMTP_TO}.'
+    required: false
+    default: ''
   prune:
     description: 'Set "true" to delete Kuma notifications not present in the config file.'
     required: false
@@ -98,6 +126,13 @@ runs:
         KUMA_AUTOMATION_USER: ${{ inputs.kuma_user }}
         KUMA_AUTOMATION_PASSWORD: ${{ inputs.kuma_password }}
         DISCORD_WEBHOOK_URL: ${{ inputs.discord_webhook_url }}
+        SMTP_HOST: ${{ inputs.smtp_host }}
+        SMTP_PORT: ${{ inputs.smtp_port }}
+        SMTP_SECURE: ${{ inputs.smtp_secure }}
+        SMTP_USERNAME: ${{ inputs.smtp_username }}
+        SMTP_PASSWORD: ${{ inputs.smtp_password }}
+        SMTP_FROM: ${{ inputs.smtp_from }}
+        SMTP_TO: ${{ inputs.smtp_to }}
         # S20-pattern: route caller-supplied inputs through env vars instead of
         # ${{ ... }} interpolation inside the shell body, so values containing
         # shell metacharacters (`; rm -rf /`) cannot escape the variable.
