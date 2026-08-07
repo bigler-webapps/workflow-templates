@@ -61,6 +61,47 @@ except ImportError:
     sys.exit(1)
 
 
+# Notification-config fields Kuma validates as typed (not string), keyed by
+# the coercion to apply. Every value routed through ${...} arrives as a
+# string (composite-action inputs are always strings) — Kuma then blows up
+# comparing a str to an int/bool (CI-6 item 2). Driven from this explicit
+# list, not "looks like a number", so a field Kuma genuinely expects as a
+# string (a numeric hostname, a digit token) is never coerced.
+_TYPED_CONFIG_FIELDS = {
+    "smtpPort": int,
+    "smtpSecure": bool,
+}
+
+
+def _coerce_typed_value(caster, value):
+    if not isinstance(value, str):
+        return value
+    if caster is bool:
+        lowered = value.strip().lower()
+        if lowered in ("true", "false"):
+            return lowered == "true"
+        return value
+    try:
+        return caster(value)
+    except ValueError:
+        return value
+
+
+def _coerce_typed_config(cfg):
+    """Coerce known numeric/boolean fields in a notification `config` dict.
+
+    Applied AFTER env expansion, so a declared `"${SMTP_PORT}"` becomes an
+    int and a declared `"true"` becomes a bool. Fields not in
+    `_TYPED_CONFIG_FIELDS` pass through untouched.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    return {
+        k: _coerce_typed_value(_TYPED_CONFIG_FIELDS[k], v) if k in _TYPED_CONFIG_FIELDS else v
+        for k, v in cfg.items()
+    }
+
+
 def _expand_env(value):
     """Recursively expand env-var references like ${FOO} in strings."""
     if isinstance(value, str):
@@ -381,26 +422,35 @@ def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_
     """Mutate `spec` in place: set `spec['notification_ids']` to the union of the
     declared defaults and (if present) the resolved `notification_name`.
 
+    `notification_name` accepts either a single string (unchanged behaviour)
+    or a list of strings (CI-6 item 1) — e.g. `alert-email` alongside an
+    already-declared `claude-relay-<server>` on the same monitor, which the
+    single-string field could not express. Every entry resolves
+    independently; one unresolvable name warns and is skipped, the rest
+    still apply.
+
     Every monitor gets at least the defaults, and — as long as at least one
-    default resolved — an unresolvable explicit relay never silently
-    produces an EMPTY assignment on its own (CI-5 scope 1 + 2). If
+    default or named entry resolved — an unresolvable explicit name never
+    silently produces an EMPTY assignment on its own (CI-5 scope 1 + 2). If
     `default_ids` is itself empty (e.g. notifications.yml missing/
-    misconfigured) AND the relay doesn't resolve either, no
+    misconfigured) AND none of the names resolve either, no
     `notification_ids` key is set at all — same as before this WO, and
     already warned about separately by `_load_default_notification_names`.
     """
     relay_ids = []
     if "notification_name" in spec:
-        notif_name = spec.pop("notification_name")
-        notif_id = notifications_by_name.get(notif_name)
-        if notif_id is not None:
-            relay_ids.append(notif_id)
-        else:
-            print(
-                f"⚠️  notification '{notif_name}' not found in Kuma "
-                f"(monitor: {monitor_name}) — skipping relay assignment",
-                file=sys.stderr,
-            )
+        raw = spec.pop("notification_name")
+        names = raw if isinstance(raw, list) else [raw]
+        for notif_name in names:
+            notif_id = notifications_by_name.get(notif_name)
+            if notif_id is not None:
+                relay_ids.append(notif_id)
+            else:
+                print(
+                    f"⚠️  notification '{notif_name}' not found in Kuma "
+                    f"(monitor: {monitor_name}) — skipping relay assignment",
+                    file=sys.stderr,
+                )
     combined = sorted(set(default_ids) | set(relay_ids))
     if combined:
         spec["notification_ids"] = combined
@@ -424,7 +474,7 @@ def sync_notifications(api, config_path, prune=False):
         declared_names.add(name)
         ntype = spec["type"]
         is_default = bool(spec.get("default", False))
-        cfg = spec.get("config", {}) or {}
+        cfg = _coerce_typed_config(spec.get("config", {}) or {})
 
         kwargs = {
             "name": name,

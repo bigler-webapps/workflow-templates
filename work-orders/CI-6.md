@@ -97,4 +97,123 @@ the TypeError, which is what proves item 2 rather than the literal workaround.
 
 ## B. Implementation map
 
-*(To be filled by the Orchestrator on `git pull`. Not authored by the Expertenchat.)*
+### Execution directive
+
+> **If you are the implementer reading this work order as your own specification: this section is
+> NOT addressed to you.** It tells the Orchestrator how to invoke you. **You ARE that invocation —
+> do NOT shell out to `codex exec`.**
+>
+> Implement through `codex exec` in the background — invoked directly via Bash (never the
+> `debugger`/`*_coder` Agent wrappers) with BOTH flags `--skip-git-repo-check` and
+> `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from a file.
+> (Fallback to direct Claude implementation only on Codex quota/rate-limit/non-zero exit.)
+
+### Target repo
+
+`C:\Users\biglmi\Documents\webapps\workflow-templates` (git root — run `codex exec` with this as
+cwd; the file to change is `scripts/kuma_sync.py`, tests are `scripts/tests/test_kuma_sync.py`,
+run with plain `pytest scripts/tests/test_kuma_sync.py`).
+
+### Context package
+
+**Item 1 — `_resolve_notification_ids`** (`scripts/kuma_sync.py:380-407`):
+
+```python
+def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_name=""):
+    relay_ids = []
+    if "notification_name" in spec:
+        notif_name = spec.pop("notification_name")
+        notif_id = notifications_by_name.get(notif_name)
+        if notif_id is not None:
+            relay_ids.append(notif_id)
+        else:
+            print(f"⚠️  notification '{notif_name}' not found in Kuma "
+                  f"(monitor: {monitor_name}) — skipping relay assignment", file=sys.stderr)
+    combined = sorted(set(default_ids) | set(relay_ids))
+    if combined:
+        spec["notification_ids"] = combined
+    return spec
+```
+
+`notification_name` is popped as a single string today. `project.yaml`'s auto-derivation
+(`monitors_from_project_yaml`, line ~525) sets it via `prod_relay = {"notification_name":
+f"claude-relay-{prod_server}"}`, and `monitoring/notifications.yml`/monitor.yml specs may also set
+it directly — both call sites must keep working with a bare string. Extend to also accept a list
+(e.g. `notification_names: [...]` or the same key holding a list — your call, but state the chosen
+shape in the commit) and resolve every entry, unioning with `default_ids` exactly as today. One
+unresolvable name in a list must warn (same message shape) and skip only that entry — not abort the
+whole assignment. Preserve the CI-5 property this docstring already states: an unresolvable name
+alone (all defaults empty + the name doesn't resolve) still must not silently succeed with an empty
+`notification_ids` when at least one part of the union is non-empty — i.e. only set the key when
+`combined` is non-empty, same as today.
+
+**Item 2 — `_expand_env`** (`scripts/kuma_sync.py:64-72`):
+
+```python
+def _expand_env(value):
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
+```
+
+Called from `sync_notifications` (line ~422, `spec = _expand_env(raw_spec)`) on the whole
+notification spec dict, including its nested `config` dict. Add coercion for a known-typed field
+list — at minimum `smtpPort` (int) and `smtpSecure` (bool) since those are the two that already hit
+this bug (see `monitoring/notifications.yml` `alert-email` config in `webapp-management`, which
+currently declares them as literals to route around it). Coerce only fields on the explicit list,
+after string expansion, and only within the notification `config` dict (or wherever the typed
+fields live per your read of the call sites) — do not coerce arbitrary strings that merely look
+numeric. `"true"`/`"false"` (case-insensitive) → bool; a numeric string → int. Leave every other
+field untouched.
+
+### Invariants / do-not-touch
+
+- `_load_default_notification_names` (defaults from the file, not live Kuma state) — untouched.
+- Prune safety, retry/reconnect (`Session`, `_retry_call`), run `Budget` — untouched.
+- The singular `notification_name` string form must resolve byte-identical to today for every
+  existing caller (`monitors_from_project_yaml`'s `prod_relay` in particular).
+
+### Tests
+
+Existing suite: `scripts/tests/test_kuma_sync.py` (47 tests, run via plain `pytest
+scripts/tests/test_kuma_sync.py` — no special fixtures beyond its own `conftest.py`). Add new
+tests per the WO's "Tests to WRITE" section near the existing
+`test_resolve_notification_ids_*` tests (line ~479) and add `_expand_env` coercion tests near
+there too. Run only this file — it is the affected-areas set for a script with no other consumers
+in this repo.
+
+### Progress contract
+
+Emit `PLAN: <one line>` before starting, then `PROGRESS: [n/total] <action>` before each of the two
+items and `... done` on completion, then a final `RESULT: DONE` or `RESULT: BLOCKED <reason>`. No
+gap over ~2 minutes without an update.
+
+### Invocation command (for the Orchestrator)
+
+```
+cd "C:\Users\biglmi\Documents\webapps\workflow-templates" && codex exec --skip-git-repo-check \
+  --dangerously-bypass-approvals-and-sandbox "$(cat work-orders/CI-6.md)" > .tmp_codex_logs/ci-6.log 2>&1
+```
+
+### Preamble (appended verbatim per orchestrate-codex)
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/
+> schema/CI unless the spec says so; do not update `MEMORY.md`. Do NOT `git add`/`commit`/`push` —
+> leave every change uncommitted in the working tree for the orchestrator's independent review.
+> WRITE the tests the "Tests" section calls for AND **RUN the tests you just wrote** to confirm they
+> execute and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any
+> review). The orchestrator re-runs the authoritative set + does the independent review after you
+> finish — those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
+Mini-handover: repo `workflow-templates`, WO `work-orders/CI-6.md`, follow `orchestrate-codex`.

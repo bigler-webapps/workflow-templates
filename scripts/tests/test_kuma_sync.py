@@ -513,6 +513,55 @@ def test_resolve_notification_ids_no_defaults_no_relay_sets_nothing():
     assert "notification_ids" not in spec
 
 
+def test_resolve_notification_ids_list_resolves_all_entries_and_unions_defaults():
+    """CI-6 item 1: a list of names resolves every entry, unioned with the
+    declared defaults — the shape INF-9 needs (alert-email alongside an
+    already-declared claude-relay-<server> on the same monitor)."""
+    spec = {"name": "cockpit-frontend", "notification_name": ["claude-relay-main-prod", "alert-email"]}
+    notifications_by_name = {"claude-relay-main-prod": 5, "alert-email": 7}
+    kuma_sync._resolve_notification_ids(spec, notifications_by_name, [1])
+    assert spec["notification_ids"] == [1, 5, 7]
+    assert "notification_name" not in spec
+
+
+def test_resolve_notification_ids_string_form_still_works_unchanged():
+    """The singular string form must resolve byte-identical to before — the
+    contract every existing caller (prod_relay in particular) relies on."""
+    spec = {"name": "hram-frontend", "notification_name": "claude-relay-main-prod"}
+    notifications_by_name = {"claude-relay-main-prod": 5}
+    kuma_sync._resolve_notification_ids(spec, notifications_by_name, [1])
+    assert spec["notification_ids"] == [1, 5]
+
+
+def test_resolve_notification_ids_list_with_one_unknown_name_warns_and_keeps_rest(capsys):
+    """A mixed list with one unresolvable name warns and skips only that
+    entry — the others, and the defaults, still apply."""
+    spec = {"name": "cockpit-frontend", "notification_name": ["claude-relay-main-prod", "ghost-channel"]}
+    notifications_by_name = {"claude-relay-main-prod": 5}
+    kuma_sync._resolve_notification_ids(spec, notifications_by_name, [1], monitor_name="cockpit-frontend")
+    assert spec["notification_ids"] == [1, 5]
+    err = capsys.readouterr().err
+    assert "cockpit-frontend" in err and "ghost-channel" in err and "not found" in err
+
+
+def test_resolve_notification_ids_list_with_no_defaults_still_non_empty():
+    """A monitor with a list and no defaults still gets a non-empty
+    assignment (CI-5 property extended to the list form)."""
+    spec = {"name": "cockpit-healthz", "notification_name": ["alert-email"]}
+    notifications_by_name = {"alert-email": 7}
+    kuma_sync._resolve_notification_ids(spec, notifications_by_name, [])
+    assert spec["notification_ids"] == [7]
+
+
+def test_resolve_notification_ids_list_all_unresolvable_and_no_defaults_sets_nothing(capsys):
+    """CI-5 property survives for the list form: if nothing resolves and
+    there are no defaults, no notification_ids key is set at all — never an
+    empty list masquerading as a real assignment."""
+    spec = {"name": "hram-frontend", "notification_name": ["ghost-one", "ghost-two"]}
+    kuma_sync._resolve_notification_ids(spec, {}, [], monitor_name="hram-frontend")
+    assert "notification_ids" not in spec
+
+
 def test_extra_entry_notification_name_flows_through_to_notification_id_list(tmp_path):
     """A `monitoring.extra` entry can declare a `notification_name` and it
     reaches `notificationIDList` (CI-5 scope 3) — no separate code path is
@@ -631,3 +680,64 @@ def test_multi_resolves_extra_entry_relay_like_single_path(tmp_path, monkeypatch
 
     assert len(api.added) == 1
     assert api.added[0]["notificationIDList"] == [7, 9]
+
+
+# --- CI-6 item 2: typed notification-config coercion after env expansion --
+
+def test_smtp_port_string_is_coerced_to_int():
+    assert kuma_sync._coerce_typed_config({"smtpPort": "587"}) == {"smtpPort": 587}
+
+
+def test_smtp_secure_string_is_coerced_to_bool():
+    assert kuma_sync._coerce_typed_config({"smtpSecure": "true"}) == {"smtpSecure": True}
+    assert kuma_sync._coerce_typed_config({"smtpSecure": "false"}) == {"smtpSecure": False}
+
+
+def test_unlisted_string_field_is_untouched():
+    """A field not on the known-typed list stays a string even if it looks
+    numeric — coercion is driven by an explicit list, not "looks like a
+    number" (CI-6 Risk 2)."""
+    cfg = kuma_sync._coerce_typed_config({"discordWebhookUrl": "12345", "smtpHost": "smtp.resend.com"})
+    assert cfg == {"discordWebhookUrl": "12345", "smtpHost": "smtp.resend.com"}
+
+
+def test_already_typed_values_pass_through():
+    """A literal (already int/bool, not routed through ${...}) is left as-is
+    — only strings get coerced."""
+    assert kuma_sync._coerce_typed_config({"smtpPort": 2465, "smtpSecure": True}) == {
+        "smtpPort": 2465,
+        "smtpSecure": True,
+    }
+
+
+def test_sync_notifications_coerces_env_expanded_smtp_port(monkeypatch, tmp_path):
+    """End-to-end: a config that routes smtpPort through ${...} syncs without
+    the TypeError this WO fixes — proving item 2 rather than the literal
+    workaround it replaces."""
+    monkeypatch.setenv("SMTP_PORT", "2465")
+    monkeypatch.setenv("SMTP_SECURE", "true")
+    config_path = tmp_path / "notifications.yml"
+    config_path.write_text(
+        "notifications:\n"
+        "  - name: alert-email\n"
+        "    type: smtp\n"
+        "    default: false\n"
+        "    config:\n"
+        "      smtpPort: \"${SMTP_PORT}\"\n"
+        "      smtpSecure: \"${SMTP_SECURE}\"\n",
+        encoding="utf-8",
+    )
+
+    class RecordingNotificationApi:
+        def get_notifications(self):
+            return []
+
+        def add_notification(self, **kwargs):
+            self.added = kwargs
+
+    api = RecordingNotificationApi()
+    kuma_sync.sync_notifications(api, config_path)
+
+    assert api.added["smtpPort"] == 2465
+    assert api.added["smtpPort"].__class__ is int
+    assert api.added["smtpSecure"] is True
