@@ -418,7 +418,8 @@ def _load_default_notification_names(config_path):
     return {n["name"] for n in data.get("notifications", []) if n.get("default")}
 
 
-def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_name=""):
+def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_name="",
+                               notifications_resolved=True):
     """Mutate `spec` in place: set `spec['notification_ids']` to the union of the
     declared defaults and (if present) the resolved `notification_name`.
 
@@ -429,16 +430,35 @@ def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_
     independently; one unresolvable name warns and is skipped, the rest
     still apply.
 
-    Every monitor gets at least the defaults, and — as long as at least one
-    default or named entry resolved — an unresolvable explicit name never
-    silently produces an EMPTY assignment on its own (CI-5 scope 1 + 2). If
-    `default_ids` is itself empty (e.g. notifications.yml missing/
-    misconfigured) AND none of the names resolve either, no
-    `notification_ids` key is set at all — same as before this WO, and
-    already warned about separately by `_load_default_notification_names`.
+    CI-8: the declared config is the EXACT source of truth for a monitor's
+    notifications, including an explicit "none" — `notification_ids` is now
+    set even when it resolves to an empty list, so a monitor with nothing
+    declared (no defaults, no `notification_name`) has any stale Kuma-side
+    attachment (e.g. from a channel that used to be `default: true`) cleared
+    on the next sync, instead of silently surviving forever (INF-9: turning
+    off `alert-email`'s default must actually detach it from the monitors
+    that only ever had it via that default).
+
+    The ONE case that still does NOT set the key (CI-5 scope 1 + 2,
+    preserved): explicit `notification_name` entries were given but NONE of
+    them resolved, AND there are no defaults either. That combination reads
+    as "probably broken" (a typo, or notifications.yml itself missing/
+    misconfigured — already warned about separately by
+    `_load_default_notification_names`) rather than "deliberately empty", so
+    the existing Kuma-side assignment is left untouched rather than wiped.
+
+    `notifications_resolved=False` (CI-8 Risk, `sync_monitors_multi`'s
+    degrade path): the notifications LIST ITSELF could not be fetched from
+    Kuma this run, so `notifications_by_name`/`default_ids` are empty not
+    because nothing is declared but because we genuinely don't know what
+    resolves. Every monitor would otherwise look "nothing declared" and get
+    wiped to `[]` on a transient API hiccup — the opposite of CI-8's intent.
+    Never set the key at all while this flag is False, regardless of
+    `had_explicit_names`.
     """
+    had_explicit_names = "notification_name" in spec
     relay_ids = []
-    if "notification_name" in spec:
+    if had_explicit_names:
         raw = spec.pop("notification_name")
         names = raw if isinstance(raw, list) else [raw]
         for notif_name in names:
@@ -452,7 +472,10 @@ def _resolve_notification_ids(spec, notifications_by_name, default_ids, monitor_
                     file=sys.stderr,
                 )
     combined = sorted(set(default_ids) | set(relay_ids))
-    if combined:
+    protect_unresolvable = (
+        not notifications_resolved or (had_explicit_names and not relay_ids and not default_ids)
+    )
+    if not protect_unresolvable:
         spec["notification_ids"] = combined
     return spec
 
@@ -724,6 +747,7 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
         # resolution this pass" and lets each app's own get_monitors() call
         # (below) surface and report the same underlying outage through the
         # existing per-app failure path, rather than a raw traceback here.
+        notifications_resolved = True
         try:
             notifications_by_name = {
                 n["name"]: n["id"]
@@ -739,6 +763,11 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
                 file=sys.stderr,
             )
             notifications_by_name = {}
+            # CI-8: the fetch itself failed, not "nothing declared" — every
+            # monitor in this run must keep its existing Kuma-side
+            # notification_ids untouched, not get wiped to [] because the
+            # list we'd resolve against is empty.
+            notifications_resolved = False
 
         default_ids = sorted(
             notifications_by_name[n] for n in default_names if n in notifications_by_name
@@ -795,7 +824,10 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
 
                 # Resolve notification_name → notification_ids before building
                 # kwargs, same as sync_monitors() (CI-5 scope 2).
-                _resolve_notification_ids(spec, notifications_by_name, default_ids, name)
+                _resolve_notification_ids(
+                    spec, notifications_by_name, default_ids, name,
+                    notifications_resolved=notifications_resolved,
+                )
 
                 kwargs = _build_monitor_kwargs(spec)
 

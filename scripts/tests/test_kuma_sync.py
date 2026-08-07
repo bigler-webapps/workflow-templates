@@ -504,13 +504,28 @@ def test_resolve_notification_ids_unresolvable_relay_keeps_defaults(capsys):
     assert "hram-frontend" in err and "claude-relay-ghost" in err and "not found" in err
 
 
-def test_resolve_notification_ids_no_defaults_no_relay_sets_nothing():
-    """Neither defaults nor a relay declared: no notification_ids key at all
-    (not an empty list) — matches _build_monitor_kwargs' existing
-    `if "notification_ids" in spec` gate."""
+def test_resolve_notification_ids_no_defaults_no_relay_sets_empty_list():
+    """CI-8: neither defaults nor an explicit notification_name declared at
+    all -- this is a deliberate "no channel" statement (INF-9's routine
+    monitors), so notification_ids IS set, to an empty list, so a stale
+    Kuma-side attachment (e.g. from a channel that used to be default: true)
+    gets cleared on the next sync rather than surviving forever."""
     spec = {"name": "hram-frontend"}
     kuma_sync._resolve_notification_ids(spec, {}, [])
+    assert spec["notification_ids"] == []
+
+
+def test_resolve_notification_ids_unresolvable_relay_and_no_defaults_protects_existing(capsys):
+    """CI-5 property preserved under CI-8: an explicit notification_name WAS
+    given but did not resolve, and there ARE no defaults either -- this
+    reads as "probably broken" (typo, or notifications.yml misconfigured),
+    not "deliberately empty", so notification_ids is NOT set at all and any
+    existing Kuma-side assignment is left untouched."""
+    spec = {"name": "hram-frontend", "notification_name": "claude-relay-ghost"}
+    kuma_sync._resolve_notification_ids(spec, {}, [], monitor_name="hram-frontend")
     assert "notification_ids" not in spec
+    err = capsys.readouterr().err
+    assert "claude-relay-ghost" in err and "not found" in err
 
 
 def test_resolve_notification_ids_list_resolves_all_entries_and_unions_defaults():
@@ -741,3 +756,77 @@ def test_sync_notifications_coerces_env_expanded_smtp_port(monkeypatch, tmp_path
     assert api.added["smtpPort"] == 2465
     assert api.added["smtpPort"].__class__ is int
     assert api.added["smtpSecure"] is True
+
+
+# --- CI-8: don't wipe notifications when the fetch itself failed ----------
+
+def test_resolve_notification_ids_unresolved_fetch_never_sets_the_key_even_with_no_names():
+    """notifications_resolved=False means the notifications LIST fetch
+    itself failed — not that nothing is declared. A monitor with no
+    notification_name must NOT be wiped to [] just because the degrade path
+    couldn't tell us what it would have resolved to."""
+    spec = {"name": "hram-frontend"}
+    kuma_sync._resolve_notification_ids(spec, {}, [], notifications_resolved=False)
+    assert "notification_ids" not in spec
+
+
+def test_resolve_notification_ids_unresolved_fetch_protects_explicit_names_too():
+    spec = {"name": "cockpit-frontend", "notification_name": ["claude-relay-main-prod", "alert-email"]}
+    kuma_sync._resolve_notification_ids(spec, {}, [], notifications_resolved=False)
+    assert "notification_ids" not in spec
+
+
+def test_multi_get_notifications_failure_does_not_wipe_existing_default_only_monitor(
+    tmp_path, monkeypatch
+):
+    """CI-8 Risk / reviewer P1: a transient get_notifications() failure in
+    sync_monitors_multi's degrade path must not wipe a default-only
+    monitor's real, non-empty notificationIDList in Kuma — the fetch
+    failing is not the same as the config declaring nothing."""
+
+    class FlakyNotificationsApi:
+        def get_notifications(self):
+            raise ConnectionError("Kuma notifications endpoint down")
+
+        def get_monitors(self):
+            return [{
+                "id": 1,
+                "name": "app0-frontend",
+                "type": MonitorType("http"),
+                "url": "https://app0.example.ch",
+                "interval": 60,
+                "maxretries": 3,  # monitoring.extra's base default (not _build_monitor_kwargs' own 5)
+                "retryInterval": 60,
+                "notificationIDList": {"7": True},  # real existing assignment
+            }]
+
+        def edit_monitor(self, monitor_id, **kwargs):
+            raise AssertionError(
+                f"edit_monitor must not be called — a get_notifications() failure "
+                f"must not be treated as 'nothing declared' (kwargs={kwargs})"
+            )
+
+        def add_monitor(self, **kwargs):
+            raise AssertionError(f"add_monitor must not be called — the monitor already exists (kwargs={kwargs})")
+
+        def disconnect(self):
+            pass
+
+    api = FlakyNotificationsApi()
+    monkeypatch.setattr(kuma_sync, "_login", lambda: api)
+    monkeypatch.setenv("KUMA_SYNC_BUDGET_SECONDS", "0")
+
+    # skip_auto + a single explicit `extra` entry, no notification_name — the
+    # exact "default-only monitor, no explicit relay" shape this risk is about.
+    app_dir = tmp_path / "app0"
+    app_dir.mkdir()
+    (app_dir / "project.yaml").write_text(
+        "project_name: app0\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  extra:\n"
+        "    - name: app0-frontend\n"
+        "      url: https://app0.example.ch\n",
+        encoding="utf-8",
+    )
+    kuma_sync.sync_monitors_multi([str(app_dir / "project.yaml")])  # must not raise — assertions live in edit_monitor/add_monitor
