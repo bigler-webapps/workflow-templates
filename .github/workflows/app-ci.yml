@@ -144,6 +144,13 @@ jobs:
             "$BACKEND_BUILD_CONTEXT"
 
       - name: Run pytest
+        # MALLOC_ARENA_MAX=2 (hram FIX-6, 2026-08-07): the self-hosted netcup runner box has
+        # only 7.8GB RAM shared by 3 job slots across every repo, no --memory limit on this
+        # container. glibc opens a fresh per-thread malloc arena by default, inflating RSS well
+        # beyond live object size for multi-threaded/forking, numpy/GDAL-heavy test suites --
+        # confirmed on hram's own memory-heavy geo-build tests (live-reproduced OOM kill,
+        # anon-rss ~7GB, on this exact box). Capping arenas reduces that inflation; cheap,
+        # backward-compatible for every consumer of this template, no behavior/correctness change.
         run: |
           docker run --rm --network host \
             -e DJANGO_SETTINGS_MODULE='${{ inputs.django-settings-module }}' \
@@ -159,6 +166,7 @@ jobs:
             -e DB_PASSWORD='test' \
             -e EMAIL_PORT='25' \
             -e EMAIL_USE_TLS='False' \
+            -e MALLOC_ARENA_MAX='2' \
             "$CI_IMAGE" \
             pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
 
