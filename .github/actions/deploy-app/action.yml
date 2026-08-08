@@ -13,6 +13,9 @@ description: 'Deploys a Django/React app via rsync + Docker Compose over Tailsca
 # into every workflow's `ssh_host`.
 
 inputs:
+  image_tag:
+    description: 'Immutable image tag resolved from the caller checkout.'
+    required: true
   environment:
     description: 'Target environment (staging or production)'
     required: true
@@ -373,11 +376,11 @@ runs:
       shell: bash
       env:
         SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
-        IMAGE_TAG: ${{ github.sha }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
         USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
       run: |
         set -euo pipefail
-        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing a non-deterministic deploy."; exit 1; }
+        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing a non-deterministic deploy."; exit 1; }
         case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
         # S5/S21 partial mitigation: drop CI-only secret families before
         # generate-env sees them. Reduces blast radius of any crash/debug
@@ -517,12 +520,12 @@ runs:
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
-        IMAGE_TAG: ${{ github.sha }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
         SKIP_MIGRATE: ${{ inputs.skip_migrate }}
         PERSISTENT_DIRS: ${{ env.PERSISTENT_DIRS }}
       run: |
         set -euo pipefail
-        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing a non-deterministic deploy."; exit 1; }
+        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing a non-deterministic deploy."; exit 1; }
         case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
         if [ "$USE_BUILD_FALLBACK" != "true" ] && [ -z "$GITHUB_TOKEN" ]; then
           echo "❌ GITHUB_TOKEN is required for pull-based deploys."

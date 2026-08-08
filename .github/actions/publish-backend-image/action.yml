@@ -1,0 +1,81 @@
+name: 'Publish Backend Image'
+description: 'Builds or tags the backend image and publishes its immutable tag to GHCR.'
+
+inputs:
+  image_tag:
+    description: 'Immutable image tag resolved from the checked-out working tree.'
+    required: true
+  github_token:
+    description: 'Per-run GITHUB_TOKEN used to authenticate to GHCR.'
+    required: true
+  backend_dockerfile:
+    description: 'Path to the backend Dockerfile.'
+    required: false
+    default: 'backend/Dockerfile'
+  backend_build_context:
+    description: 'Docker build context for the backend image.'
+    required: false
+    default: '.'
+  backend_target:
+    description: 'Non-empty when the caller built a lean CI target and needs a full-image rebuild.'
+    required: false
+    default: ''
+  hram_engine_read_token:
+    description: 'BuildKit secret for the private hram-engine dependency.'
+    required: false
+    default: ''
+  vite_app_mui_license_key:
+    description: 'Build argument for the MUI license key.'
+    required: false
+    default: ''
+  existing_image:
+    description: 'Existing full CI image to tag instead of rebuilding when backend_target is empty.'
+    required: false
+    default: ''
+
+outputs:
+  image:
+    description: 'Full immutable GHCR image reference that was pushed.'
+    value: ${{ steps.publish.outputs.image }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Publish backend image to GHCR
+      id: publish
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        BACKEND_TARGET: ${{ inputs.backend_target }}
+        BACKEND_DOCKERFILE: ${{ inputs.backend_dockerfile }}
+        BACKEND_BUILD_CONTEXT: ${{ inputs.backend_build_context }}
+        HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_read_token }}
+        VITE_APP_MUI_LICENSE_KEY: ${{ inputs.vite_app_mui_license_key }}
+        EXISTING_IMAGE: ${{ inputs.existing_image }}
+      run: |
+        set -euo pipefail
+        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing to publish."; exit 1; }
+        [ -n "$GITHUB_TOKEN" ] || { echo "❌ GITHUB_TOKEN is not set; cannot push to the registry."; exit 1; }
+
+        PUBLISHED_IMAGE="$(awk -F': *' '/^[[:space:]]*image_name:[[:space:]]*/ {gsub(/["[:space:]]/, "", $2); print $2; exit}' project.yaml)"
+        case "$PUBLISHED_IMAGE" in
+          ghcr.io/*/*-backend) ;;
+          *) echo "❌ project.yaml must define a GHCR backend image_name; got: ${PUBLISHED_IMAGE:-<empty>}"; exit 1 ;;
+        esac
+
+        if [ -n "$BACKEND_TARGET" ] || [ -z "$EXISTING_IMAGE" ]; then
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
+            --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            -t "$PUBLISHED_IMAGE:$IMAGE_TAG" \
+            -f "$BACKEND_DOCKERFILE" \
+            "$BACKEND_BUILD_CONTEXT"
+        else
+          docker tag "$EXISTING_IMAGE" "$PUBLISHED_IMAGE:$IMAGE_TAG"
+        fi
+
+        printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"
+        printf 'image=%s:%s\n' "$PUBLISHED_IMAGE" "$IMAGE_TAG" >> "$GITHUB_OUTPUT"
