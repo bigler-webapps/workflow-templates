@@ -12,6 +12,24 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Fixed
+
+**Deploy workflows now publish the image they deploy** (CI-11). CI-9/CI-10 built
+a pull-based deploy on the assumption that CI runs before every deploy — it
+doesn't, here: `app-ci.yml` triggers on `pull_request` only, while a deploy
+workflow triggers on `push`. Since this estate commits directly to `develop`,
+no image was ever published before a deploy tried to pull one; observed live
+across four app repos on 2026-08-08, harmlessly (existing containers kept
+running). Fix: the publish logic is now a shared `publish-backend-image`
+composite action, called both from `app-ci.yml` (unchanged) and, per consuming
+repo, as a new step in the deploy workflow's own job — same job, same runner,
+so step order alone guarantees the image exists before `deploy-app`'s pull.
+Also fixes `github.sha` being used as the image tag: a `workflow_dispatch`
+deploy explicitly checks out a different ref than the one that triggered it,
+so the tag now comes from `git rev-parse HEAD` after checkout in both callers.
+`deploy-app` gains a new required `image_tag` input; existing pinned tags are
+unaffected until a caller bumps its pin and adds the publish step.
+
 ### Added
 
 **GHCR publishing with the built-in workflow token** (CI-10). `app-ci.yml` and
