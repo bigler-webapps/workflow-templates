@@ -139,3 +139,95 @@ failure, with a mandatory independent `reviewer`. Do NOT spawn a nested `codex e
 uncommitted for the Orchestrator's independent review; run the scoped tests only; commit on green
 (`main`). **Do not deploy** — the first pull-based deploy is operator-gated and goes to staging
 first.
+
+## B. Implementation map (Orchestrator)
+
+Single repo (`workflow-templates`, cwd = repo root). Do NOT `git add`/`commit`/`push` — leave the
+diff for the Orchestrator's review.
+
+### The key design constraint: zero app-repo changes
+
+Every app repo's own `.github/workflows/*.yml` calls `app-ci.yml` (reusable workflow) and the
+`deploy-app` composite action with the inputs that already exist today. The Envelope's "NOT the app
+repositories" non-goal means **no per-app caller workflow may need a new input added** — only
+`workflow-templates` changes. Two facts make this possible without touching any app repo:
+
+1. **The commit SHA is free inside both workflows.** `app-ci.yml`'s `backend` job and the
+   `deploy-app` composite action both run in a job that already has `github.sha` in scope (the
+   checked-out commit) — neither needs a caller to pass a tag through. Use `github.sha` as the image
+   tag on both the push side and the pull side; they will match because both run from the same
+   workflow-dispatch/push event's commit.
+2. **A new org-level secret needs no per-app wiring.** Every app repo's deploy step already passes
+   `secrets_context_json: ${{ toJson(secrets) }}` into `deploy-app` (action.yml:41-43, consumed at
+   `:363-373` where it's filtered down for `generate-env`). If the new GHCR read token is provisioned
+   as an **organization secret** (not a per-repo one), it lands inside that same `toJson(secrets)`
+   blob automatically in every app repo with no caller-side edit. Extract it from
+   `SECRETS_CONTEXT_RAW`/`secrets_context_json` inside the action the same way the existing filter
+   step reads that JSON — do not add a new required action input that every app workflow would have
+   to start passing. (Provisioning the actual org secret value in Proton/GitHub Org Secrets is an
+   operator step outside this WO's diff — see "New secrets" in the orchestrate-codex skill; the code
+   only needs to read whatever key name you choose, e.g. `GHCR_READ_TOKEN`, from that JSON.)
+
+### Files to change
+
+**`.github/workflows/app-ci.yml`** (`backend` job, `:~91-145`)
+- After the existing "Build backend image" step (currently tags only `$CI_IMAGE`, discarded at
+  `:174-176`), also tag the image `ghcr.io/${{ github.repository_owner }}/<app>-backend:${{
+  github.sha }}` — derive `<app>-backend` the same way `deploy-app`/`project.yaml` already name
+  images (check `image_name:` convention in any app's `project.yaml` / compose file referenced in the
+  Envelope, e.g. `ghcr.io/bigler-webapps/<app>-backend`), or read the name from `project.yaml` if a
+  checkout of it is available in this job (it is — full repo is checked out at `:99`).
+- Add a `docker login ghcr.io` step using the workflow's own ambient `${{ secrets.GITHUB_TOKEN }}`
+  (needs `permissions: packages: write` added at the job or workflow level — currently only
+  `contents: read` at `:83`) and `docker push` the SHA-tagged image. Keep the existing `$CI_IMAGE`
+  build/test/rmi flow unchanged — this is an additional tag+push, not a replacement.
+- CI-6 interaction (`backend-target: backend_test`): when a caller opts into the leaner test image,
+  build the **full** (non-`--target`) image as a second build for the push, per the Envelope — reuse
+  the warm layer cache, don't skip pushing.
+- Do not push when `run-backend` is false or the build fails — push must be gated on tests passing,
+  not run in parallel with them (a red build must never be the one pulled at deploy time).
+
+**`.github/actions/deploy-app/action.yml`**
+- New composite input, e.g. `use_build_fallback` (`required: false`, `default: 'false'`) — the
+  documented escape hatch the Envelope requires.
+- Before the remote block at `:508-556`: add a `docker login ghcr.io` (remote, over the same SSH
+  session pattern already used for `hram_engine_token` at `:78`/`:539` — local-interpolated
+  credential, remote-side `docker login`) using the GHCR read token extracted per point 2 above.
+- Replace `docker compose ... up -d --build --force-recreate --remove-orphans` (`:551`) with a
+  branch: default path does `docker compose ... pull` then `up -d --force-recreate --remove-orphans`
+  (no `--build`); `use_build_fallback == 'true'` keeps today's `--build` line verbatim, unchanged.
+- **Fail loudly, never silently default to `:latest`:** if the GHCR login fails, or the resolved tag
+  is empty (it shouldn't be — `github.sha` is always populated in a real run — but assert it rather
+  than trusting it), the step must exit non-zero, not fall through to whatever `IMAGE_TAG` default
+  the compose file's `${IMAGE_TAG:-latest}` would silently pick.
+- `IMAGE_TAG` reaches the server via the same mechanism `IMAGE_NAME` already does: appended to the
+  local `.env` (written by the "🔐 Generate .env file" step, `:359-376`) **before** the rsync step
+  (`:378-414`) ships it to the server — `generate-env` itself does not need to know about
+  `IMAGE_TAG`; append the line to the `.env` file after `generate-env` runs, same file, same rsync.
+- `HRAM_ENGINE_READ_TOKEN` / `VITE_APP_MUI_LICENSE_KEY` (currently required as BuildKit secrets on
+  the remote build, `:539`/`hram_engine_token` input) stay wired for the `use_build_fallback` path
+  but are no longer needed for the default pull path — do not remove the inputs (fallback needs
+  them), verify per the Acceptance criterion that a default-path deploy doesn't require them to be
+  set.
+
+### Tests to write (in `.github/scripts/` per WO scoping — new file, e.g. `test_deploy_app_action.py`)
+
+- Parse `deploy-app/action.yml` as YAML/text: the default-mode compose command does not contain
+  `--build`; the `use_build_fallback` branch does.
+- `app-ci.yml`: the push step tags with `${{ github.sha }}` (or equivalent), not a bare `:latest` —
+  assert `latest` does not appear as the *only* pushed tag (a moving `latest` tag alongside the SHA
+  tag is fine per the Envelope; SHA-only-as-the-deploy-tag is the thing under test).
+- Structural: the composite action has no path where an unresolved/empty tag falls through to a
+  successful exit — e.g. assert `set -euo pipefail` (or equivalent explicit checks) governs the new
+  login/pull block, matching the existing remote-block pattern at `:449`/`:513`.
+
+State which assertion covers which file, per the WO's own scoping note.
+
+### Invariants / do-not-touch
+
+- No app repository's compose file or per-app workflow caller changes.
+- `--build` fallback path must still work byte-for-byte as today when explicitly selected.
+- No secret value is ever echoed/logged (follow the existing heredoc local/remote split pattern at
+  `:495-512` — plain-text assignment locally, `\$VAR` remote-escaped).
+- Do not touch `terraform-*` files, CI/CD dispatch permissions, or any auth/permission logic outside
+  the GHCR read-only credential itself.
