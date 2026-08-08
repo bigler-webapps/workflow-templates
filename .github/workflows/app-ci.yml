@@ -76,23 +76,10 @@ on:
         required: false
       HRAM_ENGINE_READ_TOKEN:
         required: false
-      GHCR_TOKEN:
-        description: >
-          Org-level PAT with write:packages scope (also grants read), used to
-          push the SHA-tagged backend image to GHCR. NOT the ambient
-          GITHUB_TOKEN: a reusable workflow's GITHUB_TOKEN permissions are
-          capped by the CALLER's `permissions:` block (every app repo's
-          ci.yml grants only `contents: read`), so a `packages: write` added
-          only here would still fail to push. A stored org secret bypasses
-          that ceiling entirely and needs no per-app-repo permissions change,
-          the same reason the deploy side reads this same secret via
-          `secrets: inherit` rather than a caller-declared input. One token
-          covers both push (here) and pull (deploy-app), so only one new
-          credential is introduced by CI-9, not two.
-        required: false
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   backend:
@@ -153,6 +140,7 @@ jobs:
             "${target_args[@]}" \
             --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
             --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
             -t "$CI_IMAGE" \
             -f "$BACKEND_DOCKERFILE" \
             "$BACKEND_BUILD_CONTEXT"
@@ -190,7 +178,7 @@ jobs:
         # the registry; the host daemon's warm BuildKit cache makes that
         # second build cheap and replaces the former server-side build.
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_TAG: ${{ github.sha }}
           BACKEND_TARGET: ${{ inputs.backend-target }}
           BACKEND_DOCKERFILE: ${{ inputs.dockerfile }}
@@ -200,7 +188,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing to publish."; exit 1; }
-          [ -n "$GHCR_TOKEN" ] || { echo "❌ GHCR_TOKEN is not set; cannot push to the registry."; exit 1; }
+          [ -n "$GITHUB_TOKEN" ] || { echo "❌ GITHUB_TOKEN is not set; cannot push to the registry."; exit 1; }
 
           PUBLISHED_IMAGE="$(awk -F': *' '/^[[:space:]]*image_name:[[:space:]]*/ {gsub(/["[:space:]]/, "", $2); print $2; exit}' project.yaml)"
           case "$PUBLISHED_IMAGE" in
@@ -213,6 +201,7 @@ jobs:
             DOCKER_BUILDKIT=1 docker build \
               --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
               --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+              --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
               -t "$PUBLISHED_IMAGE:$IMAGE_TAG" \
               -f "$BACKEND_DOCKERFILE" \
               "$BACKEND_BUILD_CONTEXT"
@@ -220,7 +209,7 @@ jobs:
             docker tag "$CI_IMAGE" "$PUBLISHED_IMAGE:$IMAGE_TAG"
           fi
 
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"
 
       - name: Remove CI image

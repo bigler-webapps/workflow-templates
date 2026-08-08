@@ -14,6 +14,15 @@ tag, not `@main`. The current stable tag is documented below.
 
 ### Added
 
+**GHCR publishing with the built-in workflow token** (CI-10). `app-ci.yml` and
+`deploy-app` now authenticate to GHCR with each run's short-lived
+`GITHUB_TOKEN`; the CI-9 `GHCR_TOKEN` secret requirement is removed. Published
+images are labelled with `org.opencontainers.image.source` so GitHub links a new
+private package to its source repository deterministically. Callers must grant
+`packages: write` to the reusable-workflow and deploy callers; existing pinned
+release tags do not receive this change until the operator releases and callers
+update their pins.
+
 **`sync-kuma-notifications`: SMTP inputs** (INF-8). Seven new optional inputs
 (`smtp_host`, `smtp_port`, `smtp_secure`, `smtp_username`, `smtp_password`,
 `smtp_from`, `smtp_to`), each exposed to `kuma_sync.py notifications` as the

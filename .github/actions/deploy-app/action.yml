@@ -82,6 +82,15 @@ inputs:
     description: 'Set to true only to fall back to the legacy server-side Docker build when GHCR is unavailable.'
     required: false
     default: 'false'
+  github_token:
+    description: >
+      The caller's per-run GITHUB_TOKEN, used to log in to GHCR for the default
+      pull-based deploy. A composite action has no automatic access to the
+      secrets context (unlike a reusable workflow) -- it must be forwarded
+      explicitly as an input from the caller's own GITHUB_TOKEN secret, the
+      same way `hram_engine_token` and `secrets_context_json` already are.
+    required: false
+    default: ''
   skip_migrate:
     description: 'Skip the post-deploy `manage.py migrate` step. Set to `true` for non-Django apps (e.g. static sites) that have no backend service.'
     required: false
@@ -377,7 +386,7 @@ runs:
         # against the app's secrets.yaml).
         SECRETS_CONTEXT=$(
           printf '%s' "$SECRETS_CONTEXT_RAW" \
-            | jq -c 'del(.GHCR_TOKEN) | with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
+            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
         )
         # Pull-based deploys have no server-side build, so neither build
         # secret belongs on the target. The explicit build fallback retains
@@ -506,7 +515,7 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
-        SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
         USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
         IMAGE_TAG: ${{ github.sha }}
         SKIP_MIGRATE: ${{ inputs.skip_migrate }}
@@ -515,10 +524,8 @@ runs:
         set -euo pipefail
         [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing a non-deterministic deploy."; exit 1; }
         case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
-        GHCR_TOKEN="$(printf '%s' "$SECRETS_CONTEXT_RAW" | jq -r '.GHCR_TOKEN // empty')"
-        unset SECRETS_CONTEXT_RAW
-        if [ "$USE_BUILD_FALLBACK" != "true" ] && [ -z "$GHCR_TOKEN" ]; then
-          echo "❌ GHCR_TOKEN is required for pull-based deploys."
+        if [ "$USE_BUILD_FALLBACK" != "true" ] && [ -z "$GITHUB_TOKEN" ]; then
+          echo "❌ GITHUB_TOKEN is required for pull-based deploys."
           exit 1
         fi
         # Heredoc pattern (same as file-secrets step above):
@@ -534,7 +541,7 @@ runs:
 
         REMOTE_PATH="${REMOTE_PATH}"
         HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
-        GHCR_TOKEN="${GHCR_TOKEN}"
+        GITHUB_TOKEN="${GITHUB_TOKEN}"
         GHCR_USERNAME="${GITHUB_ACTOR}"
         USE_BUILD_FALLBACK="${USE_BUILD_FALLBACK}"
         IMAGE_TAG="${IMAGE_TAG}"
@@ -582,7 +589,7 @@ runs:
           \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
         else
           echo "📥 Logging in to GHCR and pulling the CI image..."
-          printf '%s' "\${GHCR_TOKEN}" | \$DOCKER login ghcr.io --username "\${GHCR_USERNAME}" --password-stdin
+          printf '%s' "\${GITHUB_TOKEN}" | \$DOCKER login ghcr.io --username "\${GHCR_USERNAME}" --password-stdin
           \$DOCKER compose \$COMPOSE_FILES --env-file .env pull
           echo "🔥 Recreating containers from pulled image..."
           \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --force-recreate --remove-orphans
