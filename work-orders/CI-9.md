@@ -223,6 +223,25 @@ repositories" non-goal means **no per-app caller workflow may need a new input a
 
 State which assertion covers which file, per the WO's own scoping note.
 
+### Deviation from the Envelope's secrets plan (discovered during review)
+
+The Envelope assumed the CI-side push could use the ambient `GITHUB_TOKEN` with a `packages: write`
+permission added to `app-ci.yml`. An independent review caught that this doesn't work: a reusable
+workflow's `GITHUB_TOKEN` permissions are capped by the **caller's** `permissions:` block, and every
+app repo's `ci.yml` declares only `contents: read` — `packages: write` added solely inside
+`app-ci.yml` would still 403 on push for every app tracking `@main`, which is nearly all of them.
+Verified against hram's and jg-ferien's `ci.yml` (both `contents: read` only, no job-level override).
+
+Fix: a single new org-level PAT secret (`GHCR_TOKEN`, `write:packages` scope — write implies read)
+used for **both** the CI push and the deploy pull, instead of the Envelope's implied two mechanisms
+(ambient token for push, separate read token for pull). This is fewer credentials than originally
+implied, not more, and still requires zero app-repo changes — confirmed every app's `ci.yml` already
+uses `secrets: inherit` (hram, jg-ferien, kerzenziehen, innoservice, survey_app, survey_contact_app,
+reimbursements, spesix, cockpit, hpc-bridge), so the new org secret reaches the reusable workflow
+automatically. Provisioning `GHCR_TOKEN` in Proton/GitHub Org Secrets remains the same operator step
+the Envelope already called for; only the token's name and scope changed (one token, write:packages,
+not "one read token").
+
 ### Invariants / do-not-touch
 
 - No app repository's compose file or per-app workflow caller changes.

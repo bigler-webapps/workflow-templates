@@ -75,9 +75,13 @@ inputs:
     required: false
     default: ''
   hram_engine_token:
-    description: 'BuildKit secret token for hram-engine private pip dependency. Injected as HRAM_ENGINE_READ_TOKEN before docker compose build.'
+    description: 'BuildKit secret token for hram-engine private pip dependency. Used only by the explicit use_build_fallback server-build path.'
     required: false
     default: ''
+  use_build_fallback:
+    description: 'Set to true only to fall back to the legacy server-side Docker build when GHCR is unavailable.'
+    required: false
+    default: 'false'
   skip_migrate:
     description: 'Skip the post-deploy `manage.py migrate` step. Set to `true` for non-Django apps (e.g. static sites) that have no backend service.'
     required: false
@@ -360,8 +364,12 @@ runs:
       shell: bash
       env:
         SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
+        IMAGE_TAG: ${{ github.sha }}
+        USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
       run: |
         set -euo pipefail
+        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing a non-deterministic deploy."; exit 1; }
+        case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
         # S5/S21 partial mitigation: drop CI-only secret families before
         # generate-env sees them. Reduces blast radius of any crash/debug
         # leak inside the generate-env subprocess; the runtime .env is built
@@ -369,12 +377,20 @@ runs:
         # against the app's secrets.yaml).
         SECRETS_CONTEXT=$(
           printf '%s' "$SECRETS_CONTEXT_RAW" \
-            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
+            | jq -c 'del(.GHCR_TOKEN) | with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)") | not))'
         )
+        # Pull-based deploys have no server-side build, so neither build
+        # secret belongs on the target. The explicit build fallback retains
+        # the legacy behaviour for registry-outage recovery.
+        if [ "$USE_BUILD_FALLBACK" != "true" ]; then
+          SECRETS_CONTEXT="$(printf '%s' "$SECRETS_CONTEXT" | jq -c 'del(.HRAM_ENGINE_READ_TOKEN, .VITE_APP_MUI_LICENSE_KEY)')"
+        fi
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
         echo "Generating .env for env: ${TARGET_ENV}"
         generate-env --env "${TARGET_ENV}"
+        test -f .env || { echo "❌ generate-env did not create .env."; exit 1; }
+        printf '\nIMAGE_TAG=%s\n' "$IMAGE_TAG" >> .env
 
     - name: 🚀 Rsync project to server (via plain ssh over Tailnet)
       shell: bash
@@ -483,17 +499,28 @@ runs:
         fi
         EOF
 
-    - name: 🐳 Build, restart & migrate (via plain ssh over Tailnet)
+    - name: 🐳 Pull/build, restart & migrate (via plain ssh over Tailnet)
       shell: bash
       env:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
+        SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
+        USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
+        IMAGE_TAG: ${{ github.sha }}
         SKIP_MIGRATE: ${{ inputs.skip_migrate }}
         PERSISTENT_DIRS: ${{ env.PERSISTENT_DIRS }}
       run: |
         set -euo pipefail
+        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing a non-deterministic deploy."; exit 1; }
+        case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
+        GHCR_TOKEN="$(printf '%s' "$SECRETS_CONTEXT_RAW" | jq -r '.GHCR_TOKEN // empty')"
+        unset SECRETS_CONTEXT_RAW
+        if [ "$USE_BUILD_FALLBACK" != "true" ] && [ -z "$GHCR_TOKEN" ]; then
+          echo "❌ GHCR_TOKEN is required for pull-based deploys."
+          exit 1
+        fi
         # Heredoc pattern (same as file-secrets step above):
         #   - The top assignment block injects local runner values into
         #     remote shell variables. `${VAR}` references in those
@@ -507,19 +534,21 @@ runs:
 
         REMOTE_PATH="${REMOTE_PATH}"
         HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
+        GHCR_TOKEN="${GHCR_TOKEN}"
+        GHCR_USERNAME="${GITHUB_ACTOR}"
+        USE_BUILD_FALLBACK="${USE_BUILD_FALLBACK}"
+        IMAGE_TAG="${IMAGE_TAG}"
         SKIP_MIGRATE="${SKIP_MIGRATE}"
         PERSISTENT_DIRS="${PERSISTENT_DIRS}"
 
         cd "\$REMOTE_PATH"
 
-        # v2.0.2: Server-side global serialization — single lock file
+        # v2.0.2: Server-side global serialization — single lock file.
         # SHARED ACROSS ALL APPS on this server. Two effects:
         #   1. Two concurrent runs of the SAME app+env can't race container
         #      names (the original v1.x reason).
-        #   2. SEVEN apps simultaneously pushing dependency bumps no longer
-        #      OOM the server with 7 parallel docker builds. They serialize
-        #      naturally; rsync ran parallel beforehand (low memory), only
-        #      the build/up phase needs serialization.
+        #   2. The explicit legacy build fallback cannot race container names
+        #      or consume memory alongside another fallback build.
         # Cross-repo GitHub Actions concurrency.group doesn't help here —
         # group keys are repo-scoped. Server-side flock is the only
         # cross-app coordination point.
@@ -537,18 +566,27 @@ runs:
           DOCKER="sudo -n docker"
         fi
 
-        if [ -n "\${HRAM_ENGINE_READ_TOKEN}" ]; then export HRAM_ENGINE_READ_TOKEN="\${HRAM_ENGINE_READ_TOKEN}"; fi
-        export DOCKER_BUILDKIT=1
         COMPOSE_FILES="-f docker-compose.yml"
 
         echo "🚀 Starting Deployment..."
         \$DOCKER image prune -f
 
-        echo "🔥 Recreating containers..."
         for dir in \$PERSISTENT_DIRS; do
           mkdir -p -- "\$dir"
         done
-        \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
+        [ -n "\${IMAGE_TAG}" ] || { echo "❌ IMAGE_TAG is empty on target; refusing to use compose's latest default."; exit 1; }
+        if [ "\${USE_BUILD_FALLBACK}" = "true" ]; then
+          echo "🔥 Recreating containers with explicit server-build fallback..."
+          if [ -n "\${HRAM_ENGINE_READ_TOKEN}" ]; then export HRAM_ENGINE_READ_TOKEN="\${HRAM_ENGINE_READ_TOKEN}"; fi
+          export DOCKER_BUILDKIT=1
+          \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
+        else
+          echo "📥 Logging in to GHCR and pulling the CI image..."
+          printf '%s' "\${GHCR_TOKEN}" | \$DOCKER login ghcr.io --username "\${GHCR_USERNAME}" --password-stdin
+          \$DOCKER compose \$COMPOSE_FILES --env-file .env pull
+          echo "🔥 Recreating containers from pulled image..."
+          \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --force-recreate --remove-orphans
+        fi
 
         if [ "\${SKIP_MIGRATE}" != "true" ]; then
           echo "⏳ Waiting for backend to initialize..."

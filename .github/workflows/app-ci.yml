@@ -76,6 +76,20 @@ on:
         required: false
       HRAM_ENGINE_READ_TOKEN:
         required: false
+      GHCR_TOKEN:
+        description: >
+          Org-level PAT with write:packages scope (also grants read), used to
+          push the SHA-tagged backend image to GHCR. NOT the ambient
+          GITHUB_TOKEN: a reusable workflow's GITHUB_TOKEN permissions are
+          capped by the CALLER's `permissions:` block (every app repo's
+          ci.yml grants only `contents: read`), so a `packages: write` added
+          only here would still fail to push. A stored org secret bypasses
+          that ceiling entirely and needs no per-app-repo permissions change,
+          the same reason the deploy side reads this same secret via
+          `secrets: inherit` rather than a caller-declared input. One token
+          covers both push (here) and pull (deploy-app), so only one new
+          credential is introduced by CI-9, not two.
+        required: false
 
 permissions:
   contents: read
@@ -170,9 +184,52 @@ jobs:
             "$CI_IMAGE" \
             pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
 
+      - name: Publish backend image to GHCR
+        # Publish only after pytest succeeds. CI-6 callers test a lean
+        # `backend_test` target, so build the full production image here for
+        # the registry; the host daemon's warm BuildKit cache makes that
+        # second build cheap and replaces the former server-side build.
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          IMAGE_TAG: ${{ github.sha }}
+          BACKEND_TARGET: ${{ inputs.backend-target }}
+          BACKEND_DOCKERFILE: ${{ inputs.dockerfile }}
+          BACKEND_BUILD_CONTEXT: ${{ inputs.build-context }}
+          HRAM_ENGINE_READ_TOKEN: ${{ secrets.HRAM_ENGINE_READ_TOKEN }}
+          VITE_APP_MUI_LICENSE_KEY: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG (github.sha) is empty; refusing to publish."; exit 1; }
+          [ -n "$GHCR_TOKEN" ] || { echo "❌ GHCR_TOKEN is not set; cannot push to the registry."; exit 1; }
+
+          PUBLISHED_IMAGE="$(awk -F': *' '/^[[:space:]]*image_name:[[:space:]]*/ {gsub(/["[:space:]]/, "", $2); print $2; exit}' project.yaml)"
+          case "$PUBLISHED_IMAGE" in
+            ghcr.io/*/*-backend) ;;
+            *) echo "❌ project.yaml must define a GHCR backend image_name; got: ${PUBLISHED_IMAGE:-<empty>}"; exit 1 ;;
+          esac
+          printf 'PUBLISHED_IMAGE_TAG=%s:%s\n' "$PUBLISHED_IMAGE" "$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          if [ -n "$BACKEND_TARGET" ]; then
+            DOCKER_BUILDKIT=1 docker build \
+              --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
+              --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+              -t "$PUBLISHED_IMAGE:$IMAGE_TAG" \
+              -f "$BACKEND_DOCKERFILE" \
+              "$BACKEND_BUILD_CONTEXT"
+          else
+            docker tag "$CI_IMAGE" "$PUBLISHED_IMAGE:$IMAGE_TAG"
+          fi
+
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"
+
       - name: Remove CI image
         if: always()
-        run: docker rmi -f "$CI_IMAGE" 2>/dev/null || true
+        run: |
+          docker image rm -f "$CI_IMAGE" 2>/dev/null || true
+          if [ -n "${PUBLISHED_IMAGE_TAG:-}" ]; then
+            docker image rm -f "$PUBLISHED_IMAGE_TAG" 2>/dev/null || true
+          fi
 
   security:
     if: ${{ inputs.run-security }}
