@@ -573,8 +573,15 @@ runs:
 
         DOCKER="docker"
         if ! docker info >/dev/null 2>&1; then
-          DOCKER="sudo -n docker"
+          # --preserve-env: sudo resets the environment by default, which would
+          # silently drop the DOCKER_CONFIG scoping below and write back to the
+          # shared default store -- review finding on this same scope item.
+          DOCKER="sudo -n --preserve-env=DOCKER_CONFIG docker"
         fi
+
+        DOCKER_CONFIG_DIR="\$(mktemp -d)"
+        trap 'rm -rf "\$DOCKER_CONFIG_DIR"' EXIT
+        export DOCKER_CONFIG="\$DOCKER_CONFIG_DIR"
 
         COMPOSE_FILES="-f docker-compose.yml"
 

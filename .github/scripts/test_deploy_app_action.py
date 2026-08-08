@@ -91,6 +91,35 @@ class CI9StructuralTests(unittest.TestCase):
         self.assertIn('[ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty;', DEPLOY_ACTION)
         self.assertIn('IMAGE_TAG is empty on target; refusing to use compose\'s latest default.', DEPLOY_ACTION)
 
+    def test_publish_uses_a_temporary_docker_config_before_docker_commands(self):
+        """Runner-side build, login, and push cannot read or write the shared store."""
+        config_export = 'export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"'
+        cleanup = 'trap \'rm -rf "$DOCKER_CONFIG_DIR"\' EXIT'
+        self.assertIn('DOCKER_CONFIG_DIR="$(mktemp -d)"', PUBLISH_ACTION)
+        self.assertIn(config_export, PUBLISH_ACTION)
+        self.assertIn(cleanup, PUBLISH_ACTION)
+        self.assertLess(PUBLISH_ACTION.index(config_export), PUBLISH_ACTION.index('docker build'))
+        self.assertLess(PUBLISH_ACTION.index(config_export), PUBLISH_ACTION.index('docker login'))
+
+    def test_remote_deploy_uses_a_temporary_docker_config_before_login(self):
+        """The target host login is scoped to the SSH session, then cleaned up."""
+        config_export = 'export DOCKER_CONFIG="\\$DOCKER_CONFIG_DIR"'
+        cleanup = 'trap \'rm -rf "\\$DOCKER_CONFIG_DIR"\' EXIT'
+        self.assertIn('DOCKER_CONFIG_DIR="\\$(mktemp -d)"', DEPLOY_ACTION)
+        self.assertIn(config_export, DEPLOY_ACTION)
+        self.assertIn(cleanup, DEPLOY_ACTION)
+        self.assertLess(DEPLOY_ACTION.index(config_export), DEPLOY_ACTION.index('login ghcr.io'))
+        # The export sits before the if/else branch point -- covers the
+        # --build fallback branch too, not just the default pull branch.
+        self.assertLess(
+            DEPLOY_ACTION.index(config_export),
+            DEPLOY_ACTION.index('if [ "\\${USE_BUILD_FALLBACK}" = "true" ]; then'),
+        )
+
+    def test_sudo_docker_fallback_preserves_the_scoped_docker_config(self):
+        """A sudo re-exec must not silently drop the DOCKER_CONFIG scoping."""
+        self.assertIn('sudo -n --preserve-env=DOCKER_CONFIG docker', DEPLOY_ACTION)
+
 
 if __name__ == "__main__":
     unittest.main()

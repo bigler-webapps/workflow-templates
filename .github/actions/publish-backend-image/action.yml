@@ -58,6 +58,10 @@ runs:
         [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing to publish."; exit 1; }
         [ -n "$GITHUB_TOKEN" ] || { echo "❌ GITHUB_TOKEN is not set; cannot push to the registry."; exit 1; }
 
+        DOCKER_CONFIG_DIR="$(mktemp -d)"
+        export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+        trap 'rm -rf "$DOCKER_CONFIG_DIR"' EXIT
+
         PUBLISHED_IMAGE="$(awk -F': *' '/^[[:space:]]*image_name:[[:space:]]*/ {gsub(/["[:space:]]/, "", $2); print $2; exit}' project.yaml)"
         case "$PUBLISHED_IMAGE" in
           ghcr.io/*/*-backend) ;;
