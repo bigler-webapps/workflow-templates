@@ -64,7 +64,7 @@ class CI9StructuralTests(unittest.TestCase):
 
     def test_shared_publish_action_is_the_only_publish_implementation(self):
         """CI calls the action and removes the image through its declared output."""
-        self.assertIn("uses: ./.github/actions/publish-backend-image", CI_WORKFLOW)
+        self.assertIn("uses: ./.wt-checkout/.github/actions/publish-backend-image", CI_WORKFLOW)
         self.assertIn("${{ steps.publish_backend_image.outputs.image }}", CI_WORKFLOW)
         self.assertIn("outputs:\n  image:", PUBLISH_ACTION)
         self.assertIn('printf \'image=%s:%s\\n\' "$PUBLISHED_IMAGE" "$IMAGE_TAG" >> "$GITHUB_OUTPUT"', PUBLISH_ACTION)

@@ -176,13 +176,23 @@ jobs:
             "$CI_IMAGE" \
             pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
 
+      # The caller repo remains at the workspace root for the Dockerfile and
+      # build context. Check out this repository separately so this reusable
+      # workflow resolves its composite action from workflow-templates.
+      - name: Checkout workflow-templates (for composite actions)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: 1efa2e0d985b5d9e75e95c3a79c500a27fa5bcdb  # v2.9.0 — bump deliberately when a composite here changes
+          path: .wt-checkout
+
       - name: Publish backend image to GHCR
         id: publish_backend_image
         # Publish only after pytest succeeds. CI-6 callers test a lean
         # `backend_test` target, so build the full production image here for
         # the registry; the host daemon's warm BuildKit cache makes that
         # second build cheap and replaces the former server-side build.
-        uses: ./.github/actions/publish-backend-image
+        uses: ./.wt-checkout/.github/actions/publish-backend-image
         with:
           image_tag: ${{ steps.resolve_sha.outputs.sha }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
