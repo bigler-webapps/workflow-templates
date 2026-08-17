@@ -1,0 +1,94 @@
+name: 'Restic Local Repository Check'
+description: >-
+  INF-23. Full `restic check --read-data` against a target's LOCAL restic
+  repository, over SSH -- the recovery source of last resort, and never
+  checked by anything today (verify_backup.py only ever targets the shared
+  B2 repository). Disk-local I/O, no B2 egress cost, so no reason to sample
+  it the way the B2 check does -- every run reads the whole local repo.
+
+  Read-only. Never runs `restic repair`, `prune`, `forget`, or `unlock`.
+
+inputs:
+  target:
+    description: 'Inventory target name (used for logging). Must match ^[a-zA-Z0-9_-]+$.'
+    required: true
+  ssh_host:
+    description: 'Tailnet hostname.'
+    required: true
+  ssh_user:
+    description: 'SSH user.'
+    required: true
+  restic_repo_local:
+    description: 'Local restic repository path on the target host.'
+    required: false
+    default: '/srv/backups/restic_v2'
+  restic_password:
+    description: 'Restic encryption password.'
+    required: true
+  ts_oauth_client_id:
+    description: 'Tailscale OAuth client ID.'
+    required: true
+  ts_oauth_secret:
+    description: 'Tailscale OAuth client secret.'
+    required: true
+  ts_tag:
+    description: 'Tailnet tag for the ephemeral CI node.'
+    required: false
+    default: 'tag:ci-deploy'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+      run: |
+        set -euo pipefail
+        required_vars=(INPUT_TARGET SSH_HOST SSH_USER RESTIC_PASSWORD)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}'."
+            exit 1
+          fi
+        done
+        printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
+
+    - name: Connect to tailnet
+      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.5.2
+      with:
+        ts_oauth_client_id: ${{ inputs.ts_oauth_client_id }}
+        ts_oauth_secret: ${{ inputs.ts_oauth_secret }}
+        ts_tag: ${{ inputs.ts_tag }}
+
+    - name: 🔒 Local repository check (full --read-data, over SSH)
+      id: check_local
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RESTIC_REPO_LOCAL: ${{ inputs.restic_repo_local }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -uo pipefail
+        echo "== Local repository check: target=${TARGET} repo=${RESTIC_REPO_LOCAL} =="
+
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
+          "RESTIC_REPOSITORY=$(printf '%q' "$RESTIC_REPO_LOCAL") \
+           RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
+           bash -s" <<'EOF'
+        set -euo pipefail
+        restic check --read-data
+        EOF
+        RC=$?
+
+        if [ "$RC" -ne 0 ]; then
+          echo "❌ LOCAL REPO CHECK FAILED (target=${TARGET}, repo=${RESTIC_REPO_LOCAL})"
+        else
+          echo "✅ Local repository OK (target=${TARGET})"
+        fi
+        exit "$RC"

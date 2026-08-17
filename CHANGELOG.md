@@ -12,6 +12,24 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Added
+
+**`restic-check-local` and `restic-check-b2` composite actions** (INF-23). A damaged
+B2 pack was found live on 2026-08-17, by accident — the estate's only existing check
+(`verify_backup.py`) streams just the latest snapshot's dump files through `gzip -t`;
+it never looked at repository-level integrity (packs no current snapshot reads, the
+index, or the local repository at all, which had never been checked by anything).
+`restic-check-local` runs a full `restic check --read-data` over SSH against a
+target's local repository every run (cheap — local disk I/O, no B2 egress). Meant to
+be matrixed once per backup target. `restic-check-b2` runs `restic check
+--read-data-subset=<n>/<of>` directly on the runner (no SSH — B2 is
+internet-reachable) against the ONE shared B2 repository; deliberately a single,
+un-matrixed action, since checking the same shared repository once per target would
+triple egress cost for zero extra coverage. The rotating subset means the whole B2
+repository gets read once every `of` runs instead of downloading it whole every time.
+Both actions are strictly read-only — never `restic repair`, `prune`, `forget`, or
+`unlock`; detection only, repair stays a separate operator action.
+
 ### Fixed
 
 **`backup` action: verification no longer skips on a retention-only failure** (INF-24).

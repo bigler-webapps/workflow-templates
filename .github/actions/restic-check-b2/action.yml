@@ -1,0 +1,95 @@
+name: 'Restic B2 Repository Check'
+description: >-
+  INF-23. Runs restic directly on the Actions runner (B2 is reachable without
+  SSH) against the ONE shared B2 repository -- deliberately NOT matrixed per
+  target, since all targets write into the same repository and checking it
+  three times per run would triple the egress cost for zero extra coverage.
+
+  `restic check --read-data-subset=n/of` does the cheap index/structure
+  check EVERY run, plus reads only a rotating 1/`of` slice of the actual pack
+  data -- the whole repository gets read once every `of` runs instead of
+  downloading it whole every time (egress cost, INF-23 Risk 1).
+
+  Read-only. Never runs `restic repair`, `prune`, `forget`, or `unlock`.
+
+inputs:
+  restic_repo_b2:
+    description: 'Restic B2 repository URL.'
+    required: true
+  restic_password:
+    description: 'Restic encryption password.'
+    required: true
+  b2_key_id:
+    description: 'Backblaze B2 key ID.'
+    required: true
+  b2_app_key:
+    description: 'Backblaze B2 application key.'
+    required: true
+  read_data_subset_n:
+    description: 'Numerator for --read-data-subset=n/of this run (e.g. day-of-week, 1-7).'
+    required: true
+  read_data_subset_of:
+    description: 'Denominator -- the whole repo is read once every `of` runs.'
+    required: false
+    default: '7'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 🔎 Validate inputs
+      shell: bash
+      env:
+        RESTIC_REPO_B2: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        B2_KEY_ID: ${{ inputs.b2_key_id }}
+        B2_APP_KEY: ${{ inputs.b2_app_key }}
+        READ_DATA_SUBSET_N: ${{ inputs.read_data_subset_n }}
+        READ_DATA_SUBSET_OF: ${{ inputs.read_data_subset_of }}
+      run: |
+        set -euo pipefail
+        required_vars=(RESTIC_REPO_B2 RESTIC_PASSWORD B2_KEY_ID B2_APP_KEY)
+        for var_name in "${required_vars[@]}"; do
+          if [ -z "${!var_name}" ]; then
+            echo "❌ Missing required input '${var_name}'."
+            exit 1
+          fi
+        done
+        printf '%s' "$READ_DATA_SUBSET_N" | grep -qE '^[0-9]+$' || { echo "❌ Invalid 'read_data_subset_n' input"; exit 1; }
+        printf '%s' "$READ_DATA_SUBSET_OF" | grep -qE '^[1-9][0-9]*$' || { echo "❌ Invalid 'read_data_subset_of' input"; exit 1; }
+
+    - name: 📦 Install restic on runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends restic
+        echo "restic: $(restic version)"
+
+    - name: 🌐 B2 repository check (index + rotating data subset)
+      id: check_b2
+      shell: bash
+      env:
+        RESTIC_REPOSITORY: ${{ inputs.restic_repo_b2 }}
+        RESTIC_PASSWORD: ${{ inputs.restic_password }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.b2_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
+        READ_DATA_SUBSET_N: ${{ inputs.read_data_subset_n }}
+        READ_DATA_SUBSET_OF: ${{ inputs.read_data_subset_of }}
+      run: |
+        set -uo pipefail
+        echo "::add-mask::${RESTIC_REPOSITORY}"
+        SUBSET="${READ_DATA_SUBSET_N}/${READ_DATA_SUBSET_OF}"
+        echo "== B2 repository check: shared repo, read-data-subset=${SUBSET} =="
+
+        restic check --read-data-subset="${SUBSET}"
+        RC=$?
+
+        if [ "$RC" -ne 0 ]; then
+          echo "❌ B2 REPO CHECK FAILED (shared repository, subset=${SUBSET})"
+          echo "   This repository is shared across every backup target --"
+          echo "   the affected pack may implicate snapshots from more than one host."
+          echo "   Run 'restic find --pack <id>' (operator, credentials from Proton) to learn what references it."
+        else
+          echo "✅ B2 repository OK for this run's subset (subset=${SUBSET})"
+        fi
+        exit "$RC"
