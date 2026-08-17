@@ -10,6 +10,26 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.10.1] - 2026-08-17
+
+### Fixed
+
+**Backup verification marker was never detected (INF-25).** INF-24 gated the
+`backup` action's "Verify backup" step on `backup.py` printing a
+`B2_SNAPSHOT_CREATED=<id>` marker line, detected via `grep -q
+'^B2_SNAPSHOT_CREATED='`. `backup.py` only ever emits that line through its
+`log()` helper, which prepends a `[HH:MM:SS] ` timestamp — the anchored
+pattern can never match a timestamp-prefixed line. Net effect: verification
+silently stopped running for every backup target the moment INF-24 shipped,
+while the workflow still reported success (a skipped step is not a failing
+step). Found on the first real dispatch after INF-24 landed (main-prod, run
+`32041063909`, 2026-08-17) — this is not a `2.10.0` regression, `2.9.1`
+already shipped the bug; `2.10.0` just hadn't been re-tested live yet.
+Fix: drop the `^` anchor. `.github/scripts/test_backup_action.py`'s prior
+assertion pinned the buggy anchored string as required — the test itself is
+why this shipped unnoticed — replaced with a behavioral test that runs the
+actual extracted grep pattern against a realistic `log()`-formatted line.
+
 ## [2.10.0] - 2026-08-17
 
 ### Added

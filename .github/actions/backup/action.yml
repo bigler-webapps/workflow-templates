@@ -182,7 +182,17 @@ runs:
         # retention-only failure (e.g. the shared B2 repo's exclusive lock
         # held by another concurrent target) still lets the real snapshot it
         # just created get verified.
-        if printf '%s\n' "$OUTPUT" | grep -q '^B2_SNAPSHOT_CREATED='; then
+        #
+        # INF-25: NOT anchored with `^`. backup.py emits this line through
+        # its log() helper, which prepends a "[HH:MM:SS] " timestamp to
+        # every line -- an anchored pattern can never match, so this always
+        # fell through to the else branch. Result: snapshot_created was
+        # always "false" and verify_backup's `if:` was always false, so
+        # verification silently stopped running for every target the moment
+        # INF-24 shipped, while the run still reported success (a skipped
+        # step is not a failure). Found on the first real dispatch after
+        # INF-24 landed (main-prod, run 32041063909, 2026-08-17).
+        if printf '%s\n' "$OUTPUT" | grep -q 'B2_SNAPSHOT_CREATED='; then
           echo "snapshot_created=true" >> "$GITHUB_OUTPUT"
         else
           echo "snapshot_created=false" >> "$GITHUB_OUTPUT"
