@@ -14,6 +14,26 @@ tag, not `@main`. The current stable tag is documented below.
 
 ### Fixed
 
+**`backup` action: verification no longer skips on a retention-only failure** (INF-24).
+`backup.py` dumps, backs up, and prunes both a local and a B2 restic repository in
+one script; the composite action gated its verify step on `run_backup`'s overall
+exit status, so a `restic forget --prune` failure on the shared B2 repository (e.g.
+another concurrent target holding its exclusive lock) silently skipped integrity
+verification of a snapshot that had, in fact, already been created successfully.
+Observed live: main-prod's prune lost a lock race against research-prod's, and the
+run reported `RUN_BACKUP_OUTCOME: failure, VERIFY_BACKUP_OUTCOME: skipped` even
+though the B2 snapshot was fine. Fix: `backup.py` now prints an unconditional
+`B2_SNAPSHOT_CREATED=<id>` marker line the instant a B2 snapshot exists — before
+the retention step that can still fail the run overall — and the `run_backup` step
+captures its own output to set a new `snapshot_created` output; `verify_backup`
+now gates on that instead of `run_backup`'s outcome. A retention failure still
+fails the run (unchanged); it just no longer hides whether the data itself is good.
+The step summary now shows "B2 Snapshot Created" as its own line so the two
+failure shapes ("snapshot created, verified, retention failed" vs "snapshot never
+created") read as different reds. Existing pinned tags are unaffected until a
+caller bumps its pin; `verify_backup.py`'s own logic (INF-17) is unchanged — only
+when it is invoked.
+
 **Deploy workflows now publish the image they deploy** (CI-11). CI-9/CI-10 built
 a pull-based deploy on the assumption that CI runs before every deploy — it
 doesn't, here: `app-ci.yml` triggers on `pull_request` only, while a deploy

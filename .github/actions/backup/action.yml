@@ -147,8 +147,19 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
         PYTHONUNBUFFERED: "1"
       run: |
-        set -euo pipefail
+        # No `set -e`: the ssh call's own exit code must be inspected below
+        # (its own remote script keeps `set -euo pipefail`), not let this
+        # step's shell abort before we can capture and log its output.
+        set -uo pipefail
 
+        # `tee` keeps the log streaming live (several minutes of dumps + two
+        # restic backups per target) while still letting us grep the full
+        # output afterward -- a plain `OUTPUT="$(ssh ...)"` command
+        # substitution would buffer everything until the ssh call finishes,
+        # which silently turned this step's live log into one end-of-run
+        # burst. `${PIPESTATUS[0]}` is ssh's own exit code, not tee's (tee
+        # always exits 0).
+        OUTPUT_FILE="$(mktemp)"
         ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "RESTIC_REPO_LOCAL=$(printf '%q' "$RESTIC_REPO_LOCAL") \
            RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
@@ -156,14 +167,40 @@ runs:
            AWS_ACCESS_KEY_ID=$(printf '%q' "$AWS_ACCESS_KEY_ID") \
            AWS_SECRET_ACCESS_KEY=$(printf '%q' "$AWS_SECRET_ACCESS_KEY") \
            PYTHONUNBUFFERED=$(printf '%q' "$PYTHONUNBUFFERED") \
-           bash -s" <<'EOF'
+           bash -s" <<'EOF' | tee "$OUTPUT_FILE"
         set -euo pipefail
         python3 /srv/infrastructure/ops-scripts/backup.py
         EOF
+        RC=${PIPESTATUS[0]}
+        OUTPUT="$(cat "$OUTPUT_FILE")"
+        rm -f "$OUTPUT_FILE"
+
+        # INF-24: verification must follow "a B2 snapshot was created", not
+        # "every subsequent housekeeping step (retention/prune) also
+        # succeeded" -- backup.py now prints this marker unconditionally,
+        # BEFORE it can fail() on a later retention error, precisely so a
+        # retention-only failure (e.g. the shared B2 repo's exclusive lock
+        # held by another concurrent target) still lets the real snapshot it
+        # just created get verified.
+        if printf '%s\n' "$OUTPUT" | grep -q '^B2_SNAPSHOT_CREATED='; then
+          echo "snapshot_created=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "snapshot_created=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit "$RC"
 
     - name: 🔍 Verify backup (smoke test)
       id: verify_backup
-      if: steps.run_backup.outcome == 'success'
+      # INF-24: gated on "a B2 snapshot was created this run" (the step
+      # output above), NOT on steps.run_backup.outcome -- a retention-only
+      # failure must not skip verification of a snapshot that DID get
+      # created. Equally, this must NOT run when no snapshot was created
+      # (snapshot_created defaults to unset/false, e.g. sync_scripts failed
+      # before run_backup even started) -- that is the mirror trap: verifying
+      # a stale on-disk marker from a PRIOR successful run and calling it
+      # green for a run that never actually backed anything up.
+      if: steps.run_backup.outputs.snapshot_created == 'true'
       continue-on-error: true
       shell: bash
       env:
@@ -274,6 +311,7 @@ runs:
         TARGET_NAME: ${{ inputs.target }}
         SYNC_SCRIPTS_OUTCOME: ${{ steps.sync_scripts.outcome }}
         RUN_BACKUP_OUTCOME: ${{ steps.run_backup.outcome }}
+        SNAPSHOT_CREATED: ${{ steps.run_backup.outputs.snapshot_created }}
         VERIFY_BACKUP_OUTCOME: ${{ steps.verify_backup.outcome }}
         SYNC_STAGING_OUTCOME: ${{ steps.sync_staging.outcome }}
       run: |
@@ -293,6 +331,11 @@ runs:
           echo "- Final status: \`${final_status}\`"
           echo "- Sync Scripts: \`${SYNC_SCRIPTS_OUTCOME}\`"
           echo "- Run Backup: \`${RUN_BACKUP_OUTCOME}\`"
+          # INF-24: distinguishes "backup step failed, no snapshot exists" from
+          # "the snapshot was created fine, a later housekeeping step failed" --
+          # the two must not read as the same red (both can show
+          # RUN_BACKUP_OUTCOME=failure).
+          echo "- B2 Snapshot Created: \`${SNAPSHOT_CREATED:-false}\`"
           echo "- Verify Backup: \`${VERIFY_BACKUP_OUTCOME}\`"
           echo "- Sync to Staging: \`${SYNC_STAGING_OUTCOME}\`"
           echo
