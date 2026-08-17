@@ -22,7 +22,7 @@ on:
         default: ''
       db-image:
         type: string
-        default: 'postgis/postgis:14-3.1'
+        default: 'postgres:14'
       django-settings-module:
         type: string
         default: 'backend.test_settings'
