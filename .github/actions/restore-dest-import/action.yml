@@ -209,6 +209,22 @@ runs:
           | tar -C "$WORK_DIR" -xf -
         rm -f "${WORK_DIR}/dump.tar.enc"
         chmod 600 "${WORK_DIR}/dump.sql.gz" "${WORK_DIR}/manifest.json"
+
+        if ! EXPECTED_SHA256="$(jq -er '.dump_sha256 | select(type == "string" and test("^[0-9a-fA-F]{64}$")) | ascii_downcase' "${WORK_DIR}/manifest.json")"; then
+          echo "❌ dump integrity check failed: manifest has no valid dump_sha256" >&2
+          exit 1
+        fi
+        if ! EXPECTED_SIZE="$(jq -er '.dump_size_bytes | select(type == "number" and floor == . and . >= 0) | tostring' "${WORK_DIR}/manifest.json")"; then
+          echo "❌ dump integrity check failed: manifest has no valid dump_size_bytes" >&2
+          exit 1
+        fi
+
+        ACTUAL_SHA256="$(sha256sum "${WORK_DIR}/dump.sql.gz" | awk '{print $1}')"
+        ACTUAL_SIZE="$(stat -c%s "${WORK_DIR}/dump.sql.gz")"
+        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ] || [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
+          echo "❌ dump integrity check failed: expected sha256=${EXPECTED_SHA256} size=${EXPECTED_SIZE}, got sha256=${ACTUAL_SHA256} size=${ACTUAL_SIZE}" >&2
+          exit 1
+        fi
         ls -la "$WORK_DIR"
         EOF
 

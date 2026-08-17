@@ -32,6 +32,14 @@ Both actions are strictly read-only — never `restic repair`, `prune`, `forget`
 
 ### Fixed
 
+**Cross-server restores now reject incomplete dump handoffs** (CI-10). The source
+export records the SQL gzip's byte size and SHA-256 in its encrypted manifest, and
+the destination verifies both values on-host before invoking `restore.py`. The
+restore script independently fails after migrations if any public base table lacks
+a primary key, covering a source dump that was already incomplete when its checksum
+was recorded. The exact historical loss hop remains unmeasured; these checks are
+deliberately hop-agnostic across export, artifact transport, SCP, and extraction.
+
 **`backup` action: verification no longer skips on a retention-only failure** (INF-24).
 `backup.py` dumps, backs up, and prunes both a local and a B2 restic repository in
 one script; the composite action gated its verify step on `run_backup`'s overall

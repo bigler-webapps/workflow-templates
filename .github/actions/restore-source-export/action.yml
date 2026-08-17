@@ -246,6 +246,7 @@ runs:
         echo "Selected dump: ${DUMP_PATH}"
 
     - name: 💾 Restic dump → local file
+      id: dump
       shell: bash
       env:
         RESTIC_REPOSITORY: ${{ inputs.restic_repo_b2 }}
@@ -264,6 +265,10 @@ runs:
           echo "❌ Dump file is empty: $OUT"
           exit 1
         fi
+        DUMP_SHA256="$(sha256sum "$OUT" | awk '{print $1}')"
+        DUMP_SIZE_BYTES="$(stat -c%s "$OUT")"
+        echo "sha256=${DUMP_SHA256}" >> "$GITHUB_OUTPUT"
+        echo "size_bytes=${DUMP_SIZE_BYTES}" >> "$GITHUB_OUTPUT"
         ls -la "$WORK_DIR"
 
     - name: 📝 Write manifest
@@ -275,6 +280,8 @@ runs:
         SOURCE_ENV: ${{ inputs.source_env }}
         SNAP: ${{ steps.resolve.outputs.snapshot_id }}
         DUMP_PATH: ${{ steps.resolve.outputs.dump_path }}
+        DUMP_SHA256: ${{ steps.dump.outputs.sha256 }}
+        DUMP_SIZE_BYTES: ${{ steps.dump.outputs.size_bytes }}
       run: |
         set -euo pipefail
         jq -n \
@@ -283,7 +290,9 @@ runs:
           --arg source_env "$SOURCE_ENV" \
           --arg snapshot_id "$SNAP" \
           --arg dump_path_in_snapshot "$DUMP_PATH" \
-          '{app:$app, source_target:$source_target, source_env:$source_env, snapshot_id:$snapshot_id, dump_path_in_snapshot:$dump_path_in_snapshot}' \
+          --arg dump_sha256 "$DUMP_SHA256" \
+          --argjson dump_size_bytes "$DUMP_SIZE_BYTES" \
+          '{app:$app, source_target:$source_target, source_env:$source_env, snapshot_id:$snapshot_id, dump_path_in_snapshot:$dump_path_in_snapshot, dump_sha256:$dump_sha256, dump_size_bytes:$dump_size_bytes}' \
           > "${WORK_DIR}/manifest.json"
         chmod 600 "${WORK_DIR}/manifest.json"
 
