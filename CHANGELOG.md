@@ -10,7 +10,7 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
-## [Unreleased]
+## [2.10.0] - 2026-08-17
 
 ### Added
 
