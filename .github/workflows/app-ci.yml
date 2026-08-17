@@ -291,6 +291,15 @@ jobs:
           cache: pnpm
           cache-dependency-path: ${{ inputs.frontend-path }}/pnpm-lock.yaml
 
+      # The reusable workflow runs in the caller's checkout, so this script
+      # must be checked out explicitly from workflow-templates.
+      - name: Checkout workflow-templates (for i18n check)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: main
+          path: .wt-checkout
+
       - name: Install dependencies
         working-directory: ${{ inputs.frontend-path }}
         run: pnpm install --frozen-lockfile
@@ -299,6 +308,9 @@ jobs:
         if: ${{ inputs.run-frontend-lint }}
         working-directory: ${{ inputs.frontend-path }}
         run: pnpm lint
+
+      - name: Check for duplicate i18n keys
+        run: python3 .wt-checkout/.github/scripts/check_i18n_duplicate_keys.py "${{ inputs.frontend-path }}"
 
       - name: Test
         if: ${{ inputs.run-frontend-tests }}
