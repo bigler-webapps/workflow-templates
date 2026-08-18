@@ -10,6 +10,31 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.10.2] - 2026-08-18
+
+### Fixed
+
+**`restore-source-export`'s "latest" snapshot resolution was host-blind (INF-31).**
+All backup targets (main-prod, innoservice-prod, research-prod) share one B2
+restic repository, serialised nightly with research-prod running last.
+`sort_by(.time) | last` in the resolve step picked the globally-newest
+snapshot regardless of host — once research-prod began originating its own
+nightly backups, its snapshot became the systematic "latest" for every
+restore, causing `sync-staging` to fail `No dump matching` for every
+main-prod app. Fix: filter by `--host <source_target>` before sorting
+(`backup.py` already tags every snapshot with `--host $(hostname)`).
+
+### Changed
+
+**CI database default flipped from `postgis/postgis:14-3.1` to `postgres:14` (CI-16).**
+`app-ci.yml`'s `db-image` default ran every consumer's CI database on a
+PostGIS image regardless of whether the app used GeoDjango. Measured on
+staging 2026-08-17: 13 of 14 app databases carried PostGIS extensions
+installed by the image at initdb, not by any app; real app-owned geometry
+columns exist in hram only. The three repos that do need PostGIS (hram,
+jg-ferien, kerzenziehen) now pin `postgis/postgis:14-3.1` explicitly via
+their own `db-image` input.
+
 ## [2.10.1] - 2026-08-17
 
 ### Fixed
