@@ -190,6 +190,7 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.b2_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
         APP_NAME: ${{ inputs.app_name }}
+        SOURCE_TARGET: ${{ inputs.source_target }}
         SOURCE_ENV: ${{ inputs.source_env }}
         SNAPSHOT_INPUT: ${{ inputs.snapshot_id }}
       run: |
@@ -201,16 +202,18 @@ runs:
         echo "::add-mask::${RESTIC_REPOSITORY}"
 
         if [ "$SNAPSHOT_INPUT" = "latest" ]; then
-          # `restic snapshots --latest 1` returns the latest snapshot PER (host, paths)
-          # tuple — when an old server identity is still in the repo, the first entry
-          # may be a stale snapshot. Sort all snapshots by .time and pick the truly
-          # newest one.
-          SNAP="$(restic snapshots --json | jq -r 'sort_by(.time) | last | .id // empty')"
+          # Limit the shared repository to the requested source host, then sort all
+          # of that host's snapshots by time to select its truly newest snapshot.
+          SNAP="$(restic snapshots --host "$SOURCE_TARGET" --json | jq -r 'sort_by(.time) | last | .id // empty')"
         else
           SNAP="$(restic snapshots "$SNAPSHOT_INPUT" --json | jq -r '.[0].id // empty')"
         fi
         if [ -z "$SNAP" ]; then
-          echo "❌ Snapshot '${SNAPSHOT_INPUT}' could not be resolved against the configured B2 repo."
+          if [ "$SNAPSHOT_INPUT" = "latest" ]; then
+            echo "❌ No snapshot for source host '${SOURCE_TARGET}' could be resolved against the configured B2 repo."
+          else
+            echo "❌ Snapshot '${SNAPSHOT_INPUT}' could not be resolved against the configured B2 repo."
+          fi
           exit 1
         fi
         echo "snapshot_id=${SNAP}" >> "$GITHUB_OUTPUT"
