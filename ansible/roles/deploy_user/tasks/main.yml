@@ -19,6 +19,10 @@
         state: present
 
     - name: Configure passwordless maintenance sudoers entry
+      # CI-13: dbpull needs NO general sudo at all (its one privileged
+      # command has its own dedicated, argument-less sudoers rule elsewhere)
+      # -- every existing caller (deploy, provision) always passed a
+      # non-empty list, so this guard changes nothing for them.
       community.general.sudoers:
         name: "{{ deploy_user_sudoers_filename }}"
         state: present
@@ -27,6 +31,7 @@
         nopassword: true
         setenv: true
         validation: required
+      when: deploy_user_sudo_commands | default([]) | length > 0
 
     - name: Ensure deploy user's .ssh directory exists with correct perms
       ansible.builtin.file:
