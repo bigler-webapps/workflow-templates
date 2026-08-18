@@ -1,4 +1,4 @@
-"""Regression tests for host-scoped latest snapshot resolution (INF-31).
+"""Regression tests for host-scoped latest snapshot resolution (INF-31, INF-32).
 
 Run with: python .github/scripts/test_restore_source_export.py
 """
@@ -25,7 +25,15 @@ def _snapshot_resolution_script() -> str:
     return match.group(0)
 
 
-def _restic_snapshot_args(snapshot_input: str, source_target: str) -> list[str]:
+def _host_for_filter(restic_host: str, source_target: str) -> str:
+    """Simulate bash's ${RESTIC_HOST:-$SOURCE_TARGET} expansion (INF-32)."""
+    match = re.search(r'HOST_FOR_FILTER="\$\{RESTIC_HOST:-\$SOURCE_TARGET\}"', RESOLVE_STEP)
+    if match is None:
+        raise AssertionError("could not find the HOST_FOR_FILTER fallback assignment")
+    return restic_host or source_target
+
+
+def _restic_snapshot_args(snapshot_input: str, source_target: str, restic_host: str = "") -> list[str]:
     """Evaluate which restic argv the Bash conditional selects."""
     conditional = _snapshot_resolution_script()
     latest_branch, explicit_branch = conditional.split("else", 1)
@@ -35,17 +43,26 @@ def _restic_snapshot_args(snapshot_input: str, source_target: str) -> list[str]:
         raise AssertionError("could not find the restic snapshots invocation")
     values = {
         "$SNAPSHOT_INPUT": snapshot_input,
-        "$SOURCE_TARGET": source_target,
+        "$HOST_FOR_FILTER": _host_for_filter(restic_host, source_target),
     }
     return [values.get(arg, arg) for arg in shlex.split(match.group(0))]
 
 
 class RestoreSourceExportSnapshotTests(unittest.TestCase):
-    def test_latest_uses_source_target_as_restic_host_filter(self):
-        self.assertIn("SOURCE_TARGET: ${{ inputs.source_target }}", RESOLVE_STEP)
+    def test_latest_falls_back_to_source_target_when_restic_host_unset(self):
+        # No override (the common case: source_target already matches the OS
+        # hostname restic tags snapshots with).
+        self.assertIn('HOST_FOR_FILTER="${RESTIC_HOST:-$SOURCE_TARGET}"', RESOLVE_STEP)
         self.assertEqual(
-            _restic_snapshot_args("latest", source_target="main-prod"),
-            ["restic", "snapshots", "--host", "main-prod", "--json"],
+            _restic_snapshot_args("latest", source_target="innoservice-prod", restic_host=""),
+            ["restic", "snapshots", "--host", "innoservice-prod", "--json"],
+        )
+
+    def test_latest_uses_restic_host_override_when_set(self):
+        # main-prod's OS hostname (INF-32) diverges from its inventory name.
+        self.assertEqual(
+            _restic_snapshot_args("latest", source_target="main-prod", restic_host="app-server"),
+            ["restic", "snapshots", "--host", "app-server", "--json"],
         )
 
     def test_explicit_snapshot_id_is_not_host_filtered(self):
@@ -58,8 +75,12 @@ class RestoreSourceExportSnapshotTests(unittest.TestCase):
         self.assertNotRegex(latest_branch, r"restic snapshots\s+--json")
         self.assertRegex(
             latest_branch,
-            r'restic snapshots\s+--host\s+"\$SOURCE_TARGET"\s+--json',
+            r'restic snapshots\s+--host\s+"\$HOST_FOR_FILTER"\s+--json',
         )
+
+    def test_restic_host_input_is_optional_with_empty_default(self):
+        self.assertRegex(ACTION_TEXT, r"restic_host:\n(?:.*\n)*?\s+required:\s*false")
+        self.assertRegex(ACTION_TEXT, r"restic_host:\n(?:.*\n)*?\s+default:\s*''")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,13 @@ inputs:
   source_target:
     description: 'Inventory target name of the source (used for logging + work-dir naming).'
     required: true
+  restic_host:
+    description: >-
+      OS hostname the source's restic snapshots are tagged with (backup.py's
+      `--host os.uname().nodename`). Defaults to source_target when omitted —
+      only pass this when the two diverge (INF-32).
+    required: false
+    default: ''
   app_name:
     description: 'App name (e.g. innoservice). Must match ^[a-zA-Z0-9_-]+$.'
     required: true
@@ -58,6 +65,7 @@ runs:
       shell: bash
       env:
         INPUT_SOURCE_TARGET: ${{ inputs.source_target }}
+        INPUT_RESTIC_HOST: ${{ inputs.restic_host }}
         INPUT_APP_NAME: ${{ inputs.app_name }}
         INPUT_SOURCE_ENV: ${{ inputs.source_env }}
         INPUT_SNAPSHOT_ID: ${{ inputs.snapshot_id }}
@@ -77,6 +85,11 @@ runs:
         done
 
         printf '%s' "$INPUT_SOURCE_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'source_target' input"; exit 1; }
+        # restic_host is optional (empty = fall back to source_target); only
+        # validate its shape when the caller actually set it.
+        if [ -n "$INPUT_RESTIC_HOST" ]; then
+          printf '%s' "$INPUT_RESTIC_HOST" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'restic_host' input"; exit 1; }
+        fi
         printf '%s' "$INPUT_APP_NAME" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'app_name' input"; exit 1; }
         printf '%s' "$INPUT_SOURCE_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'source_env' input"; exit 1; }
         printf '%s' "$INPUT_SNAPSHOT_ID" | grep -qE '^(latest|[a-zA-Z0-9_-]+)$' || { echo "❌ Invalid 'snapshot_id' input"; exit 1; }
@@ -191,6 +204,7 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.b2_app_key }}
         APP_NAME: ${{ inputs.app_name }}
         SOURCE_TARGET: ${{ inputs.source_target }}
+        RESTIC_HOST: ${{ inputs.restic_host }}
         SOURCE_ENV: ${{ inputs.source_env }}
         SNAPSHOT_INPUT: ${{ inputs.snapshot_id }}
       run: |
@@ -201,16 +215,23 @@ runs:
         # Belt-and-braces so the repo URL never lands in failure logs.
         echo "::add-mask::${RESTIC_REPOSITORY}"
 
+        # INF-32: restic snapshots are tagged with the source's OS hostname
+        # (backup.py's `--host os.uname().nodename`), which can diverge from
+        # the inventory target name (main-prod's OS hostname is 'app-server').
+        # restic_host is the caller-resolved override; empty means the two
+        # already match.
+        HOST_FOR_FILTER="${RESTIC_HOST:-$SOURCE_TARGET}"
+
         if [ "$SNAPSHOT_INPUT" = "latest" ]; then
           # Limit the shared repository to the requested source host, then sort all
           # of that host's snapshots by time to select its truly newest snapshot.
-          SNAP="$(restic snapshots --host "$SOURCE_TARGET" --json | jq -r 'sort_by(.time) | last | .id // empty')"
+          SNAP="$(restic snapshots --host "$HOST_FOR_FILTER" --json | jq -r 'sort_by(.time) | last | .id // empty')"
         else
           SNAP="$(restic snapshots "$SNAPSHOT_INPUT" --json | jq -r '.[0].id // empty')"
         fi
         if [ -z "$SNAP" ]; then
           if [ "$SNAPSHOT_INPUT" = "latest" ]; then
-            echo "❌ No snapshot for source host '${SOURCE_TARGET}' could be resolved against the configured B2 repo."
+            echo "❌ No snapshot for source host '${HOST_FOR_FILTER}' (target '${SOURCE_TARGET}') could be resolved against the configured B2 repo."
           else
             echo "❌ Snapshot '${SNAPSHOT_INPUT}' could not be resolved against the configured B2 repo."
           fi

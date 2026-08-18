@@ -10,6 +10,20 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.10.3] - 2026-08-18
+
+### Fixed
+
+**`restore-source-export`'s host-scoped resolution (INF-31) assumed the inventory
+target name equals the source's OS hostname — it doesn't, for main-prod (INF-32).**
+`backup.py` tags every restic snapshot with `os.uname().nodename`. Verified live:
+`innoservice-prod`'s OS hostname matches its inventory name, but main-prod's is
+`app-server` — a legacy naming leftover. INF-31's `--host <source_target>` filter
+therefore still found zero snapshots for every main-prod-sourced restore. Fix: a
+new optional `restic_host` input (default: fall back to `source_target`), set from
+webapp-management's own `project.yaml` (`infra.servers.main-prod.restic_host:
+app-server`) for the one host that diverges.
+
 ## [2.10.2] - 2026-08-18
 
 ### Fixed
