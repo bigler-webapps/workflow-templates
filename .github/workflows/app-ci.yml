@@ -22,7 +22,17 @@ on:
         default: ''
       db-image:
         type: string
-        default: 'postgres:14'
+        # Must track what the fleet actually RUNS, not what it once ran.
+        # Bumped 14 -> 18 on 2026-08-19 (INF-37/INF-41): twelve apps had been
+        # on postgres:18 in production for a day while their tests still ran
+        # against 14 -- drift that Django 6.1 merely made visible by refusing
+        # PG14 outright (`PostgreSQL 15 or later is required (found 14.24)`).
+        # Safe for the apps still on Django 6.0.x: fitness-monitor runs 6.0.6
+        # against postgres:18 in production today, so the combination is in
+        # service, not assumed. Apps needing an extension override this --
+        # cockpit (pgvector) and hram (postgis) -- and their overrides must
+        # track their own production images the same way.
+        default: 'postgres:18'
       django-settings-module:
         type: string
         default: 'backend.test_settings'
