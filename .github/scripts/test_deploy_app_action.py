@@ -123,3 +123,221 @@ class CI9StructuralTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- INF-51: the deploy removes the image it replaces -----------------------
+
+
+import os
+import shutil
+import stat
+import subprocess
+import tempfile
+
+
+BASH = shutil.which("bash")
+
+# The stub answers the four docker forms the cleanup block uses. Which ids each
+# listing returns is what the individual tests vary.
+DOCKER_STUB = r"""#!/usr/bin/env bash
+if [ "$1" = "compose" ]; then
+  # `compose ... ps -q` -- the containers of THIS project, after the recreate.
+  printf '%s\n' $NEW_IDS
+  exit 0
+fi
+case "$1" in
+  ps)
+    # host-wide, every container including other apps'
+    printf '%s\n' $ALL_IDS
+    ;;
+  inspect)
+    shift 3   # drop: inspect --format <fmt>
+    for id in "$@"; do
+      eval "printf '%s\n' \"\$REF_$id\""
+    done
+    ;;
+  image)
+    if [ "$2" = "rm" ]; then
+      echo "$3" >> "$RM_LOG"
+    fi
+    ;;
+esac
+"""
+
+
+def _extract_cleanup_block() -> str:
+    """Pull the real cleanup block out of action.yml and un-escape it.
+
+    Deliberately NOT a copy of the logic: a test that re-implements what it
+    checks proves nothing. The block lives inside an ssh heredoc where every
+    runtime `$` is written `\\$`, so undoing that escaping is all that stands
+    between the committed text and something bash can run.
+    """
+    start = DEPLOY_ACTION.index('echo "Removing the image this deploy replaced')
+    end = DEPLOY_ACTION.index("} || true", start) + len("} || true")
+    block = DEPLOY_ACTION[start:end]
+    return block.replace("\\$", "$")
+
+
+def _run_cleanup(prev_refs, new_ids, all_ids, refs, image_tag="NEWSHA"):
+    """Execute the extracted block with docker stubbed. Returns (stdout, removed)."""
+    if not BASH:
+        raise unittest.SkipTest("no bash available on PATH")
+    tmp = Path(tempfile.mkdtemp())
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text(DOCKER_STUB, encoding="utf-8", newline="\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    rm_log = tmp / "removed.txt"
+    script = tmp / "cleanup.sh"
+    harness = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'DOCKER="docker"\n'
+        'COMPOSE_FILES="-f docker-compose.yml"\n'
+        f'IMAGE_TAG="{image_tag}"\n'
+        'PREV_IMAGE_REFS="' + "\n".join(prev_refs) + '"\n'
+        + _extract_cleanup_block()
+        + "\n"
+    )
+    script.write_text(harness, encoding="utf-8", newline="\n")
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    env["RM_LOG"] = str(rm_log)
+    env["NEW_IDS"] = " ".join(new_ids)
+    env["ALL_IDS"] = " ".join(all_ids)
+    for cid, ref in refs.items():
+        env["REF_" + cid] = ref
+
+    proc = subprocess.run(
+        [BASH, str(script)], env=env, capture_output=True, text=True, timeout=60
+    )
+    removed = set(rm_log.read_text(encoding="utf-8").split()) if rm_log.exists() else set()
+    return proc, removed
+
+
+class INF51DeployImageCleanup(unittest.TestCase):
+    def test_the_replaced_tag_is_removed_and_nothing_else_is(self):
+        """The ordinary successful deploy: old app image goes, the new one and
+        the unchanged sidecar stay."""
+        proc, removed = _run_cleanup(
+            prev_refs=["ghcr.io/x/app:OLDSHA", "postgres:18"],
+            new_ids=["c_app", "c_db"],
+            all_ids=["c_app", "c_db", "c_other"],
+            refs={
+                "c_app": "ghcr.io/x/app:NEWSHA",
+                "c_db": "postgres:18",
+                "c_other": "ghcr.io/x/otherapp:zzz",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(removed, {"ghcr.io/x/app:OLDSHA"})
+
+    def test_it_never_removes_the_tag_just_deployed(self):
+        """WO requirement 5, and the case that actually bites: re-deploying the
+        SAME tag while a service crash-loops. The project was already running
+        IMAGE_TAG, so it is in the "before" set; the failed container makes it
+        absent from the "after" set; without the explicit guard the deploy would
+        delete the image it is currently trying to run."""
+        proc, removed = _run_cleanup(
+            prev_refs=["ghcr.io/x/app:NEWSHA"],
+            new_ids=[],          # nothing came up
+            all_ids=["c_other"],
+            refs={"c_other": "ghcr.io/x/otherapp:zzz"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("ghcr.io/x/app:NEWSHA", removed)
+        self.assertIn("refusing to remove the tag just deployed", proc.stdout)
+
+    def test_it_never_removes_another_apps_image(self):
+        """Shared deploy hosts run many apps. Even if another app's ref somehow
+        reached the candidate set, the host-wide in-use check must spare it."""
+        proc, removed = _run_cleanup(
+            prev_refs=["ghcr.io/x/otherapp:zzz", "ghcr.io/x/app:OLDSHA"],
+            new_ids=["c_app"],
+            all_ids=["c_app", "c_other"],
+            refs={"c_app": "ghcr.io/x/app:NEWSHA", "c_other": "ghcr.io/x/otherapp:zzz"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("ghcr.io/x/otherapp:zzz", removed)
+        self.assertEqual(removed, {"ghcr.io/x/app:OLDSHA"})
+        self.assertIn("still in use by a container", proc.stdout)
+
+    def test_a_failed_removal_never_fails_the_deploy(self):
+        """Named risk in the WO: this runs on every app's deploy path including
+        production, and an error here is worse than the disk problem it fixes."""
+        tmp = Path(tempfile.mkdtemp())
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "docker"
+        # Every `image rm` fails, and so does the host-wide listing.
+        stub.write_text(
+            DOCKER_STUB.replace(
+                '    if [ "$2" = "rm" ]; then\n      echo "$3" >> "$RM_LOG"\n    fi',
+                '    exit 1',
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        script = tmp / "cleanup.sh"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'DOCKER="docker"\n'
+            'COMPOSE_FILES="-f docker-compose.yml"\n'
+            'IMAGE_TAG="NEWSHA"\n'
+            'PREV_IMAGE_REFS="ghcr.io/x/app:OLDSHA"\n'
+            + _extract_cleanup_block()
+            + '\necho REACHED_END\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        env["RM_LOG"] = str(tmp / "rm.txt")
+        env["NEW_IDS"] = ""
+        env["ALL_IDS"] = ""
+        if not BASH:
+            self.skipTest("no bash available on PATH")
+        proc = subprocess.run(
+            [BASH, str(script)], env=env, capture_output=True, text=True, timeout=60
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REACHED_END", proc.stdout)
+
+    def test_cleanup_runs_after_migrations_not_before(self):
+        """Ordering is the rollback guarantee: any earlier failure must leave
+        the replaced image in place."""
+        migrate = DEPLOY_ACTION.index("manage.py migrate --noinput")
+        cleanup = DEPLOY_ACTION.index('echo "Removing the image this deploy replaced')
+        self.assertLess(migrate, cleanup)
+
+    def test_the_before_snapshot_is_taken_before_the_recreate(self):
+        """PREV_IMAGE_REFS is only meaningful if it is captured while the old
+        containers are still the running ones."""
+        snapshot = DEPLOY_ACTION.index("PREV_IMAGE_REFS=")
+        recreate = DEPLOY_ACTION.index("up -d --force-recreate")
+        self.assertLess(snapshot, recreate)
+
+    def test_a_tag_with_glob_metacharacters_is_matched_literally(self):
+        """Defensive, per the security review: the guard is a `case` pattern,
+        `*:"$IMAGE_TAG"`. Quoting the variable forces LITERAL matching; without
+        the quotes a tag containing `*` would match other tags too and spare
+        images that should have been removed. Docker's reference grammar makes
+        such a tag unreachable in practice, so this pins the quoting rather than
+        a live bug."""
+        proc, removed = _run_cleanup(
+            prev_refs=["ghcr.io/x/app:v1.0", "ghcr.io/x/app:v1.*"],
+            new_ids=[],
+            all_ids=[],
+            refs={},
+            image_tag="v1.*",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # The literal tag is spared; the other one is NOT shielded by it.
+        self.assertNotIn("ghcr.io/x/app:v1.*", removed)
+        self.assertIn("ghcr.io/x/app:v1.0", removed)

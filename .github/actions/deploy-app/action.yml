@@ -586,7 +586,22 @@ runs:
         COMPOSE_FILES="-f docker-compose.yml"
 
         echo "🚀 Starting Deployment..."
+        # Dangling layers only. Every deploy image carries its commit SHA as
+        # a tag and is therefore NEVER dangling, so this line has never removed
+        # a replaced deploy image and was never going to -- that is the explicit
+        # removal near the end of this script (INF-51). Kept because dangling
+        # layers do still accumulate from server-side fallback builds.
         \$DOCKER image prune -f
+
+        # INF-51: remember what this project is running BEFORE the recreate, so
+        # the image this deploy replaces can be removed once the new one is up.
+        # Nothing bounded image CREATION previously: every push to develop built
+        # a full image and left its predecessor behind, fully tagged. Staging
+        # reached 100% disk that way, with three containers in restart loops.
+        # Read from the running containers rather than from compose config, so
+        # this is what is actually running and not what a file says should be.
+        PREV_IMAGE_REFS="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
+          | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
 
         for dir in \$PERSISTENT_DIRS; do
           mkdir -p -- "\$dir"
@@ -612,6 +627,62 @@ runs:
           echo "🔄 Running migrations..."
           \$DOCKER compose \$COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
         fi
+
+        # INF-51: remove the image this deploy replaced. Placed here, after the
+        # recreate AND after migrations, so any earlier failure leaves the old
+        # image untouched and a rollback still possible.
+        #
+        # Three guards, because this runs on every app's deploy path including
+        # production, where an error here is worse than the disk problem it
+        # solves:
+        #   1. Candidates are only refs this project was running BEFORE and is
+        #      not running now. Another app's image can therefore never be a
+        #      candidate, and an unchanged sidecar (postgres, redis) drops out
+        #      of the set by itself.
+        #   2. The tag just deployed is refused explicitly. This is what saves a
+        #      crash-looping service: a container that failed to come up is
+        #      absent from the "after" set, and without this the NEW image would
+        #      look replaced.
+        #   3. Anything still referenced by any container is left alone, checked
+        #      host-wide rather than per-project -- and with `ps -aq`, so
+        #      STOPPED containers count too. That is what makes guard 1's use of
+        #      `compose ps -q` safe: if compose's default listing omits a
+        #      stopped container, its image merely looks replaced, and this
+        #      check still refuses to remove it.
+        # Best-effort throughout: a failed removal must never fail a deploy that
+        # has otherwise succeeded.
+        echo "Removing the image this deploy replaced (best effort)..."
+        {
+          NEW_IMAGE_REFS="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
+            | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
+          IN_USE_REFS="\$(\$DOCKER ps -aq 2>/dev/null \
+            | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
+          printf '%s\n' "\$PREV_IMAGE_REFS" | while IFS= read -r ref; do
+            [ -n "\$ref" ] || continue
+            # `if`, not `grep ... && continue`: the latter leaves the statement
+            # with grep's non-zero status in the not-found case, which is the
+            # case we want to fall THROUGH on, and would only be survivable
+            # because errexit happens to be off inside this group.
+            if printf '%s\n' "\$NEW_IMAGE_REFS" | grep -qxF "\$ref"; then
+              continue
+            fi
+            case "\$ref" in
+              *:"\${IMAGE_TAG}")
+                echo "   refusing to remove the tag just deployed: \$ref"
+                continue
+                ;;
+            esac
+            if printf '%s\n' "\$IN_USE_REFS" | grep -qxF "\$ref"; then
+              echo "   still in use by a container, left in place: \$ref"
+              continue
+            fi
+            if \$DOCKER image rm "\$ref" >/dev/null 2>&1; then
+              echo "   removed replaced image: \$ref"
+            else
+              echo "   could not remove (left in place): \$ref"
+            fi
+          done
+        } || true
 
         echo "✅ Deployment finished successfully!"
         EOF
