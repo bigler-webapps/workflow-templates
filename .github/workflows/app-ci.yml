@@ -131,7 +131,7 @@ jobs:
       - name: Build backend image
         # Host-daemon BuildKit (CI-6/Grund B): the persistent self-hosted runner's
         # Docker daemon already keeps a layer cache across jobs (GC-capped via the
-        # daily `docker buildx prune --keep-storage=20GB`), so a plain `docker build`
+        # daily runner-janitor.yml -> runner_janitor.sh, INF-42), so a plain `docker build`
         # gets incremental warm builds for free. This drops setup-buildx-action's
         # docker-container driver (a separate cache namespace, not the daemon's) and
         # the remote `type=gha` cache export/import (slow, LRU-evicted under

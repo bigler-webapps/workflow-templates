@@ -77,7 +77,13 @@ runs:
         # `rsync -e ssh` over Tailnet. Auth is Tailnet-identity (server
         # responds Authenticated="none" — Tailscale's SSH listener
         # validated at WireGuard layer). No -i private-key needed.
+        # INF-42 review finding: this synced the WHOLE ops-scripts checkout,
+        # so runner_janitor.sh (which prunes volumes -- safe only on the CI
+        # runner, never on an app server) would otherwise land on every
+        # janitor-role prod box even though nothing there executes it.
+        # Excluded explicitly rather than relying on "nothing calls it".
         rsync -avz -e "ssh -o StrictHostKeyChecking=accept-new" \
+          --exclude='runner_janitor.sh' --exclude='test_runner_janitor.py' \
           "${OPS_SCRIPTS_PATH}/" \
           "${SSH_USER}@${SSH_HOST}:${REMOTE_SCRIPTS_PATH}/"
 
