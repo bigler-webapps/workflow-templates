@@ -830,3 +830,136 @@ def test_multi_get_notifications_failure_does_not_wipe_existing_default_only_mon
         encoding="utf-8",
     )
     kuma_sync.sync_monitors_multi([str(app_dir / "project.yaml")])  # must not raise — assertions live in edit_monitor/add_monitor
+
+
+# --- INF-48: monitors derive from ALL production domains, not domains[0] ------
+
+
+def _write_project_yaml(tmp_path, body):
+    path = tmp_path / "project.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+SINGLE_DOMAIN = """project_name: solo
+environments:
+  production:
+    server: main-prod
+    domains:
+      - "solo.example.ch"
+"""
+
+MULTI_DOMAIN = """project_name: hram
+environments:
+  production:
+    server: research-prod
+    domains:
+      - "hram.ch"
+      - "www.hram.ch"
+      - "imara.tz"
+      - "www.imara.tz"
+      - "imara.or.tz"
+      - "www.imara.or.tz"
+"""
+
+
+def test_single_domain_shape_is_unchanged(tmp_path):
+    """The existing shape must be provably untouched. kuma-sync prunes by NAME,
+    so a renamed primary would delete and recreate the monitor, losing its
+    history — the reason INF-48 only ADDS names."""
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, SINGLE_DOMAIN))
+    assert [s["name"] for s in specs] == ["solo-frontend", "solo-healthz"]
+    assert specs[0]["url"] == "https://solo.example.ch"
+    assert specs[1]["url"] == "https://solo.example.ch/api/healthz"
+
+
+def test_every_production_domain_gets_a_frontend_monitor(tmp_path):
+    """The defect INF-48 closes: `primary = prod_domains[0]` monitored hram on
+    hram.ch alone while its four IMARA hostnames 404ed for eight days."""
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, MULTI_DOMAIN))
+    monitored = {s["url"].removeprefix("https://") for s in specs if s["name"].endswith(("frontend",)) or "-frontend-" in s["name"]}
+    assert monitored == {
+        "hram.ch",
+        "www.hram.ch",
+        "imara.tz",
+        "www.imara.tz",
+        "imara.or.tz",
+        "www.imara.or.tz",
+    }
+
+
+def test_primary_keeps_its_names_and_is_the_only_healthz(tmp_path):
+    """Aliases get a frontend check only — a healthz probe per alias would hit
+    the SAME backend for no extra signal. What an alias fails at independently
+    is routing, which a frontend GET already covers."""
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, MULTI_DOMAIN))
+    names = [s["name"] for s in specs]
+    assert names[0] == "hram-frontend"
+    assert names[1] == "hram-healthz"
+    assert [n for n in names if n.endswith("-healthz")] == ["hram-healthz"]
+    assert names[2:] == [
+        "hram-frontend-www-hram-ch",
+        "hram-frontend-imara-tz",
+        "hram-frontend-www-imara-tz",
+        "hram-frontend-imara-or-tz",
+        "hram-frontend-www-imara-or-tz",
+    ]
+
+
+def test_alias_monitors_carry_the_production_relay(tmp_path):
+    """An alias that goes down must page the same per-server relay as the
+    primary, or the extra coverage produces alerts nobody receives."""
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, MULTI_DOMAIN))
+    assert {s["notification_name"] for s in specs} == {"claude-relay-research-prod"}
+
+
+def test_monitor_names_are_unique(tmp_path):
+    """Names are the sync's identity key; a collision would make two specs
+    fight over one Kuma monitor on every run."""
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, MULTI_DOMAIN))
+    names = [s["name"] for s in specs]
+    assert len(names) == len(set(names))
+
+
+def test_extra_still_overrides_an_alias_monitor(tmp_path):
+    """The `extra`-wins override must cover the new alias names too, not just
+    the two original auto-derived ones."""
+    body = MULTI_DOMAIN + (
+        "monitoring:\n"
+        "  extra:\n"
+        "    - name: hram-frontend-imara-tz\n"
+        "      url: https://imara.tz/custom\n"
+    )
+    specs = kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, body))
+    matching = [s for s in specs if s["name"] == "hram-frontend-imara-tz"]
+    assert len(matching) == 1
+    assert matching[0]["url"] == "https://imara.tz/custom"
+
+
+@pytest.mark.parametrize(
+    "domain,slug",
+    [
+        ("imara.tz", "imara-tz"),
+        ("www.imara.or.tz", "www-imara-or-tz"),
+        ("Staging-HRAM.bigler-consult.ch", "staging-hram-bigler-consult-ch"),
+    ],
+)
+def test_domain_slug(domain, slug):
+    assert kuma_sync._domain_slug(domain) == slug
+
+
+def test_colliding_alias_slugs_raise_instead_of_overwriting(tmp_path):
+    """Two domains that slugify identically must fail loudly. A silent overwrite
+    would leave one domain uncovered while a monitor for it appears to exist —
+    the failure mode INF-48 exists to end, reintroduced one level down."""
+    body = """project_name: collide
+environments:
+  production:
+    server: main-prod
+    domains:
+      - "primary.example.ch"
+      - "a-b.example.ch"
+      - "a.b.example.ch"
+"""
+    with pytest.raises(ValueError, match="silently overwrite"):
+        kuma_sync.monitors_from_project_yaml(_write_project_yaml(tmp_path, body))

@@ -39,6 +39,7 @@ Monitors (e.g. monitoring/monitor.yml):
 
 import argparse
 import os
+import re
 import sys
 import time
 from enum import Enum
@@ -278,6 +279,15 @@ def _unwrap(value):
     only claimed to do.
     """
     return value.value if isinstance(value, Enum) else value
+
+
+def _domain_slug(domain):
+    """Kuma monitor names are the sync's identity key (prune matches by name),
+    so an alias monitor needs a stable, collision-free suffix derived from its
+    domain. Lowercase, and every run of non-alphanumerics collapsed to a single
+    hyphen: "www.imara.or.tz" -> "www-imara-or-tz".
+    """
+    return re.sub(r"[^a-z0-9]+", "-", domain.strip().lower()).strip("-")
 
 
 def _norm_scalar(value):
@@ -590,7 +600,7 @@ def monitors_from_project_yaml(project_yaml_path):
                 "cannot derive auto-monitors. Set monitoring.skip_auto=true or "
                 "add at least one domain."
             )
-        primary = prod_domains[0]
+        primary, *aliases = prod_domains
         # Derive the relay notification name from the production server so
         # kuma_sync can assign the correct per-server relay to each monitor.
         # Convention: claude-relay-{server} (e.g. claude-relay-main-prod).
@@ -598,6 +608,47 @@ def monitors_from_project_yaml(project_yaml_path):
         prod_relay = {"notification_name": f"claude-relay-{prod_server}"} if prod_server else {}
         specs.append({**base, **prod_relay, "name": f"{name_prefix}-frontend", "url": f"https://{primary}"})
         specs.append({**base, **prod_relay, "name": f"{name_prefix}-healthz",  "url": f"https://{primary}{healthz_path}"})
+
+        # INF-48: every FURTHER production domain gets a frontend monitor too.
+        # This used to read domains[0] and stop, so an app declaring six domains
+        # was monitored on one of them -- 38 of the estate's 53 production
+        # domains (72%) had no monitor at all. imara.tz and its three siblings
+        # were 404 for eight days while hram's monitor stayed green on hram.ch,
+        # which was genuinely up. The monitor was not broken; it was pointed at
+        # one sixth of the app's public surface.
+        #
+        # Frontend check only, deliberately: a healthz probe per alias would
+        # hammer the SAME backend for no additional signal. What an alias can
+        # fail at independently is ROUTING -- DNS, tunnel ingress, Traefik
+        # router, certificate -- and a frontend GET covers exactly that.
+        #
+        # The primary's two names are untouched. kuma-sync runs with --prune
+        # when unfiltered and matches monitors BY NAME, so renaming the primary
+        # would delete and recreate it, losing its history. New aliases simply
+        # add new names.
+        # Two distinct domains can slugify to the same name ("a-b.example" and
+        # "a.b.example" both -> "a-b-example"). Left alone that is a SILENT
+        # overwrite: two specs would fight over one Kuma monitor every run, and
+        # one domain would quietly stop being covered -- the exact "the monitor
+        # is there but watches the wrong thing" failure INF-48 exists to end.
+        # Fail loudly instead; the fix is a `monitoring.extra` entry naming it.
+        seen_slugs = {}
+        for alias in aliases:
+            slug = _domain_slug(alias)
+            if slug in seen_slugs:
+                raise ValueError(
+                    f"{project_yaml_path}: production domains {seen_slugs[slug]!r} and "
+                    f"{alias!r} both reduce to the monitor name "
+                    f"{name_prefix}-frontend-{slug!r}; one would silently overwrite the "
+                    "other. Give one of them an explicit monitoring.extra entry."
+                )
+            seen_slugs[slug] = alias
+            specs.append({
+                **base,
+                **prod_relay,
+                "name": f"{name_prefix}-frontend-{slug}",
+                "url": f"https://{alias}",
+            })
 
         # Staging monitors (opt-out via monitoring.skip_staging=true, or
         # implicit-skip when environments.staging.domains is missing/empty).
