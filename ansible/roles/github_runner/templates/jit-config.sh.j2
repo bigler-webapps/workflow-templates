@@ -16,27 +16,6 @@ set -euo pipefail
 
 RUNNER_NAME="${1:?Usage: jit-config.sh <runner-name>}"
 
-# INF-44: drain marker for the maintenance workflow's pre-reboot drain. The
-# runner is ephemeral (one job per process), so a drain never needs to stop
-# a running job -- it only needs to block the NEXT registration. Refusing
-# here (before any GitHub API call) makes ExecStartPre fail, so the slot
-# never picks up a new job; Restart=always + StartLimitIntervalSec=0 keep it
-# retrying quietly at github_runner_restart_sec until the marker is removed.
-#
-# Deliberately root-owned tmpfs, NOT under github_runner_base_dir: this
-# process runs as {{ github_runner_user }}, the SAME user that executes
-# every CI job on this host across ~20 repos -- a marker inside that user's
-# own home directory would let any (including untrusted) job create or
-# delete it, either DoS-ing every future registration or defeating the
-# drain by deleting it mid-poll. `[ -f ]` only needs traversal on the
-# parent, not read/write on the file, so root:root 0644 under /run is
-# checkable here but writable only via the maintenance workflow's `sudo -n`.
-DRAIN_MARKER="/run/gh-runner.drain"
-if [[ -f "${DRAIN_MARKER}" ]]; then
-  echo "jit-config.sh: drain marker present (${DRAIN_MARKER}) -- refusing to register a new job until it is removed." >&2
-  exit 1
-fi
-
 APP_ID="{{ github_runner_app_id }}"
 INSTALLATION_ID="{{ github_runner_app_installation_id }}"
 ORG="{{ github_runner_org }}"
