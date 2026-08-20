@@ -42,11 +42,16 @@ KillMode=mixed
 # from GitHub before the SIGKILL fires.
 TimeoutStopSec=120
 
-# Restart after each job. RestartSec=30 gives GitHub enough time to
-# process the deregistration of the just-used ephemeral identity before
-# the next jit-config registration attempt.
+# Restart after each job. The 409-on-reregistration race this once guarded
+# against (deregistering the just-used ephemeral identity before the next
+# jit-config attempt) is now handled structurally by jit-config.sh's
+# stale-same-name-runner delete (step 2b) -- this value is backoff only,
+# not a correctness dependency. Kept well above 0 anyway: the delete skips
+# any registration GitHub still reports busy, and StartLimitIntervalSec=0
+# means a persistent 409 would otherwise retry against the GitHub API with
+# no brake at all.
 Restart=always
-RestartSec=30
+RestartSec={{ github_runner_restart_sec }}
 
 # Disable the start-limit so transient 409 errors during the deregistration
 # window don't put the service into the dead/failed state permanently.
