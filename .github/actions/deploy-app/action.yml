@@ -628,6 +628,35 @@ runs:
           \$DOCKER compose \$COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
         fi
 
+        # CI-18: assert the stack survived the deploy before reporting success.
+        # 2026-08-20 incident: cockpit's `beat` container crash-looped after an
+        # unpinned dependency resolved backwards; the deploy reported success in
+        # 57s and stayed green while the scheduler was dead for 2h25m, caught
+        # only by Kuma ~14 minutes after the container actually died. A health
+        # endpoint was rejected (see CI-18's WO/register row): its freshness
+        # window reads green immediately after a deploy that killed it, and
+        # widening it either taxes every deploy by 10+ minutes or turns a public
+        # endpoint into a scheduler-tick oracle. Docker's own restart-policy
+        # state has neither problem -- a crash is visible the instant it happens
+        # -- and is generic: one check for every app's stack, no app-specific
+        # knowledge, no new secret.
+        # Scoped to `compose ps -q`: only THIS project's containers, so a
+        # crash-looping container on another app never fails this deploy.
+        # Placed BEFORE the INF-51 image cleanup below and before the success
+        # line: a failed assertion must leave the replaced image in place for
+        # rollback, exactly like a migration failure, and must not print
+        # "Deployment finished successfully" over a stack that didn't.
+        echo "🩺 Checking container health..."
+        RESTARTING_NAMES="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
+          | xargs -r \$DOCKER inspect --format '{{.Name}} {{.State.Restarting}}' 2>/dev/null \
+          | awk '\$2 == "true" { print \$1 }' || true)"
+        if [ -n "\$RESTARTING_NAMES" ]; then
+          echo "❌ Deploy completed but the following containers are stuck restarting:"
+          echo "\$RESTARTING_NAMES"
+          exit 1
+        fi
+        echo "✅ Container health check passed -- no container is restart-looping."
+
         # INF-51: remove the image this deploy replaced. Placed here, after the
         # recreate AND after migrations, so any earlier failure leaves the old
         # image untouched and a rollback still possible.

@@ -341,3 +341,131 @@ class INF51DeployImageCleanup(unittest.TestCase):
         # The literal tag is spared; the other one is NOT shielded by it.
         self.assertNotIn("ghcr.io/x/app:v1.*", removed)
         self.assertIn("ghcr.io/x/app:v1.0", removed)
+
+
+# --- CI-18: deploy fails if the stack is restart-looping afterward ----------
+
+
+# `compose ps -q` returns the project's container ids; `inspect --format
+# '{{.Name}} {{.State.Restarting}}'` reports each one's restart state. Which
+# ids/states each test sees is varied per test via env vars.
+HEALTH_DOCKER_STUB = r"""#!/usr/bin/env bash
+if [ "$1" = "compose" ]; then
+  printf '%s\n' $IDS
+  exit 0
+fi
+if [ "$1" = "inspect" ]; then
+  shift 3   # drop: inspect --format <fmt>
+  for id in "$@"; do
+    eval "printf '%s\n' \"\$STATE_$id\""
+  done
+fi
+"""
+
+
+def _extract_health_check_block() -> str:
+    """Pull the real CI-18 health-check block out of action.yml and un-escape
+    it, same rationale as `_extract_cleanup_block`: a test that reimplements
+    the logic it checks proves nothing."""
+    start = DEPLOY_ACTION.index('echo "🩺 Checking container health...')
+    end = DEPLOY_ACTION.index("no container is restart-looping.\"", start)
+    end = DEPLOY_ACTION.index("\n", end) + 1
+    block = DEPLOY_ACTION[start:end]
+    return block.replace("\\$", "$")
+
+
+def _run_health_check(ids, states):
+    """Execute the extracted block with docker stubbed. `states` maps id ->
+    '/name true' or '/name false' (the raw `inspect --format` line)."""
+    if not BASH:
+        raise unittest.SkipTest("no bash available on PATH")
+    tmp = Path(tempfile.mkdtemp())
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text(HEALTH_DOCKER_STUB, encoding="utf-8", newline="\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    script = tmp / "healthcheck.sh"
+    harness = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'DOCKER="docker"\n'
+        'COMPOSE_FILES="-f docker-compose.yml"\n'
+        + _extract_health_check_block()
+        + "echo REACHED_END\n"
+    )
+    script.write_text(harness, encoding="utf-8", newline="\n")
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    env["IDS"] = " ".join(ids)
+    for cid, state in states.items():
+        env["STATE_" + cid] = state
+
+    return subprocess.run(
+        [BASH, str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+
+
+class CI18ContainerHealthCheck(unittest.TestCase):
+    def test_a_healthy_stack_passes_and_reaches_the_end(self):
+        """No container restarting -- the deploy proceeds to image cleanup."""
+        proc = _run_health_check(
+            ids=["c_backend", "c_db"],
+            states={"c_backend": "/app-backend false", "c_db": "/app-db false"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("REACHED_END", proc.stdout)
+        self.assertIn("Container health check passed", proc.stdout)
+
+    def test_a_restart_looping_container_fails_the_deploy(self):
+        """Mutation check named in the WO: this must FAIL against a broken
+        stack, not merely pass against a healthy one. Reproduces the 2026-08-20
+        incident shape -- one container (`beat`-equivalent) stuck restarting
+        while the rest of the stack is fine."""
+        proc = _run_health_check(
+            ids=["c_backend", "c_beat", "c_db"],
+            states={
+                "c_backend": "/app-backend false",
+                "c_beat": "/app-beat true",
+                "c_db": "/app-db false",
+            },
+        )
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("REACHED_END", proc.stdout)
+        self.assertIn("stuck restarting", proc.stdout)
+        self.assertIn("/app-beat", proc.stdout)
+
+    def test_only_this_projects_containers_are_checked(self):
+        """The listing is `compose ps -q`, i.e. scoped to the project the
+        deploy just touched -- a restart-looping container belonging to a
+        DIFFERENT app on the same host must never fail this deploy."""
+        block = _extract_health_check_block()
+        self.assertIn("compose $COMPOSE_FILES --env-file .env ps -q", block)
+        self.assertNotIn("$DOCKER ps -aq", block)
+
+    def test_health_check_runs_after_migrations_and_before_image_cleanup(self):
+        """A crash must be caught before the replaced image is removed, so a
+        failed deploy still has an image to roll back to."""
+        migrate = DEPLOY_ACTION.index("manage.py migrate --noinput")
+        health_check = DEPLOY_ACTION.index('echo "🩺 Checking container health...')
+        cleanup = DEPLOY_ACTION.index('echo "Removing the image this deploy replaced')
+        self.assertLess(migrate, health_check)
+        self.assertLess(health_check, cleanup)
+
+    def test_health_check_runs_before_the_success_line(self):
+        """The final echo must not claim success over a stack that is
+        restart-looping."""
+        health_check = DEPLOY_ACTION.index('echo "🩺 Checking container health...')
+        success = DEPLOY_ACTION.index('echo "✅ Deployment finished successfully!"')
+        self.assertLess(health_check, success)
+
+
+if __name__ == "__main__":
+    unittest.main()
