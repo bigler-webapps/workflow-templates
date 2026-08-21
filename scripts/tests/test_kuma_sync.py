@@ -602,7 +602,9 @@ def test_extra_entry_notification_name_flows_through_to_notification_id_list(tmp
     assert kwargs["notificationIDList"] == [1, 9]
 
 
-# --- INF-59: max_retries default keys off whether the monitor has a channel ---
+# --- INF-59/INF-60: max_retries default keys off whether the monitor ------
+# --- notifies a human with nothing downstream to filter it, NOT whether ---
+# --- it merely carries any notification_name at all -----------------------
 
 
 def test_build_monitor_kwargs_defaults_to_zero_retries_without_a_channel():
@@ -612,7 +614,7 @@ def test_build_monitor_kwargs_defaults_to_zero_retries_without_a_channel():
 
 
 def test_build_monitor_kwargs_keeps_the_ladder_with_a_channel():
-    spec = {"name": "has-channel", "url": "https://example.ch", "_has_channel": True}
+    spec = {"name": "has-channel", "url": "https://example.ch", "_notifies_human_ungated": True}
     kwargs = kuma_sync._build_monitor_kwargs(spec)
     assert kwargs["maxretries"] == 3
 
@@ -620,7 +622,7 @@ def test_build_monitor_kwargs_keeps_the_ladder_with_a_channel():
 def test_build_monitor_kwargs_explicit_max_retries_wins_either_way():
     channel_spec = {
         "name": "explicit-channelled", "url": "https://example.ch",
-        "_has_channel": True, "max_retries": 7,
+        "_notifies_human_ungated": True, "max_retries": 7,
     }
     no_channel_spec = {
         "name": "explicit-no-channel", "url": "https://example.ch", "max_retries": 7,
@@ -629,10 +631,88 @@ def test_build_monitor_kwargs_explicit_max_retries_wins_either_way():
     assert kuma_sync._build_monitor_kwargs(no_channel_spec)["maxretries"] == 7
 
 
-def test_build_monitor_kwargs_pops_has_channel_so_it_never_reaches_the_api():
-    spec = {"name": "no-channel", "url": "https://example.ch", "_has_channel": False}
+def test_build_monitor_kwargs_pops_the_stash_so_it_never_reaches_the_api():
+    spec = {"name": "no-channel", "url": "https://example.ch", "_notifies_human_ungated": False}
     kuma_sync._build_monitor_kwargs(spec)
-    assert "_has_channel" not in spec
+    assert "_notifies_human_ungated" not in spec
+
+
+# --- INF-60: the actual regression -- a machine channel (claude-relay-*,
+# --- cockpit-webhook) must NOT count as "notifies a human ungated" --------
+
+
+def test_notifies_human_ungated_true_for_alert_email():
+    assert kuma_sync._notifies_human_ungated({"notification_name": "alert-email"}) is True
+
+
+def test_notifies_human_ungated_false_for_a_machine_relay():
+    """The actual INF-60 bug: claude-relay-<server> is a machine channel,
+    not a person's inbox."""
+    assert kuma_sync._notifies_human_ungated(
+        {"notification_name": "claude-relay-main-prod"}
+    ) is False
+
+
+def test_notifies_human_ungated_false_for_cockpit_webhook():
+    assert kuma_sync._notifies_human_ungated({"notification_name": "cockpit-webhook"}) is False
+
+
+def test_notifies_human_ungated_false_with_no_declaration_at_all():
+    assert kuma_sync._notifies_human_ungated({"name": "x"}) is False
+
+
+def test_notifies_human_ungated_true_when_the_human_channel_is_one_of_several():
+    """A monitor carrying both a machine relay and alert-email -- the human
+    channel wins, list-form declaration (CI-6)."""
+    spec = {"notification_name": ["claude-relay-main-prod", "alert-email"]}
+    assert kuma_sync._notifies_human_ungated(spec) is True
+
+
+def test_derived_production_monitor_with_only_claude_relay_resolves_to_zero_retries(tmp_path):
+    """The actual fitness-monitor-shaped regression this WO fixes: a normal
+    auto-derived production monitor, with prod_relay's claude-relay-<server>
+    auto-attached and nothing else declared, must resolve to max_retries=0 --
+    asserted against the real derivation's output (Risk 4), not a hand-built
+    spec dict."""
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text(
+        "project_name: fitness-monitor\n"
+        "environments:\n"
+        "  production:\n"
+        "    server: main-prod\n"
+        "    domains:\n"
+        "      - fitness-monitor.example.ch\n",
+        encoding="utf-8",
+    )
+    specs = kuma_sync.monitors_from_project_yaml(project_yaml)
+    frontend = next(s for s in specs if s["name"] == "fitness-monitor-frontend")
+    assert frontend["notification_name"] == "claude-relay-main-prod"  # prod_relay, unchanged
+
+    frontend["_notifies_human_ungated"] = kuma_sync._notifies_human_ungated(frontend)
+    kwargs = kuma_sync._build_monitor_kwargs(dict(frontend))
+    assert kwargs["maxretries"] == 0
+
+
+def test_derived_production_monitor_with_alert_email_extra_override_keeps_the_ladder(tmp_path):
+    """The INF-58 shape: a monitoring.extra entry naming alert-email
+    explicitly (like main-prod-health-disk) must still resolve to 3, proven
+    against the real derivation."""
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text(
+        "project_name: infrastructure\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  extra:\n"
+        "    - name: main-prod-health-disk\n"
+        "      url: http://main-prod.example.ts.net/health/disk\n"
+        "      notification_name: alert-email\n",
+        encoding="utf-8",
+    )
+    specs = kuma_sync.monitors_from_project_yaml(project_yaml)
+    spec = specs[0]
+    spec["_notifies_human_ungated"] = kuma_sync._notifies_human_ungated(spec)
+    kwargs = kuma_sync._build_monitor_kwargs(dict(spec))
+    assert kwargs["maxretries"] == 3
 
 
 def test_monitors_from_project_yaml_no_longer_injects_a_max_retries_default(tmp_path):
@@ -676,15 +756,16 @@ def test_monitoring_defaults_override_still_applies_a_max_retries_floor(tmp_path
 
 
 @pytest.mark.parametrize("declared_name", ["alert-email", ["alert-email", "claude-relay-main-prod"]])
-def test_has_channel_stash_reads_the_declared_name_not_live_resolution(declared_name):
-    """Guards the reviewer-relevant edge case: _has_channel must be computed
-    from the ORIGINAL declared notification_name, before _resolve_notification_ids
-    pops and resolves it -- a Kuma-API hiccup resolving names must not be able
-    to make an already-channelled monitor look channel-less."""
+def test_human_ungated_stash_reads_the_declared_name_not_live_resolution(declared_name):
+    """Guards the reviewer-relevant edge case: _notifies_human_ungated must
+    be computed from the ORIGINAL declared notification_name, before
+    _resolve_notification_ids pops and resolves it -- a Kuma-API hiccup
+    resolving names must not be able to make an already-channelled monitor
+    look channel-less."""
     spec = {"name": "flaky-resolve", "url": "https://example.ch", "notification_name": declared_name}
-    spec["_has_channel"] = "notification_name" in spec
+    spec["_notifies_human_ungated"] = kuma_sync._notifies_human_ungated(spec)
     # Simulate the degrade path: nothing resolves (empty notifications_by_name),
-    # but the ORIGINAL declaration is what _has_channel must have captured.
+    # but the ORIGINAL declaration is what the stash must have captured.
     kuma_sync._resolve_notification_ids(spec, {}, [], notifications_resolved=False)
     kwargs = kuma_sync._build_monitor_kwargs(spec)
     assert kwargs["maxretries"] == 3  # still the channelled default

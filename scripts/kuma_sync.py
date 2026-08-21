@@ -36,13 +36,18 @@ Monitors (e.g. monitoring/monitor.yml):
         max_retries: 3             # optional -- explicit override, see below
         retry_interval: 60         # seconds
 
-    max_retries default (INF-59): 3 if the monitor declares a
-    `notification_name` (its alert goes straight to a human, so Kuma's own
-    ladder is the only thing absorbing a blip), else 0 (no channel -- the
-    first failed check reports straight to the cockpit webhook, and
-    cockpit's own duration-based gate absorbs flapping instead). An explicit
-    `max_retries` on the monitor, or under `monitoring.defaults` in
-    project.yaml, always wins over either default.
+    max_retries default (INF-59/INF-60): 3 if the monitor's declared
+    `notification_name` includes one that notifies a person with nothing
+    downstream to filter it (today: `alert-email` only -- see
+    `_HUMAN_UNGATED_NOTIFICATION_NAMES`), else 0. NOT "has any
+    notification_name" -- a machine channel like the auto-attached
+    `claude-relay-<server>` or `cockpit-webhook` does not count, and
+    conflating the two silently exempted every production monitor once
+    (INF-60). A channel-less (or machine-channel-only) monitor's first
+    failed check reports straight to the cockpit webhook, and cockpit's own
+    duration-based gate absorbs flapping instead. An explicit `max_retries`
+    on the monitor, or under `monitoring.defaults` in project.yaml, always
+    wins over either default.
 """
 
 import argparse
@@ -383,29 +388,41 @@ def _monitor_changed(kwargs, existing_monitor, monitor_name=""):
 def _build_monitor_kwargs(spec):
     """Build the kwargs dict for add/edit_monitor from a normalized spec dict.
 
-    INF-59: the default `max_retries` depends on whether the monitor has its
-    own notification channel (`_has_channel`, stashed by the caller from the
-    ORIGINAL declared `notification_name` presence -- read before
+    INF-59/INF-60: the default `max_retries` depends on whether the monitor
+    notifies a human WITH NOTHING DOWNSTREAM TO FILTER IT
+    (`_notifies_human_ungated`, stashed by the caller from the ORIGINAL
+    declared `notification_name` presence -- read before
     `_resolve_notification_ids` pops it and resolves it against live Kuma
     state, so a transient Kuma-API hiccup fetching the notification list
     can never make an already-channelled monitor look channel-less and
     silently drop to zero retries).
 
-    - A channel-less monitor's first failed check reports straight to
-      cockpit's webhook; Kuma's own retry ladder no longer buys anything --
-      cockpit's own duration-based notification gate (OBS-36) absorbs
-      flapping/reboot-blip noise instead, where it can be selective (delay
-      the alert, not the board). max_retries=0.
-    - A monitor WITH a channel still alerts a human directly, with no
-      downstream gate -- Kuma's own ladder is the only thing absorbing a
-      blip there. max_retries=3 (previously stated inconsistently as both 3
-      and 5 across this docstring/code/examples; 3 is what every LIVE
-      monitor actually runs today -- INF-59 states it once, here).
+    INF-60 correction: "has a channel" is NOT the right predicate --
+    `prod_relay` (below) auto-attaches `claude-relay-<server>` to essentially
+    every production monitor, and that channel is a machine relay, not a
+    person's inbox. Checking mere `notification_name` presence made INF-59's
+    fix a no-op for production (observed: a real outage still ran the full
+    ladder). The predicate is now membership in
+    `_HUMAN_UNGATED_NOTIFICATION_NAMES` specifically.
+
+    - A monitor that does NOT notify a human ungated (no channel at all, or
+      only a machine channel like `claude-relay-*`/`cockpit-webhook`)
+      reports its first failed check straight to cockpit's webhook; Kuma's
+      own retry ladder no longer buys anything -- cockpit's own
+      duration-based notification gate (OBS-36) absorbs flapping/reboot-blip
+      noise instead, where it can be selective (delay the alert, not the
+      board). max_retries=0.
+    - A monitor that DOES notify a human ungated (today: carries
+      `alert-email`) still alerts a person directly, with no downstream
+      gate -- Kuma's own ladder is the only thing absorbing a blip there.
+      max_retries=3 (previously stated inconsistently as both 3 and 5 across
+      this docstring/code/examples; 3 is what every LIVE monitor actually
+      runs today -- INF-59 stated it once, here).
     Per-monitor `max_retries` in project.yaml always wins over either
     default.
     """
-    has_channel = spec.pop("_has_channel", False)
-    default_max_retries = 3 if has_channel else 0
+    notifies_human_ungated = spec.pop("_notifies_human_ungated", False)
+    default_max_retries = 3 if notifies_human_ungated else 0
     kwargs = {
         "name": spec["name"],
         "type": spec.get("type", "http"),
@@ -433,6 +450,30 @@ def _build_monitor_kwargs(spec):
     if "notification_ids" in spec:
         kwargs["notificationIDList"] = spec["notification_ids"]
     return {k: v for k, v in kwargs.items() if v is not None}
+
+
+# INF-60: named and explicit on purpose -- "has any notification_name" is
+# NOT the same question as "notifies a person with nothing downstream to
+# filter it", and conflating the two silently exempted every production
+# monitor's `claude-relay-<server>` auto-attachment (a machine relay, not a
+# human's inbox) from the retry-ladder default this set drives
+# (_build_monitor_kwargs). Extending this set is a DELIBERATE decision about
+# a specific channel, not something a new channel gets automatically by
+# merely existing -- that automatic inheritance is exactly what broke here.
+_HUMAN_UNGATED_NOTIFICATION_NAMES = frozenset({"alert-email"})
+
+
+def _notifies_human_ungated(spec) -> bool:
+    """Whether `spec`'s DECLARED `notification_name` (single string or list,
+    CI-6) includes a channel that reaches a person with nothing downstream
+    to filter it. Read before `_resolve_notification_ids` pops the key --
+    see the caller sites' comments for why declaration, not live
+    resolution, is what this must key off."""
+    raw = spec.get("notification_name")
+    if raw is None:
+        return False
+    names = raw if isinstance(raw, list) else [raw]
+    return any(name in _HUMAN_UNGATED_NOTIFICATION_NAMES for name in names)
 
 
 def _load_default_notification_names(config_path):
@@ -778,11 +819,12 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False,
         name = spec["name"]
         declared_names.add(name)
 
-        # INF-59: stashed BEFORE resolution -- _build_monitor_kwargs' default
-        # max_retries must key off the DECLARED channel, not live resolution
-        # success, so a transient Kuma-API hiccup fetching the notification
-        # list can't make an already-channelled monitor look channel-less.
-        spec["_has_channel"] = "notification_name" in spec
+        # INF-59/INF-60: stashed BEFORE resolution -- _build_monitor_kwargs'
+        # default max_retries must key off the DECLARED human-ungated
+        # channel, not live resolution success, so a transient Kuma-API
+        # hiccup fetching the notification list can't make an
+        # already-channelled monitor look channel-less.
+        spec["_notifies_human_ungated"] = _notifies_human_ungated(spec)
         # Resolve notification_name → notification_ids before building kwargs.
         _resolve_notification_ids(spec, notifications_by_name, default_ids, name)
 
@@ -910,10 +952,11 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
                 name = spec["name"]
                 all_declared_names.add(name)
 
-                # INF-59: same stash as sync_monitors() -- see that call site's
-                # comment for why this must read the DECLARED name, before
-                # resolution, not live resolution success.
-                spec["_has_channel"] = "notification_name" in spec
+                # INF-59/INF-60: same stash as sync_monitors() -- see that
+                # call site's comment for why this must read the DECLARED
+                # human-ungated channel, before resolution, not live
+                # resolution success.
+                spec["_notifies_human_ungated"] = _notifies_human_ungated(spec)
                 # Resolve notification_name → notification_ids before building
                 # kwargs, same as sync_monitors() (CI-5 scope 2).
                 _resolve_notification_ids(
