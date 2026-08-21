@@ -55,6 +55,16 @@ on:
       run-security:
         type: boolean
         default: true
+      run-migration-check:
+        description: >
+          Opt-in (cockpit MIG-2): fail CI when `manage.py makemigrations --check
+          --dry-run` would produce a change, i.e. models and migration files have
+          drifted apart. Default false so existing consumers are unaffected until
+          they opt in; requires run-backend: true (runs against the same built
+          image + Postgres service as the pytest step, not a separate build, to
+          avoid flagging drift that's really just a differently-resolved CI image).
+        type: boolean
+        default: false
       # Frontend
       node-version:
         type: string
@@ -92,6 +102,20 @@ permissions:
   packages: write
 
 jobs:
+  validate-inputs:
+    # MIG-2: `run-migration-check` only takes effect inside the `backend` job,
+    # which is itself gated by `run-backend` (`if: ${{ inputs.run-backend }}`).
+    # A caller that sets run-migration-check: true with run-backend: false would
+    # otherwise get a silent no-op -- the whole job, migration check included,
+    # simply doesn't run, with nothing in the UI to say why. Fail loudly instead.
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: run-migration-check requires run-backend
+        if: ${{ inputs.run-migration-check && !inputs.run-backend }}
+        run: |
+          echo "::error::run-migration-check: true has no effect with run-backend: false -- the backend job that would run it is skipped entirely. Set run-backend: true too, or drop run-migration-check."
+          exit 1
+
   backend:
     if: ${{ inputs.run-backend }}
     runs-on: ${{ inputs.runs-on }}
@@ -185,6 +209,32 @@ jobs:
             -e MALLOC_ARENA_MAX='2' \
             "$CI_IMAGE" \
             pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
+
+      - name: Check for missing migrations
+        # MIG-2 (cockpit): catches model/migration drift (e.g. a removed field,
+        # an index rename from a Django version bump) before it reaches develop.
+        # Reuses the image and Postgres service the pytest step already stood up
+        # -- same dependency resolution, so a flagged change is real drift, not
+        # an artifact of a separately-built environment (see the input's own
+        # description for why that distinction matters).
+        if: ${{ inputs.run-migration-check }}
+        run: |
+          docker run --rm --network host \
+            -e DJANGO_SETTINGS_MODULE='${{ inputs.django-settings-module }}' \
+            -e DJANGO_SECRET_KEY='ci-dummy-secret' \
+            -e DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1' \
+            -e DEBUG='False' \
+            -e ENV_TYPE='local' \
+            -e TEST_DB_HOST='localhost' \
+            -e DB_HOST='localhost' \
+            -e DB_PORT="${{ job.services.postgres.ports['5432'] }}" \
+            -e DB_NAME='test' \
+            -e DB_USER='test' \
+            -e DB_PASSWORD='test' \
+            -e EMAIL_PORT='25' \
+            -e EMAIL_USE_TLS='False' \
+            "$CI_IMAGE" \
+            python manage.py makemigrations --check --dry-run --noinput
 
       # The caller repo remains at the workspace root for the Dockerfile and
       # build context. Check out this repository separately so this reusable
