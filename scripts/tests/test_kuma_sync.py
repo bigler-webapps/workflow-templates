@@ -602,6 +602,94 @@ def test_extra_entry_notification_name_flows_through_to_notification_id_list(tmp
     assert kwargs["notificationIDList"] == [1, 9]
 
 
+# --- INF-59: max_retries default keys off whether the monitor has a channel ---
+
+
+def test_build_monitor_kwargs_defaults_to_zero_retries_without_a_channel():
+    spec = {"name": "no-channel", "url": "https://example.ch"}
+    kwargs = kuma_sync._build_monitor_kwargs(spec)
+    assert kwargs["maxretries"] == 0
+
+
+def test_build_monitor_kwargs_keeps_the_ladder_with_a_channel():
+    spec = {"name": "has-channel", "url": "https://example.ch", "_has_channel": True}
+    kwargs = kuma_sync._build_monitor_kwargs(spec)
+    assert kwargs["maxretries"] == 3
+
+
+def test_build_monitor_kwargs_explicit_max_retries_wins_either_way():
+    channel_spec = {
+        "name": "explicit-channelled", "url": "https://example.ch",
+        "_has_channel": True, "max_retries": 7,
+    }
+    no_channel_spec = {
+        "name": "explicit-no-channel", "url": "https://example.ch", "max_retries": 7,
+    }
+    assert kuma_sync._build_monitor_kwargs(channel_spec)["maxretries"] == 7
+    assert kuma_sync._build_monitor_kwargs(no_channel_spec)["maxretries"] == 7
+
+
+def test_build_monitor_kwargs_pops_has_channel_so_it_never_reaches_the_api():
+    spec = {"name": "no-channel", "url": "https://example.ch", "_has_channel": False}
+    kuma_sync._build_monitor_kwargs(spec)
+    assert "_has_channel" not in spec
+
+
+def test_monitors_from_project_yaml_no_longer_injects_a_max_retries_default(tmp_path):
+    """INF-59: the shared `base` dict must not set max_retries any more --
+    that decision now belongs solely to _build_monitor_kwargs, which needs
+    to see it ABSENT to compute the channel-based default correctly."""
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text(
+        "project_name: app0\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  extra:\n"
+        "    - name: app0-frontend\n"
+        "      url: https://app0.example.ch\n",
+        encoding="utf-8",
+    )
+    specs = kuma_sync.monitors_from_project_yaml(project_yaml)
+    assert "max_retries" not in specs[0]
+
+
+def test_monitoring_defaults_override_still_applies_a_max_retries_floor(tmp_path):
+    """An explicit `monitoring.defaults.max_retries` in project.yaml must
+    still reach every auto-derived/extra monitor via base.update(overrides),
+    unchanged by INF-59."""
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text(
+        "project_name: app0\n"
+        "monitoring:\n"
+        "  skip_auto: true\n"
+        "  defaults:\n"
+        "    max_retries: 9\n"
+        "  extra:\n"
+        "    - name: app0-frontend\n"
+        "      url: https://app0.example.ch\n",
+        encoding="utf-8",
+    )
+    specs = kuma_sync.monitors_from_project_yaml(project_yaml)
+    assert specs[0]["max_retries"] == 9
+    kwargs = kuma_sync._build_monitor_kwargs(specs[0])
+    assert kwargs["maxretries"] == 9
+
+
+@pytest.mark.parametrize("declared_name", ["alert-email", ["alert-email", "claude-relay-main-prod"]])
+def test_has_channel_stash_reads_the_declared_name_not_live_resolution(declared_name):
+    """Guards the reviewer-relevant edge case: _has_channel must be computed
+    from the ORIGINAL declared notification_name, before _resolve_notification_ids
+    pops and resolves it -- a Kuma-API hiccup resolving names must not be able
+    to make an already-channelled monitor look channel-less."""
+    spec = {"name": "flaky-resolve", "url": "https://example.ch", "notification_name": declared_name}
+    spec["_has_channel"] = "notification_name" in spec
+    # Simulate the degrade path: nothing resolves (empty notifications_by_name),
+    # but the ORIGINAL declaration is what _has_channel must have captured.
+    kuma_sync._resolve_notification_ids(spec, {}, [], notifications_resolved=False)
+    kwargs = kuma_sync._build_monitor_kwargs(spec)
+    assert kwargs["maxretries"] == 3  # still the channelled default
+
+
 def test_existing_monitor_missing_declared_defaults_is_detected_as_changed():
     """CI-5 scope 4: a monitor created before this fix has an empty
     notificationIDList in Kuma. Once defaults are resolved into kwargs, that
@@ -795,7 +883,7 @@ def test_multi_get_notifications_failure_does_not_wipe_existing_default_only_mon
                 "type": MonitorType("http"),
                 "url": "https://app0.example.ch",
                 "interval": 60,
-                "maxretries": 3,  # monitoring.extra's base default (not _build_monitor_kwargs' own 5)
+                "maxretries": 0,  # INF-59: no notification_name declared -- channel-less default
                 "retryInterval": 60,
                 "notificationIDList": {"7": True},  # real existing assignment
             }]

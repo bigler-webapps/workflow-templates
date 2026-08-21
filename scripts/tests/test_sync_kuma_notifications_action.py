@@ -29,6 +29,14 @@ SMTP_INPUTS = {
     "smtp_to": "SMTP_TO",
 }
 
+# INF-59: same optional/empty-default/self-documented-description contract,
+# for the one new input this WO adds.
+COCKPIT_INPUTS = {
+    "cockpit_webhook_secret": "COCKPIT_KUMA_WEBHOOK_SECRET",
+}
+
+ALL_OPTIONAL_INPUTS = {**SMTP_INPUTS, **COCKPIT_INPUTS}
+
 
 @pytest.fixture(scope="module")
 def action():
@@ -40,21 +48,21 @@ def sync_step(action):
     return next(s for s in action["runs"]["steps"] if s.get("name") == "Sync notifications")
 
 
-@pytest.mark.parametrize("input_name", sorted(SMTP_INPUTS))
+@pytest.mark.parametrize("input_name", sorted(ALL_OPTIONAL_INPUTS))
 def test_input_is_declared_optional_with_empty_default(action, input_name):
     spec = action["inputs"][input_name]
     assert spec.get("required", False) is False
     assert spec.get("default") == ""
 
 
-@pytest.mark.parametrize("input_name", sorted(SMTP_INPUTS))
+@pytest.mark.parametrize("input_name", sorted(ALL_OPTIONAL_INPUTS))
 def test_input_description_names_its_env_var(action, input_name):
     """Same self-documenting convention as discord_webhook_url — the description
     states which ${VAR} the config can reference."""
-    assert f"${{{SMTP_INPUTS[input_name]}}}" in action["inputs"][input_name]["description"]
+    assert f"${{{ALL_OPTIONAL_INPUTS[input_name]}}}" in action["inputs"][input_name]["description"]
 
 
-@pytest.mark.parametrize("input_name,env_name", sorted(SMTP_INPUTS.items()))
+@pytest.mark.parametrize("input_name,env_name", sorted(ALL_OPTIONAL_INPUTS.items()))
 def test_sync_step_maps_input_to_its_env_var(sync_step, input_name, env_name):
     assert sync_step["env"][env_name] == f"${{{{ inputs.{input_name} }}}}"
 
@@ -77,5 +85,5 @@ def test_no_new_input_is_required():
     break every existing caller (register-kuma-monitors and any future one) the
     moment this pin is consumed."""
     action_yaml = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
-    for name in SMTP_INPUTS:
+    for name in ALL_OPTIONAL_INPUTS:
         assert action_yaml["inputs"][name].get("required", False) is False, name

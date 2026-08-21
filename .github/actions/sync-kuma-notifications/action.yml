@@ -52,6 +52,10 @@ inputs:
     description: 'SMTP To address (alert recipient) — exposed to the script via ${SMTP_TO}.'
     required: false
     default: ''
+  cockpit_webhook_secret:
+    description: 'INF-59: shared secret for cockpit''s Kuma webhook endpoint (no signature mechanism, so this IS the authentication) — exposed to the script via ${COCKPIT_KUMA_WEBHOOK_SECRET}.'
+    required: false
+    default: ''
   prune:
     description: 'Set "true" to delete Kuma notifications not present in the config file.'
     required: false
@@ -133,6 +137,7 @@ runs:
         SMTP_PASSWORD: ${{ inputs.smtp_password }}
         SMTP_FROM: ${{ inputs.smtp_from }}
         SMTP_TO: ${{ inputs.smtp_to }}
+        COCKPIT_KUMA_WEBHOOK_SECRET: ${{ inputs.cockpit_webhook_secret }}
         # S20-pattern: route caller-supplied inputs through env vars instead of
         # ${{ ... }} interpolation inside the shell body, so values containing
         # shell metacharacters (`; rm -rf /`) cannot escape the variable.

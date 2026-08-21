@@ -33,8 +33,16 @@ Monitors (e.g. monitoring/monitor.yml):
         type: http
         url: https://hram.ch
         interval: 60               # seconds
-        max_retries: 3
+        max_retries: 3             # optional -- explicit override, see below
         retry_interval: 60         # seconds
+
+    max_retries default (INF-59): 3 if the monitor declares a
+    `notification_name` (its alert goes straight to a human, so Kuma's own
+    ladder is the only thing absorbing a blip), else 0 (no channel -- the
+    first failed check reports straight to the cockpit webhook, and
+    cockpit's own duration-based gate absorbs flapping instead). An explicit
+    `max_retries` on the monitor, or under `monitoring.defaults` in
+    project.yaml, always wins over either default.
 """
 
 import argparse
@@ -373,18 +381,37 @@ def _monitor_changed(kwargs, existing_monitor, monitor_name=""):
 
 
 def _build_monitor_kwargs(spec):
-    """Build the kwargs dict for add/edit_monitor from a normalized spec dict."""
+    """Build the kwargs dict for add/edit_monitor from a normalized spec dict.
+
+    INF-59: the default `max_retries` depends on whether the monitor has its
+    own notification channel (`_has_channel`, stashed by the caller from the
+    ORIGINAL declared `notification_name` presence -- read before
+    `_resolve_notification_ids` pops it and resolves it against live Kuma
+    state, so a transient Kuma-API hiccup fetching the notification list
+    can never make an already-channelled monitor look channel-less and
+    silently drop to zero retries).
+
+    - A channel-less monitor's first failed check reports straight to
+      cockpit's webhook; Kuma's own retry ladder no longer buys anything --
+      cockpit's own duration-based notification gate (OBS-36) absorbs
+      flapping/reboot-blip noise instead, where it can be selective (delay
+      the alert, not the board). max_retries=0.
+    - A monitor WITH a channel still alerts a human directly, with no
+      downstream gate -- Kuma's own ladder is the only thing absorbing a
+      blip there. max_retries=3 (previously stated inconsistently as both 3
+      and 5 across this docstring/code/examples; 3 is what every LIVE
+      monitor actually runs today -- INF-59 states it once, here).
+    Per-monitor `max_retries` in project.yaml always wins over either
+    default.
+    """
+    has_channel = spec.pop("_has_channel", False)
+    default_max_retries = 3 if has_channel else 0
     kwargs = {
         "name": spec["name"],
         "type": spec.get("type", "http"),
         "url": spec.get("url"),
         "interval": int(spec.get("interval", 60)),
-        # Default 5 (was 3): a monitored box surviving a maintenance reboot cycle
-        # (kernel reboot + Docker + container warmup) is briefly unreachable for
-        # several minutes; 5 x 60s of confirmed failures before firing "down" rides
-        # that out without masking a real outage for long. Per-monitor override via
-        # `max_retries` in project.yaml still wins.
-        "maxretries": int(spec.get("max_retries", 5)),
+        "maxretries": int(spec.get("max_retries", default_max_retries)),
         "retryInterval": int(spec.get("retry_interval", 60)),
     }
     if "accepted_statuscodes" in spec:
@@ -582,7 +609,12 @@ def monitors_from_project_yaml(project_yaml_path):
     base = {
         "type": "http",
         "interval": 60,
-        "max_retries": 3,
+        # INF-59: NOT max_retries -- its default now depends on whether the
+        # specific monitor has a channel (_build_monitor_kwargs), which this
+        # shared base dict cannot express per-entry. An explicit
+        # `monitoring.defaults.max_retries` override in project.yaml still
+        # applies to every monitor via base.update(overrides) below, same as
+        # before.
         "retry_interval": 60,
     }
     base.update(overrides)
@@ -746,6 +778,11 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False,
         name = spec["name"]
         declared_names.add(name)
 
+        # INF-59: stashed BEFORE resolution -- _build_monitor_kwargs' default
+        # max_retries must key off the DECLARED channel, not live resolution
+        # success, so a transient Kuma-API hiccup fetching the notification
+        # list can't make an already-channelled monitor look channel-less.
+        spec["_has_channel"] = "notification_name" in spec
         # Resolve notification_name → notification_ids before building kwargs.
         _resolve_notification_ids(spec, notifications_by_name, default_ids, name)
 
@@ -873,6 +910,10 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
                 name = spec["name"]
                 all_declared_names.add(name)
 
+                # INF-59: same stash as sync_monitors() -- see that call site's
+                # comment for why this must read the DECLARED name, before
+                # resolution, not live resolution success.
+                spec["_has_channel"] = "notification_name" in spec
                 # Resolve notification_name → notification_ids before building
                 # kwargs, same as sync_monitors() (CI-5 scope 2).
                 _resolve_notification_ids(
