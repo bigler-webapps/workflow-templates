@@ -344,6 +344,13 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4.4.0
         with:
           version: ${{ inputs.pnpm-version }}
+          # CI-21: this action's own default dest (~/setup-pnpm) is shared across every
+          # concurrent job slot on the self-hosted runner; it unconditionally rm()s and
+          # reinstalls into dest on every invocation, so two concurrent `frontend` jobs
+          # racing on the shared default can delete pnpm out from under each other
+          # (observed: `pnpm: command not found`, exit 127). runner.temp is per-job-slot
+          # isolated on this runner (see work-orders/CI-21.md), so this removes the race.
+          dest: ${{ runner.temp }}/setup-pnpm
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
