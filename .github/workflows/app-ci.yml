@@ -199,10 +199,6 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
-      - name: Resolve checked-out SHA
-        id: resolve_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Clean stale Python byte-code
         run: find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
@@ -290,42 +286,13 @@ jobs:
             "$CI_IMAGE" \
             python manage.py makemigrations --check --dry-run --noinput
 
-      # The caller repo remains at the workspace root for the Dockerfile and
-      # build context. Check out this repository separately so this reusable
-      # workflow resolves its composite action from workflow-templates.
-      - name: Checkout workflow-templates (for composite actions)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          repository: bigler-webapps/workflow-templates
-          ref: 1efa2e0d985b5d9e75e95c3a79c500a27fa5bcdb  # v2.9.0 — bump deliberately when a composite here changes
-          path: .wt-checkout
-
-      - name: Publish backend image to GHCR
-        id: publish_backend_image
-        # Publish only after pytest succeeds. CI-6 callers test a lean
-        # `backend_test` target, so build the full production image here for
-        # the registry; the host daemon's warm BuildKit cache makes that
-        # second build cheap and replaces the former server-side build.
-        uses: ./.wt-checkout/.github/actions/publish-backend-image
-        with:
-          image_tag: ${{ steps.resolve_sha.outputs.sha }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          backend_dockerfile: ${{ inputs.dockerfile }}
-          backend_build_context: ${{ inputs.build-context }}
-          backend_target: ${{ inputs.backend-target }}
-          hram_engine_read_token: ${{ secrets.HRAM_ENGINE_READ_TOKEN }}
-          vite_app_mui_license_key: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
-          existing_image: ${{ inputs.backend-target == '' && env.CI_IMAGE || '' }}
-
       - name: Remove CI image
+        # WFT-CI-25: this job no longer publishes -- CI-11 moved that to
+        # main.yml well before this now-redundant half was finally deleted
+        # here. Only $CI_IMAGE is ever produced now, but it still must not be
+        # left on the self-hosted runner's shared Docker daemon (WM-TAKE-9).
         if: always()
-        env:
-          PUBLISHED_IMAGE: ${{ steps.publish_backend_image.outputs.image }}
-        run: |
-          docker image rm -f "$CI_IMAGE" 2>/dev/null || true
-          if [ -n "$PUBLISHED_IMAGE" ]; then
-            docker image rm -f "$PUBLISHED_IMAGE" 2>/dev/null || true
-          fi
+        run: docker image rm -f "$CI_IMAGE" 2>/dev/null || true
 
   security:
     if: ${{ inputs.run-security }}

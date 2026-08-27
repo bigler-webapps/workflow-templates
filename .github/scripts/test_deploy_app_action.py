@@ -15,12 +15,20 @@ PUBLISH_ACTION = (ROOT / ".github/actions/publish-backend-image/action.yml").rea
 
 
 class CI9StructuralTests(unittest.TestCase):
-    def test_ci_uses_github_token_and_preserves_the_empty_tag_guard(self):
+    """CI-9 put the publish into app-ci.yml on the assumption CI runs before
+    the deploy; CI-11 disproved that and moved the real publish call into
+    each app's own main.yml, paired with its own resolve_sha (untested here,
+    each app owns its copy). WFT-CI-25 finally deleted the now-redundant
+    app-ci.yml half. What stays worth asserting from this repo's side is the
+    shared composite (PUBLISH_ACTION/DEPLOY_ACTION) both still use, plus that
+    app-ci.yml (CI_WORKFLOW) never grows a second, direct implementation."""
+
+    def test_publish_action_uses_the_run_token_and_preserves_the_empty_tag_guard(self):
         """The publish workflow relies on the run token, never a stored PAT."""
-        self.assertIn("github_token: ${{ secrets.GITHUB_TOKEN }}", CI_WORKFLOW)
         self.assertIn("printf '%s' \"$GITHUB_TOKEN\" | docker login ghcr.io", PUBLISH_ACTION)
         self.assertIn('[ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing to publish.";', PUBLISH_ACTION)
         self.assertNotIn("GHCR_TOKEN", CI_WORKFLOW)
+        self.assertNotIn("GHCR_TOKEN", PUBLISH_ACTION)
 
     def test_published_images_have_an_oci_source_label(self):
         """Both the normal build and CI-6 full-image rebuild are linked to the repo."""
@@ -44,10 +52,11 @@ class CI9StructuralTests(unittest.TestCase):
         self.assertIn("github_token:", DEPLOY_ACTION)
         self.assertIn("GITHUB_TOKEN: ${{ inputs.github_token }}", DEPLOY_ACTION)
 
-    def test_callers_resolve_the_checked_out_sha_without_github_sha(self):
-        """Image tags come from checkout HEAD, never the triggering ref."""
-        self.assertIn('run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"', CI_WORKFLOW)
-        self.assertIn("image_tag: ${{ steps.resolve_sha.outputs.sha }}", CI_WORKFLOW)
+    def test_image_tags_come_from_checkout_head_never_the_triggering_ref(self):
+        """Each app's own main.yml resolves its own SHA (untested here); what
+        this repo owns is that the shared composite/deploy action never falls
+        back to `github.sha` (wrong on a merge-commit trigger) if a caller's
+        resolution step is ever missing or misordered."""
         self.assertNotIn("github.sha", CI_WORKFLOW)
         self.assertNotIn("github.sha", DEPLOY_ACTION)
         self.assertNotIn("github.sha", PUBLISH_ACTION)
@@ -56,19 +65,17 @@ class CI9StructuralTests(unittest.TestCase):
         self.assertEqual(DEPLOY_ACTION.count("IMAGE_TAG: ${{ inputs.image_tag }}"), 2)
         self.assertIn("printf '\\nIMAGE_TAG=%s\\n' \"$IMAGE_TAG\" >> .env", DEPLOY_ACTION)
         self.assertIn('docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"', PUBLISH_ACTION)
-        self.assertLess(
-            CI_WORKFLOW.index("- name: Run pytest"),
-            CI_WORKFLOW.index("- name: Publish backend image to GHCR"),
-        )
         self.assertNotIn('docker push "$PUBLISHED_IMAGE:latest"', PUBLISH_ACTION)
 
-    def test_shared_publish_action_is_the_only_publish_implementation(self):
-        """CI calls the action and removes the image through its declared output."""
-        self.assertIn("uses: ./.wt-checkout/.github/actions/publish-backend-image", CI_WORKFLOW)
-        self.assertIn("${{ steps.publish_backend_image.outputs.image }}", CI_WORKFLOW)
+    def test_app_ci_yml_never_grows_its_own_direct_publish(self):
+        """WFT-CI-25: app-ci.yml stopped calling the shared composite at all
+        (CI-11 moved the real publish to each app's main.yml) -- it must not
+        quietly regain one, composite-wrapped or a raw `docker push`."""
+        self.assertNotIn("publish-backend-image", CI_WORKFLOW)
+        self.assertNotIn("publish_backend_image", CI_WORKFLOW)
+        self.assertNotIn('docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"', CI_WORKFLOW)
         self.assertIn("outputs:\n  image:", PUBLISH_ACTION)
         self.assertIn('printf \'image=%s:%s\\n\' "$PUBLISHED_IMAGE" "$IMAGE_TAG" >> "$GITHUB_OUTPUT"', PUBLISH_ACTION)
-        self.assertNotIn('docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"', CI_WORKFLOW)
 
     def test_default_deploy_pulls_and_fallback_keeps_build(self):
         """deploy-app/action.yml separates pull-based default from --build fallback."""
