@@ -184,6 +184,45 @@ class WftCi23StructuralTests(unittest.TestCase):
             assert match is not None
             self.assertEqual(match.group("default"), "false", f"{name} must default to false")
 
+    def test_no_expression_syntax_in_workflow_call_input_descriptions(self):
+        """Postmortem guard for d8fc8e6: WFT-CI-23 itself wrote a literal,
+        empty `${{ }}` into two `description:` fields on `bandit-path` and
+        `ruff-path` as prose explaining GitHub-expression interpolation.
+        GitHub Actions parses `${{ }}` wherever it appears in the file,
+        description text included, and an empty expression is a parse error
+        -- this made app-ci.yml unresolvable for all nineteen `@main` callers
+        for ~2h, caught during WM-TAKE-8 and fixed same-day. Scoped to the
+        whole `workflow_call.inputs` block (not just the two fixed fields) so
+        it also guards every future input description, not just this one."""
+        inputs_block = CI_WORKFLOW.split("workflow_call:\n    inputs:\n", 1)[1].split(
+            "\n    secrets:\n", 1
+        )[0]
+        self.assertNotIn(
+            "${{",
+            inputs_block,
+            "a workflow_call input description contains a literal '${{' -- "
+            "GitHub Actions evaluates expressions in description text too, and "
+            "an empty/malformed one breaks workflow resolution for every caller",
+        )
+
+    def test_assertion_fails_if_a_description_reintroduces_expression_syntax(self):
+        """Mutation check: reinstate the exact pre-fix text (d8fc8e6's diff)
+        and confirm the guard above would have caught it."""
+        mutated = CI_WORKFLOW.replace(
+            "Reviewer R2: interpolated as a GitHub expression directly into a\n"
+            "          shell command, same pre-existing pattern as inputs.frontend-path\n"
+            "          elsewhere in this file",
+            "Reviewer R2: interpolated via ${{ }} directly into a shell command,\n"
+            "          same pre-existing pattern as inputs.frontend-path elsewhere in this\n"
+            "          file",
+            1,
+        )
+        self.assertNotEqual(mutated, CI_WORKFLOW, "fixture setup: replacement did not match live text")
+        mutated_inputs_block = mutated.split("workflow_call:\n    inputs:\n", 1)[1].split(
+            "\n    secrets:\n", 1
+        )[0]
+        self.assertIn("${{", mutated_inputs_block)
+
     def test_pnpm_action_setup_dest_fix_is_untouched(self):
         """This WO edits the same job neighbourhood as CI-21 (both live in
         app-ci.yml). Guard that CI-21's fix wasn't accidentally reverted
