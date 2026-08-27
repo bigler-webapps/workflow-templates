@@ -101,9 +101,12 @@ on:
         default: 'backend'
       security-python-version:
         description: >
-          Python version for bandit/ruff when `run-bandit` or `run-ruff` is
-          true. Unused (no Python setup step runs) when both are false, so
-          this has no effect on pip-audit or on a caller that sets neither.
+          Python version for the whole `security` job's Python tooling.
+          WM-TAKE-8: this now governs pip-audit as well as bandit and ruff --
+          the setup step is no longer gated on run-bandit/run-ruff, because
+          pip-audit needs a Python too and silently found none on self-hosted
+          runners. A caller that sets neither lint input still gets this
+          Python, and its dependency audit now actually runs.
         type: string
         default: '3.12'
       run-migration-check:
@@ -369,6 +372,26 @@ jobs:
         shell: bash
         run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="${{ steps.range.outputs.log_opts }}" --redact --verbose'
 
+      - name: Set up Python for the security tooling
+        # WM-TAKE-8: ungated and moved ABOVE pip-audit. It used to sit below,
+        # gated on run-bandit/run-ruff, which left pip-audit resolving a bare
+        # `pip` against the runner's ambient Python. On the self-hosted netcup
+        # runners there is no ambient pip: the step exited 127 and every caller
+        # with the default `pip-audit-blocking: false` swallowed it via
+        # continue-on-error, so the dependency audit reported green while doing
+        # nothing. Measured on Kira, Cinevia and Photogallery; surfaced only by
+        # Gustav, whose `pip-audit-blocking: true` removed the safety net --
+        # exactly the step-level failure reviewer R1 warned about in WFT-CI-23.
+        # Gustav's app-local job, which this consolidation replaces, did BOTH
+        # halves (setup-python, then `python -m pip`) and that is why it worked.
+        # This deliberately breaks WFT-CI-23's "no caller changes behaviour"
+        # criterion: on self-hosted runners the audit now runs for the FIRST
+        # time and may emit warnings, and on GitHub-hosted ones it may resolve
+        # a different Python minor. Preserving a silent no-op is not a value.
+        uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
+        with:
+          python-version: ${{ inputs.security-python-version }}
+
       - name: pip-audit (report-only)
         # WFT-CI-23: pip-audit-blocking false (default) keeps continue-on-error
         # true, exactly as before this WO -- that still covers not just the
@@ -380,7 +403,7 @@ jobs:
         shell: bash
         run: |
           if [ -f backend/requirements.txt ]; then
-            pip install pip-audit
+            python -m pip install pip-audit
             if [ "${{ inputs.pip-audit-blocking }}" = "true" ]; then
               pip-audit -r backend/requirements.txt
             else
@@ -397,16 +420,6 @@ jobs:
             (cd ${{ inputs.frontend-path }} && pnpm audit --audit-level high) || echo "::warning::pnpm audit findings (non-blocking v1)"
           fi
         continue-on-error: true
-
-      - name: Set up Python for bandit/ruff
-        # WFT-CI-23: gated so a caller with both inputs off gets no new step
-        # in its run -- the pip-audit step above is untouched by this input
-        # and keeps resolving pip-audit against the runner's ambient Python,
-        # exactly as before.
-        if: ${{ inputs.run-bandit || inputs.run-ruff }}
-        uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
-        with:
-          python-version: ${{ inputs.security-python-version }}
 
       - name: Static analysis (bandit)
         if: ${{ inputs.run-bandit }}

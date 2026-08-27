@@ -155,15 +155,61 @@ class WftCi23StructuralTests(unittest.TestCase):
             )
             self.assertIsNotNone(step, f"{step_name} must be gated on inputs.{input_name}")
 
-    def test_setup_python_step_is_gated_on_either_new_tool(self):
-        step = re.search(
-            r"^      - name: Set up Python for bandit/ruff\n"
-            r"(?:        (?:#.*)?\n)*"
-            r"        if: \$\{\{ inputs\.run-bandit \|\| inputs\.run-ruff \}\}\n",
-            SECURITY_JOB,
-            re.MULTILINE,
+    def test_setup_python_runs_before_pip_audit_and_is_not_gated(self):
+        """WM-TAKE-8 reversed WFT-CI-23's gating, deliberately.
+
+        Gated on run-bandit/run-ruff and placed BELOW pip-audit, the setup step
+        left pip-audit resolving a bare `pip` against the runner's ambient
+        Python. The self-hosted netcup runners have none: the step exited 127,
+        and every caller on the default `pip-audit-blocking: false` swallowed it
+        through continue-on-error, so the dependency audit reported green while
+        doing nothing. Both halves are the contract -- unconditional AND ahead
+        of pip-audit -- because either alone still leaves the audit depending on
+        something the runner may not have.
+        """
+        setup_name = "- name: Set up Python for the security tooling"
+        setup = SECURITY_JOB.index(setup_name)
+        audit = SECURITY_JOB.index("- name: pip-audit (report-only)")
+        self.assertLess(setup, audit, "setup-python must precede pip-audit")
+
+        block = SECURITY_JOB[setup:audit]
+        self.assertIn("uses: actions/setup-python@", block)
+        gates = [ln for ln in block.splitlines() if ln.strip().startswith("if:")]
+        self.assertEqual(gates, [], "setup-python must carry no `if:` gate")
+
+    def test_pip_audit_never_invokes_a_bare_pip(self):
+        """The 127 itself: `pip install pip-audit` with no pip on PATH.
+
+        Checked over the whole security job, not just the one step, so a bare
+        `pip` reintroduced anywhere in it fails here too.
+        """
+        self.assertEqual(
+            self._bare_pip_lines(SECURITY_JOB),
+            [],
+            "use `python -m pip install`, never a bare `pip` -- it is not on "
+            "PATH on the self-hosted runners",
         )
-        self.assertIsNotNone(step)
+        self.assertIn("python -m pip install pip-audit", SECURITY_JOB)
+
+    def test_assertion_fails_if_a_bare_pip_is_reintroduced(self):
+        """Mutation test: prove the guard above actually fires."""
+        mutated = SECURITY_JOB.replace(
+            "python -m pip install pip-audit", "pip install pip-audit", 1
+        )
+        self.assertNotEqual(
+            mutated, SECURITY_JOB, "fixture setup: replacement did not match live text"
+        )
+        self.assertNotEqual(
+            self._bare_pip_lines(mutated), [], "guard would not have caught the 127"
+        )
+
+    @staticmethod
+    def _bare_pip_lines(job_text):
+        return [
+            ln.strip()
+            for ln in job_text.splitlines()
+            if ln.strip().startswith("pip install")
+        ]
 
     def test_bandit_and_ruff_versions_are_pinned(self):
         self.assertIn("bandit==1.9.4", SECURITY_JOB)
