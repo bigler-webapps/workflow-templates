@@ -112,8 +112,15 @@ runs:
           json="$(ts_status_json)" || true
           state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
           tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
-          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
-          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+          # WFT-CI-27: same routability gap WFT-CI-26 fixed in ts_probe -- a
+          # daemon that Running+tagged, re-probed after a failed join attempt,
+          # can still have no tailnet IPv4 bound to any local interface. See
+          # ts_probe's own comment above for the full mechanism.
+          ip4="$(printf '%s' "$json" | jq -r '(.Self.TailscaleIPs // []) | map(select(test(":") | not)) | .[0] // empty' 2>/dev/null || echo "")"
+          routable=false
+          [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true
+          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}  routable(${ip4:-none})=${routable}"
+          if [ "$state" = "Running" ] && [ "$tagged" = "true" ] && [ "$routable" = "true" ]; then
             connected=true
           fi
         fi

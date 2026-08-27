@@ -84,6 +84,13 @@ fi
 exit 1
 """
 
+# ts_probe_2's real script opens with `sleep 90` (the backoff before
+# re-probing). Timing is not part of the routability decision logic under
+# test, so this stub no-ops it -- otherwise every ts_probe_2 test costs 90s.
+SLEEP_STUB = r"""#!/usr/bin/env bash
+exit 0
+"""
+
 
 def _extract_probe_script():
     """Pull the real ts_probe step's `run:` block out of action.yml."""
@@ -104,10 +111,34 @@ def _extract_probe_script():
     return dedented
 
 
+def _extract_probe2_script():
+    """Pull the real ts_probe_2 step's `run:` block out of action.yml (WFT-CI-27)."""
+    match = re.search(
+        r"^    - name: Backoff and re-probe after failed join\n"
+        r"      id: ts_probe_2\n"
+        r"      if: .*\n"
+        r"      shell: bash\n"
+        r"      env:\n"
+        r"        TS_TAG: .*\n"
+        r"      run: \|\n"
+        r"(?P<body>(?:^ {8}.*\n|^\n)+)",
+        ACTION,
+        re.MULTILINE,
+    )
+    assert match is not None, "ts_probe_2 step not found at the expected shape in action.yml"
+    lines = match.group("body").splitlines()
+    dedented = "\n".join(line[8:] if line.startswith(" " * 8) else line for line in lines)
+    return dedented
+
+
 PROBE_SCRIPT = _extract_probe_script()
+PROBE2_SCRIPT = _extract_probe2_script()
 
 
-def _run_probe(status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
+def _run_script(script_text, status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
+    """Execute a real extracted probe script under bash with tailscale/jq/ip
+    stubbed. Shared by both ts_probe and ts_probe_2 -- they use the identical
+    stub contract (STATUS_JSON_FILE, LOCAL_IPV4S, TS_TAG, GITHUB_OUTPUT)."""
     if not BASH:
         raise unittest.SkipTest("no bash available on PATH")
     tmp = Path(tempfile.mkdtemp())
@@ -132,12 +163,16 @@ def _run_probe(status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
     ts_stub.write_text(TAILSCALE_STUB, encoding="utf-8", newline="\n")
     ts_stub.chmod(ts_stub.stat().st_mode | stat.S_IEXEC)
 
+    sleep_stub = bin_dir / "sleep"
+    sleep_stub.write_text(SLEEP_STUB, encoding="utf-8", newline="\n")
+    sleep_stub.chmod(sleep_stub.stat().st_mode | stat.S_IEXEC)
+
     status_file = tmp / "status.json"
     status_file.write_text(status_json, encoding="utf-8")
 
     output_file = tmp / "github_output.txt"
     script = tmp / "probe.sh"
-    script.write_text(PROBE_SCRIPT, encoding="utf-8", newline="\n")
+    script.write_text(script_text, encoding="utf-8", newline="\n")
 
     env = os.environ.copy()
     env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
@@ -153,6 +188,14 @@ def _run_probe(status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
             if line.startswith("connected="):
                 connected = line.split("=", 1)[1]
     return proc, connected
+
+
+def _run_probe(status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
+    return _run_script(PROBE_SCRIPT, status_json, ts_tag, local_ipv4s)
+
+
+def _run_probe2(status_json, ts_tag="tag:ci-deploy", local_ipv4s=""):
+    return _run_script(PROBE2_SCRIPT, status_json, ts_tag, local_ipv4s)
 
 
 class WftCi26ProbeTests(unittest.TestCase):
@@ -294,6 +337,103 @@ class WftCi26ProbeTests(unittest.TestCase):
             "name: Backoff and re-probe after failed join",
             "sleep 90",
             "name: Join Tailnet (attempt 2)",
+        ):
+            self.assertIn(marker, ACTION)
+
+
+class WftCi27Probe2Tests(unittest.TestCase):
+    """ts_probe_2 ("Backoff and re-probe after failed join") carried the
+    identical pre-fix two-condition defect WFT-CI-26 fixed in ts_probe,
+    deliberately left untouched by that WO's own Non-goal. WFT-CI-27 applies
+    the same fix here. Mirrors WftCi26ProbeTests' cases against ts_probe_2."""
+
+    def test_running_tagged_and_routable_reuses(self):
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.125","fd7a:115c::1"]}}',
+            local_ipv4s="100.109.210.125",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "true")
+
+    def test_running_tagged_but_not_routable_does_not_reuse(self):
+        """The exact defect WFT-CI-26 fixed in ts_probe, reproduced here:
+        must fall through (skip connected=true), letting Join attempt 2 run,
+        rather than wrongly trusting an unroutable re-probed daemon."""
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.125"]}}',
+            local_ipv4s="",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
+    def test_not_running_does_not_reuse(self):
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Stopped","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.125"]}}',
+            local_ipv4s="100.109.210.125",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
+    def test_wrong_tag_does_not_reuse(self):
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:something-else"],"TailscaleIPs":["100.109.210.125"]}}',
+            local_ipv4s="100.109.210.125",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
+    def test_prefix_address_does_not_false_positive_on_a_longer_local_address(self):
+        """Guards against reintroducing the unanchored-substring bug WFT-CI-26's
+        own reviewer caught in ts_probe -- must not leak back into ts_probe_2."""
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.1"]}}',
+            local_ipv4s="100.109.210.125",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
+    def test_assertion_fails_against_the_pre_fix_two_condition_probe2(self):
+        """Mutation check: run the OLD (pre-WFT-CI-27) two-condition ts_probe_2
+        text against the exact defect fixture and confirm it would have
+        wrongly reused -- proving this test suite actually catches the bug."""
+        before, rest = PROBE2_SCRIPT.split(
+            '  # WFT-CI-27: same routability gap WFT-CI-26 fixed in ts_probe', 1
+        )
+        _, after = rest.split(
+            '  [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true\n',
+            1,
+        )
+        old_script = before + after
+        old_script = old_script.replace(
+            'echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}  routable(${ip4:-none})=${routable}"',
+            'echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"',
+        )
+        old_script = old_script.replace(
+            'if [ "$state" = "Running" ] && [ "$tagged" = "true" ] && [ "$routable" = "true" ]; then',
+            'if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then',
+        )
+        self.assertNotEqual(old_script, PROBE2_SCRIPT, "fixture setup: old-script reconstruction did not change anything")
+        self.assertNotIn("routable", old_script)
+
+        proc, connected = _run_script(
+            old_script,
+            '{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.125"]}}',
+            local_ipv4s="",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(
+            connected,
+            "true",
+            "the pre-fix two-condition ts_probe_2 should wrongly reuse on this exact "
+            "defect fixture -- if it doesn't, this mutation setup is broken",
+        )
+
+    def test_join_attempt_2_and_backoff_timing_are_untouched(self):
+        """Non-goal: no change to the join steps or the retry timing."""
+        for marker in (
+            "sleep 90",
+            "name: Join Tailnet (attempt 2)",
+            "if: steps.ts_join_1.outcome == 'failure' && steps.ts_probe_2.outputs.connected != 'true'",
         ):
             self.assertIn(marker, ACTION)
 
