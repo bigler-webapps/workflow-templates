@@ -55,6 +55,53 @@ on:
       run-security:
         type: boolean
         default: true
+      pip-audit-blocking:
+        description: >
+          WFT-CI-23: default false keeps today's report-only pip-audit
+          (findings become a `::warning`, job stays green). true drops that
+          and lets a real finding fail the `security` job.
+        type: boolean
+        default: false
+      run-bandit:
+        description: >
+          WFT-CI-23: opt-in bandit static-analysis pass, off by default so no
+          existing caller's `security` job changes. Scoped by `bandit-path`.
+        type: boolean
+        default: false
+      bandit-path:
+        description: >
+          Reviewer R2: interpolated via ${{ }} directly into a shell command,
+          same pre-existing pattern as inputs.frontend-path elsewhere in this
+          file -- a caller must keep this a static literal, never a dynamic
+          expression (PR title, branch name, etc.).
+        type: string
+        default: 'backend'
+      bandit-config:
+        description: >
+          Optional `-c` config path for bandit (e.g. `backend/pyproject.toml`).
+          Default '' runs bandit with no config file, same as a bare `bandit
+          -r <bandit-path>`. Same static-literal-only caveat as bandit-path.
+        type: string
+        default: ''
+      run-ruff:
+        description: >
+          WFT-CI-23: opt-in ruff lint pass in the `security` job, off by
+          default. Independent of the `frontend` job's own `run-frontend-lint`.
+        type: boolean
+        default: false
+      ruff-path:
+        description: >
+          Interpolated via ${{ }} directly into a shell command -- same
+          static-literal-only caveat as bandit-path.
+        type: string
+        default: 'backend'
+      security-python-version:
+        description: >
+          Python version for bandit/ruff when `run-bandit` or `run-ruff` is
+          true. Unused (no Python setup step runs) when both are false, so
+          this has no effect on pip-audit or on a caller that sets neither.
+        type: string
+        default: '3.12'
       run-migration-check:
         description: >
           Opt-in (cockpit MIG-2): fail CI when `manage.py makemigrations --check
@@ -319,13 +366,24 @@ jobs:
         run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="${{ steps.range.outputs.log_opts }}" --redact --verbose'
 
       - name: pip-audit (report-only)
+        # WFT-CI-23: pip-audit-blocking false (default) keeps continue-on-error
+        # true, exactly as before this WO -- that still covers not just the
+        # audit's own findings (swallowed internally via `||`, producing the
+        # same ::warning:: annotation as before) but also a hard step failure
+        # unrelated to the script's exit code, e.g. `pip install pip-audit`
+        # itself failing (reviewer R1 / sec_reviewer S1). true drops
+        # continue-on-error so either kind of failure fails the job for real.
         shell: bash
         run: |
           if [ -f backend/requirements.txt ]; then
             pip install pip-audit
-            pip-audit -r backend/requirements.txt || echo "::warning::pip-audit findings (non-blocking v1)"
+            if [ "${{ inputs.pip-audit-blocking }}" = "true" ]; then
+              pip-audit -r backend/requirements.txt
+            else
+              pip-audit -r backend/requirements.txt || echo "::warning::pip-audit findings (non-blocking v1)"
+            fi
           fi
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.pip-audit-blocking }}
 
       - name: pnpm audit (report-only)
         shell: bash
@@ -335,6 +393,34 @@ jobs:
             (cd ${{ inputs.frontend-path }} && pnpm audit --audit-level high) || echo "::warning::pnpm audit findings (non-blocking v1)"
           fi
         continue-on-error: true
+
+      - name: Set up Python for bandit/ruff
+        # WFT-CI-23: gated so a caller with both inputs off gets no new step
+        # in its run -- the pip-audit step above is untouched by this input
+        # and keeps resolving pip-audit against the runner's ambient Python,
+        # exactly as before.
+        if: ${{ inputs.run-bandit || inputs.run-ruff }}
+        uses: actions/setup-python@b64ffcaf5b410884ad320a9cfac8866006a109aa  # v5.6.0
+        with:
+          python-version: ${{ inputs.security-python-version }}
+
+      - name: Static analysis (bandit)
+        if: ${{ inputs.run-bandit }}
+        shell: bash
+        run: |
+          python -m pip install bandit==1.9.4
+          if [ -n "${{ inputs.bandit-config }}" ]; then
+            bandit -q -r "${{ inputs.bandit-path }}" -c "${{ inputs.bandit-config }}"
+          else
+            bandit -q -r "${{ inputs.bandit-path }}"
+          fi
+
+      - name: Ruff
+        if: ${{ inputs.run-ruff }}
+        shell: bash
+        run: |
+          python -m pip install ruff==0.15.20
+          ruff check "${{ inputs.ruff-path }}"
 
   frontend:
     runs-on: ${{ inputs.runs-on }}
