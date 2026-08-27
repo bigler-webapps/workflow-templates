@@ -3,11 +3,20 @@
 Run with: python .github/scripts/test_app_ci_security_gates.py
 
 These are structural checks against the live workflow text, plus one live
-bandit run proving the gate can actually fail (not just parse). The
-unchanged-caller proof itself (a caller setting none of these inputs sees an
-identical `security` job) is verified live via a `ci-test/<ID>` dispatch per
-the WO's own test procedure -- a reusable workflow's runtime behaviour cannot
-be reproduced locally.
+bandit run proving the gate can actually fail (not just parse).
+
+WFT-CI-23's original "unchanged caller sees an identical `security` job"
+criterion NO LONGER HOLDS, and that is deliberate: WM-TAKE-8 found pip-audit
+had been a silent no-op on the self-hosted runners (bare `pip` exiting 127,
+swallowed), so every caller now gets a `setup-python` step and a pip-audit
+that actually runs. What the `ci-test/<ID>` dispatch proves today is that --
+not that callers are unaffected.
+
+Structural tests cannot see the failure class that took the fleet down for
+~2h (d8fc8e6): these read the YAML, they never ask GitHub to parse it. They
+passed throughout that outage. `test_no_expression_syntax_in_workflow_call_
+input_descriptions` (7a4a024) is the narrow guard for that one bug; a live
+dispatch remains the only real proof.
 """
 
 from pathlib import Path
