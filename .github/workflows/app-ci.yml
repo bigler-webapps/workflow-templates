@@ -70,10 +70,14 @@ on:
         default: false
       bandit-path:
         description: >
-          Reviewer R2: interpolated via ${{ }} directly into a shell command,
-          same pre-existing pattern as inputs.frontend-path elsewhere in this
-          file -- a caller must keep this a static literal, never a dynamic
-          expression (PR title, branch name, etc.).
+          Reviewer R2: interpolated as a GitHub expression directly into a
+          shell command, same pre-existing pattern as inputs.frontend-path
+          elsewhere in this file -- a caller must keep this a static literal,
+          never a dynamic expression (PR title, branch name, etc.).
+          Do NOT write the brace-expression syntax literally in an input
+          description: Actions evaluates expressions there, and an empty one
+          is a parse error that makes this workflow unresolvable for EVERY
+          caller (WM-TAKE-8 -- it took the whole fleet down for ~2h).
         type: string
         default: 'backend'
       bandit-config:
@@ -91,8 +95,8 @@ on:
         default: false
       ruff-path:
         description: >
-          Interpolated via ${{ }} directly into a shell command -- same
-          static-literal-only caveat as bandit-path.
+          Interpolated as a GitHub expression directly into a shell command
+          -- same static-literal-only caveat as bandit-path.
         type: string
         default: 'backend'
       security-python-version:
