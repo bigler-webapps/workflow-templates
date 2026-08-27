@@ -50,8 +50,23 @@ runs:
           json="$(ts_status_json)" || true
           state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
           tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
-          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
-          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+          # WFT-CI-26: state=Running + tagged alone doesn't mean the JOB can
+          # route through this daemon -- a warm daemon can report Running with
+          # no tailnet IPv4 bound to any local interface (the default,
+          # deliberately-unregistered instance, tailscale0 with only a
+          # link-local IPv6). The kernel then routes 100.64.0.0/10 out the
+          # host's public IP instead, and the far side has no route back:
+          # `tailscale status`/`ping` still succeed (userspace, never touch
+          # the kernel path) while every SSH/curl over the tailnet times out.
+          # Narrow on purpose (measured, netcup-runner-1, 2026-08-27): only
+          # "no tailnet IPv4 on any local interface" fails the probe -- this
+          # must never reject a genuinely routable warm daemon, or reuse loses
+          # the point of existing (see the action's own header comment).
+          ip4="$(printf '%s' "$json" | jq -r '(.Self.TailscaleIPs // []) | map(select(test(":") | not)) | .[0] // empty' 2>/dev/null || echo "")"
+          routable=false
+          [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qF "$ip4" && routable=true
+          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}  routable(${ip4:-none})=${routable}"
+          if [ "$state" = "Running" ] && [ "$tagged" = "true" ] && [ "$routable" = "true" ]; then
             connected=true
           fi
         else
