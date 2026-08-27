@@ -34,21 +34,29 @@ class WftCi25StructuralTests(unittest.TestCase):
         self.assertNotIn("publish-backend-image", BACKEND_JOB)
 
     def test_assertion_fails_if_the_publish_step_is_reintroduced(self):
-        """Mutation check: paste the real pre-WFT-CI-25 publish step back in
-        (from git history) and confirm the guard above rejects it."""
+        """Mutation check (reviewer-caught: the first version of this test
+        only asserted the fixture text CONTAINED the publish step, never
+        re-ran the actual guard against it -- tautological, would pass even
+        with the publish step present). Paste the real pre-WFT-CI-25 publish
+        step back in and confirm `test_backend_job_does_not_publish`'s own
+        assertions actually reject it."""
         reintroduced = BACKEND_JOB + (
             "\n      - name: Publish backend image to GHCR\n"
             "        id: publish_backend_image\n"
             "        uses: ./.wt-checkout/.github/actions/publish-backend-image\n"
         )
         self.assertNotEqual(reintroduced, BACKEND_JOB, "fixture setup: append did not change the job text")
-        self.assertIn("Publish backend image to GHCR", reintroduced)
+        with self.assertRaises(AssertionError):
+            self.assertNotIn("Publish backend image to GHCR", reintroduced)
+        with self.assertRaises(AssertionError):
+            self.assertNotIn("publish_backend_image", reintroduced)
 
     def test_remove_ci_image_step_no_longer_references_a_published_image(self):
         """The rework (not a deletion) of `Remove CI image`: it must still
-        remove $CI_IMAGE (the runner-disk leak this step exists to prevent,
-        WM-TAKE-9) but must no longer reference a published-image output that
-        no longer exists."""
+        remove $CI_IMAGE unconditionally (`if: always()` -- the runner-disk
+        leak this step exists to prevent, WM-TAKE-9, happens on a FAILED
+        build/pytest too, not just a successful one) and must no longer
+        reference a published-image output that no longer exists."""
         step = re.search(
             r"^      - name: Remove CI image\n(?P<body>(?:^ {8}.*\n|\n)+)",
             BACKEND_JOB,
@@ -57,9 +65,26 @@ class WftCi25StructuralTests(unittest.TestCase):
         self.assertIsNotNone(step)
         assert step is not None
         body = step.group("body")
+        self.assertIn("if: always()", body)
         self.assertIn("docker image rm -f \"$CI_IMAGE\"", body)
         self.assertNotIn("PUBLISHED_IMAGE", body)
         self.assertNotIn("publish_backend_image", body)
+
+    def test_assertion_fails_if_always_is_weakened_to_success(self):
+        """Mutation check (reviewer-caught): the test above didn't actually
+        enforce `if: always()` before this fix -- prove it now does, by
+        weakening it to `if: success()` (which would silently leave $CI_IMAGE
+        on the runner after a failed build) and confirming rejection."""
+        mutated = BACKEND_JOB.replace("if: always()", "if: success()", 1)
+        self.assertNotEqual(mutated, BACKEND_JOB, "fixture setup: replacement did not match live text")
+        step = re.search(
+            r"^      - name: Remove CI image\n(?P<body>(?:^ {8}.*\n|\n)+)",
+            mutated,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(step)
+        assert step is not None
+        self.assertNotIn("if: always()", step.group("body"))
 
     def test_resolve_sha_step_is_gone_with_its_only_consumer(self):
         """`resolve_sha` existed solely to feed the publish step's

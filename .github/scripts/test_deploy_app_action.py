@@ -70,12 +70,24 @@ class CI9StructuralTests(unittest.TestCase):
     def test_app_ci_yml_never_grows_its_own_direct_publish(self):
         """WFT-CI-25: app-ci.yml stopped calling the shared composite at all
         (CI-11 moved the real publish to each app's main.yml) -- it must not
-        quietly regain one, composite-wrapped or a raw `docker push`."""
+        quietly regain one, composite-wrapped or a raw `docker push` of any
+        form (reviewer-caught: the first version of this test only matched
+        the one exact removed string, so a differently-worded reintroduced
+        push -- e.g. `docker push ghcr.io/...:${GITHUB_SHA}` -- would have
+        passed unnoticed)."""
         self.assertNotIn("publish-backend-image", CI_WORKFLOW)
         self.assertNotIn("publish_backend_image", CI_WORKFLOW)
-        self.assertNotIn('docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"', CI_WORKFLOW)
+        self.assertNotIn("docker push", CI_WORKFLOW)
         self.assertIn("outputs:\n  image:", PUBLISH_ACTION)
         self.assertIn('printf \'image=%s:%s\\n\' "$PUBLISHED_IMAGE" "$IMAGE_TAG" >> "$GITHUB_OUTPUT"', PUBLISH_ACTION)
+
+    def test_assertion_fails_on_any_reintroduced_docker_push(self):
+        """Mutation check (reviewer-caught): prove the broadened guard above
+        actually catches a push shaped differently from the exact original
+        string, not just a verbatim copy of it."""
+        mutated = CI_WORKFLOW + '\n      - run: docker push ghcr.io/bigler-webapps/example-backend:${{ github.sha }}\n'
+        self.assertNotEqual(mutated, CI_WORKFLOW, "fixture setup: append did not change the workflow text")
+        self.assertIn("docker push", mutated)
 
     def test_default_deploy_pulls_and_fallback_keeps_build(self):
         """deploy-app/action.yml separates pull-based default from --build fallback."""

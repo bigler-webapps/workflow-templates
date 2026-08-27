@@ -152,8 +152,11 @@ on:
         required: false
 
 permissions:
+  # WFT-CI-25: `packages: write` was only ever needed by the publish step
+  # this WO removed -- nothing left in this workflow authenticates to or
+  # writes GHCR. The 19 callers' own `ci.yml` still declare it for their
+  # separate main.yml publish path; out of scope here (not this workflow).
   contents: read
-  packages: write
 
 jobs:
   validate-inputs:
