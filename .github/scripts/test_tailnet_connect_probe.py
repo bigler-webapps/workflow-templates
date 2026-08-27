@@ -204,6 +204,19 @@ class WftCi26ProbeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(connected, "false")
 
+    def test_prefix_address_does_not_false_positive_on_a_longer_local_address(self):
+        """Reviewer-caught (R3): an unanchored substring match would let a
+        daemon-reported IPv4 that is a literal prefix of a DIFFERENT locally
+        bound address (e.g. reported 100.109.210.1, local 100.109.210.125)
+        wrongly read as routable. The daemon's own reported address is never
+        actually present locally in this fixture -- must not reuse."""
+        proc, connected = _run_probe(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.1"]}}',
+            local_ipv4s="100.109.210.125",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
     def test_assertion_fails_against_the_pre_fix_two_condition_probe(self):
         """Mutation check: run the OLD (pre-WFT-CI-26) two-condition probe
         text against the exact defect fixture and confirm it would have
@@ -215,7 +228,7 @@ class WftCi26ProbeTests(unittest.TestCase):
             '  # WFT-CI-26: state=Running + tagged alone', 1
         )
         _, after = rest.split(
-            '  [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qF "$ip4" && routable=true\n',
+            '  [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true\n',
             1,
         )
         old_script = before + after

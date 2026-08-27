@@ -64,7 +64,11 @@ runs:
           # the point of existing (see the action's own header comment).
           ip4="$(printf '%s' "$json" | jq -r '(.Self.TailscaleIPs // []) | map(select(test(":") | not)) | .[0] // empty' 2>/dev/null || echo "")"
           routable=false
-          [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qF "$ip4" && routable=true
+          # Reviewer-caught: an unanchored `grep -F "$ip4"` substring-matches
+          # against the WHOLE addr-show line, so a target like 100.109.210.1
+          # would false-positive on a locally-bound 100.109.210.125. Anchor on
+          # "inet <ip>/" -- `ip -4 addr show` always renders CIDR with a slash.
+          [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true
           echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}  routable(${ip4:-none})=${routable}"
           if [ "$state" = "Running" ] && [ "$tagged" = "true" ] && [ "$routable" = "true" ]; then
             connected=true
