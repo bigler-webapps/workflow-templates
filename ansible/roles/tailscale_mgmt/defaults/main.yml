@@ -55,3 +55,22 @@ tailscale_mgmt_port: 0
 # Set true (one-shot) after changing tag, hostname, or --ssh on an already-
 # Running mgmt instance. See tailscale role defaults for the same pattern.
 tailscale_mgmt_force_up: false
+
+# INF-67 — kernel-level route pin. Both tailscaled instances share Linux
+# routing table 52 (tailscaled hardcodes that table id; there is no
+# --socket-scoped separation), so whichever daemon last dialed a given
+# tailnet peer wins that peer's route — including onto the UNregistered
+# default instance, whose tailscale0 interface carries no tailnet IPv4, so
+# its route resolves with the host's PUBLIC IP as source and defeats
+# tailnet-only firewall rules on the peer. This pin forces the whole
+# supernet through tsmgmt0 via a dedicated table + a higher-priority ip
+# rule, ahead of the rule pointing at the shared table 52 — see
+# templates/tsmgmt-route-pin.sh.j2 and work-orders/INF-67.md in
+# webapp-management for the measurement that found this.
+tailscale_mgmt_tailnet_cidr: "100.64.0.0/10"
+tailscale_mgmt_route_table: 51
+# Must stay below (= higher priority than) the "from all lookup 52" rule
+# tailscaled installs (observed at priority 5270) and above the ACL-deny
+# rules below it (observed at 5210/5230/5250) — verify with `ip rule show`
+# before changing.
+tailscale_mgmt_route_priority: 5260

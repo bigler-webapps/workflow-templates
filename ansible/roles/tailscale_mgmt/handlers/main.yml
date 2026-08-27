@@ -11,3 +11,16 @@
     name: tailscaled-mgmt.service
     state: restarted
   listen: tailscaled-mgmt unit changed
+
+- name: systemd daemon-reload for tsmgmt-route-pin
+  become: true
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: tsmgmt-route-pin unit changed
+
+- name: restart tsmgmt-route-pin
+  become: true
+  ansible.builtin.systemd:
+    name: tsmgmt-route-pin.service
+    state: restarted
+  listen: tsmgmt-route-pin unit changed

@@ -135,3 +135,50 @@
       {{ (_mgmt_status_post.stdout | from_json).BackendState }},
       expected Running.
   when: tailscale_mgmt_authkey | string | length > 0
+
+# INF-67: pin 100.64.0.0/10 routing to tsmgmt0 at the kernel level (both
+# tailscaled instances share table 52 — see defaults/main.yml and
+# templates/tsmgmt-route-pin.sh.j2 for the mechanism). Deployed only once
+# the mgmt daemon is confirmed Running, so tsmgmt0 already has its address.
+
+- name: Deploy tsmgmt-route-pin script
+  become: true
+  ansible.builtin.template:
+    src: tsmgmt-route-pin.sh.j2
+    dest: /usr/local/sbin/tsmgmt-route-pin.sh
+    owner: root
+    group: root
+    mode: "0755"
+  notify: tsmgmt-route-pin unit changed
+  when: tailscale_mgmt_authkey | string | length > 0
+
+- name: Deploy tsmgmt-route-pin systemd unit
+  become: true
+  ansible.builtin.template:
+    src: tsmgmt-route-pin.service.j2
+    dest: /etc/systemd/system/tsmgmt-route-pin.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: tsmgmt-route-pin unit changed
+  when: tailscale_mgmt_authkey | string | length > 0
+
+- name: Flush handlers so daemon-reload/restart complete before enabling
+  ansible.builtin.meta: flush_handlers
+
+- name: Reassert tsmgmt-route-pin
+  # state: restarted (not started) on every run, deliberately — a oneshot
+  # RemainAfterExit unit reports "active (exited)" once run once, so a plain
+  # `state: started` on a re-provision with no template diff would no-op
+  # and never notice the underlying ip route/rule being lost out-of-band
+  # (table 51 is ours alone; nothing else in this role touches it, but an
+  # operator-run route flush elsewhere on the host could still clear it).
+  # The script itself is idempotent (`ip route replace`, rule-add-if-missing),
+  # so a restart here is cheap and side-effect-free even when nothing drifted.
+  become: true
+  ansible.builtin.systemd:
+    name: tsmgmt-route-pin.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  when: tailscale_mgmt_authkey | string | length > 0

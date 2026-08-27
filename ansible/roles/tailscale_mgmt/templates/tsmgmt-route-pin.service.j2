@@ -1,0 +1,17 @@
+[Unit]
+Description=Pin 100.64.0.0/10 (tailnet) routing to tsmgmt0 (INF-67)
+# PartOf, not just After: this route pin lives in its own table (see the
+# script) so tailscaled-mgmt restarts never touch it directly — but a
+# restart is the moment operationally worth re-confirming it, and PartOf
+# also stops/starts this unit in lockstep with the daemon it depends on.
+After=tailscaled-mgmt.service
+Requires=tailscaled-mgmt.service
+PartOf=tailscaled-mgmt.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tsmgmt-route-pin.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# INF-67: both tailscaled instances on this host write into the SAME kernel
+# routing table (table 52 — tailscaled hardcodes it; there is no per-socket
+# table separation). Whichever daemon most recently dialed a given tailnet
+# peer wins that peer's route in table 52, including onto the unregistered
+# default instance, whose tailscale0 interface carries no tailnet IPv4 — a
+# route that resolves through it falls back to the host's PUBLIC IP as
+# source, defeating tailnet-only firewall rules on the peer. See
+# work-orders/INF-67.md in webapp-management for the measurement.
+#
+# This pins the whole tailnet supernet through tsmgmt0 via a dedicated route
+# table + a higher-priority ip rule, ahead of the rule pointing at the
+# shared table 52 — deterministic, independent of whatever the default
+# instance does, and untouched by tailscaled's own route management (it
+# never writes to this table).
+set -euo pipefail
+
+TUN="{{ tailscale_mgmt_tun }}"
+CIDR="{{ tailscale_mgmt_tailnet_cidr }}"
+TABLE="{{ tailscale_mgmt_route_table }}"
+PRIORITY="{{ tailscale_mgmt_route_priority }}"
+
+# tsmgmt0 only carries an address once `tailscale up` completes against saved
+# state — a separate step from the daemon merely starting — so wait rather
+# than race it on boot.
+ready=0
+for _ in $(seq 1 30); do
+    if ip -4 -o addr show dev "$TUN" >/dev/null 2>&1; then
+        ready=1
+        break
+    fi
+    sleep 2
+done
+
+if [ "$ready" -ne 1 ]; then
+    echo "tsmgmt-route-pin: $TUN has no IPv4 address after 60s, not installing route pin" >&2
+    exit 1
+fi
+
+# Idempotent: replace (not add) so a re-run after e.g. a tsmgmt0 address
+# change updates cleanly rather than erroring on a duplicate.
+ip route replace "$CIDR" dev "$TUN" table "$TABLE"
+
+# ip rule add has no replace semantics; this priority is reserved for this
+# rule alone (see defaults/main.yml), so presence at all means it's ours.
+if [ -z "$(ip rule show priority "$PRIORITY")" ]; then
+    ip rule add to "$CIDR" lookup "$TABLE" priority "$PRIORITY"
+fi
