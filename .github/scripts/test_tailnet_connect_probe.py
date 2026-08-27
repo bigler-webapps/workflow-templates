@@ -392,6 +392,17 @@ class WftCi27Probe2Tests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(connected, "false")
 
+    def test_no_tailscale_ipv4_at_all_does_not_reuse(self):
+        """Reviewer-caught (R1): parity gap with WftCi26ProbeTests' equivalent
+        case -- no TailscaleIPs entry (or only IPv6) must resolve ip4 empty
+        and not pass the degenerate empty-match case as routable."""
+        proc, connected = _run_probe2(
+            status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["fd7a:115c::1"]}}',
+            local_ipv4s="10.0.0.5",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(connected, "false")
+
     def test_assertion_fails_against_the_pre_fix_two_condition_probe2(self):
         """Mutation check: run the OLD (pre-WFT-CI-27) two-condition ts_probe_2
         text against the exact defect fixture and confirm it would have
