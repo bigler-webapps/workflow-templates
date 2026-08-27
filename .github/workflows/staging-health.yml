@@ -126,7 +126,7 @@ jobs:
 
       - name: Ensure tailnet (reuse warm daemon; join only if down)
         if: env.HAS_TS == 'true'
-        uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@ci-test/WFT-CI-26
+        uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@main
         with:
           ts_oauth_client_id: ${{ secrets.ts_oauth_client_id }}
           ts_oauth_secret: ${{ secrets.ts_oauth_secret }}
