@@ -100,7 +100,7 @@
         fail_msg: >-
           Tailscale daemon did not respond to status query after up
           (rc={{ _tailscale_status_post.rc }}).
-      when: tailscale_authkey | length > 0
+      when: tailscale_authkey | length > 0 and not ansible_check_mode
 
     - name: Assert Tailscale BackendState is Running
       ansible.builtin.assert:
@@ -110,4 +110,4 @@
           Tailscale BackendState is
           {{ (_tailscale_status_post.stdout | from_json).BackendState }},
           expected Running.
-      when: tailscale_authkey | length > 0
+      when: tailscale_authkey | length > 0 and not ansible_check_mode
