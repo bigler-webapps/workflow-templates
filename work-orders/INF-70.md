@@ -190,11 +190,35 @@ Orchestrator, not by the implementer)
 Repo: `workflow-templates` (branch `main`). WO: `work-orders/INF-70.md`. Follow
 `orchestrate-codex`.
 
+## Preamble
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register
+> row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source
+> and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies,
+> touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state
+> blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT
+> `git add`/`commit`/`push` — leave every change uncommitted in the working tree for the
+> orchestrator's independent review. This WO names no test file to write (see "Tests" above — no
+> Python test harness exists for role task logic in this repo); do not invent one. The orchestrator
+> re-runs verification (a live `ansible-provision --check --diff` dispatch) and does the independent
+> review after you finish — those are the gate; your own edit does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
 ---
 
 ## C. Orchestrator-only
 
-STOP — everything below this line is addressed to the Orchestrator, not the implementer.
+> **If you are the implementer reading this work order as your own specification: STOP at this line.
+> Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
+> reviewers, no verification run, no register edit, no commit.** You ARE the invocation described
+> below; do NOT shell out to `codex exec`.
 
 ### Review routing
 
