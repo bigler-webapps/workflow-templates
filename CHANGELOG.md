@@ -10,6 +10,27 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.12.0] - 2026-08-29
+
+### Added
+
+**`publish-backend-image` gains two survey-specific Vite build-arg inputs**
+(`WFT-CI-28`). CI-9/10/11 moved backend image builds onto the GitHub runner via
+this composite action, whose `docker build` invocation only ever forwarded ONE
+hardcoded app-specific build-arg (`vite_app_mui_license_key`). jg-ferien's own
+Dockerfile declares two more Vite build-time `ARG`s
+(`VITE_SURVEY_APP_API_BASE_URL`, `VITE_SURVEY_APP_SITE_SLUG`) for its native
+survey integration — with no input to receive them, Docker baked in empty
+strings, which `useSurveyRuntime.js` reads as "survey not configured" and
+renders that error to every visitor of jg-ferien's production `/survey` page.
+Fix: two new optional inputs (`vite_survey_app_api_base_url`,
+`vite_survey_app_site_slug`), mirroring the existing MUI-key pattern exactly —
+default empty string, so the other 18 callers (none of which declare these
+`ARG`s) are structurally unaffected. Consuming this requires the caller's own
+workflow to resolve the correct per-environment value and pass it explicitly
+(see jg-ferien's `JG-CI-1`, which reuses `generate-env` for that resolution
+rather than duplicating its precedence rules).
+
 ## [2.10.3] - 2026-08-18
 
 ### Fixed

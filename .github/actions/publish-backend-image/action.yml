@@ -28,6 +28,14 @@ inputs:
     description: 'Build argument for the MUI license key.'
     required: false
     default: ''
+  vite_survey_app_api_base_url:
+    description: 'Build argument for the survey app API base URL.'
+    required: false
+    default: ''
+  vite_survey_app_site_slug:
+    description: 'Build argument for the survey app site slug.'
+    required: false
+    default: ''
   existing_image:
     description: 'Existing full CI image to tag instead of rebuilding when backend_target is empty.'
     required: false
@@ -52,6 +60,8 @@ runs:
         BACKEND_BUILD_CONTEXT: ${{ inputs.backend_build_context }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_read_token }}
         VITE_APP_MUI_LICENSE_KEY: ${{ inputs.vite_app_mui_license_key }}
+        VITE_SURVEY_APP_API_BASE_URL: ${{ inputs.vite_survey_app_api_base_url }}
+        VITE_SURVEY_APP_SITE_SLUG: ${{ inputs.vite_survey_app_site_slug }}
         EXISTING_IMAGE: ${{ inputs.existing_image }}
       run: |
         set -euo pipefail
@@ -71,6 +81,8 @@ runs:
         if [ -n "$BACKEND_TARGET" ] || [ -z "$EXISTING_IMAGE" ]; then
           DOCKER_BUILDKIT=1 docker build \
             --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
+            --build-arg "VITE_SURVEY_APP_API_BASE_URL=$VITE_SURVEY_APP_API_BASE_URL" \
+            --build-arg "VITE_SURVEY_APP_SITE_SLUG=$VITE_SURVEY_APP_SITE_SLUG" \
             --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
             --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
             -t "$PUBLISHED_IMAGE:$IMAGE_TAG" \
