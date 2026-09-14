@@ -120,8 +120,8 @@ runs:
             exit 1
             ;;
         esac
-        [[ "$INPUT_COMPOSE_PROFILES" =~ ^(main|staging|monitoring|geo)(,(main|staging|monitoring|geo))*$ ]] || {
-          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: comma-separated list of main, staging, monitoring, geo)"
+        [[ "$INPUT_COMPOSE_PROFILES" =~ ^(main|staging|monitoring|geo|geo-kg)(,(main|staging|monitoring|geo|geo-kg))*$ ]] || {
+          echo "❌ Invalid 'compose_profiles' input '$INPUT_COMPOSE_PROFILES' (allowed: comma-separated list of main, staging, monitoring, geo, geo-kg)"
           exit 1
         }
         echo "✅ Inputs validated."
