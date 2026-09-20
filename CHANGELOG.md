@@ -10,6 +10,23 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [2.13.0] - 2026-09-20
+
+### Added
+
+**`janitor` composite action gains an optional `image_retention` input**, passed
+through to `janitor.sh` as `JANITOR_IMAGE_RETENTION`. Staging's disk hit 93%
+two nights running (2026-09-20) even after the janitor's existing prunes ran
+clean -- the box is deploying enough app versions that the shared
+keep-newest-3-per-repository default, sized for prod's rollback needs, no
+longer leaves staging enough headroom. Every host previously got the same
+hardcoded 3; this lets a caller tune it per host without touching `janitor.sh`
+itself (which already reads the env var, unchanged since INF-51). Empty
+(the default) preserves the existing behaviour for every current caller --
+backwards-compatible, no consumer needs to change. The new value is
+validated (empty or digits-only) before it reaches the remote SSH command
+string it's interpolated into.
+
 ## [2.12.0] - 2026-08-29
 
 ### Added

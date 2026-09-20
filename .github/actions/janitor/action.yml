@@ -35,6 +35,14 @@ inputs:
     description: 'Tailnet tag for the ephemeral CI node. Must be allowed in the tailnet ACL.'
     required: false
     default: 'tag:ci-deploy'
+  image_retention:
+    description: >-
+      Per-host override for janitor.sh's JANITOR_IMAGE_RETENTION (keep newest
+      N image versions per repository). Empty (default) leaves the script's
+      own default (3) in place -- backwards-compatible, no change for any
+      caller that doesn't set this.
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -54,6 +62,7 @@ runs:
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
         INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
         INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
+        INPUT_IMAGE_RETENTION: ${{ inputs.image_retention }}
       run: |
         set -euo pipefail
         if [ -z "$INPUT_TS_OAUTH_CLIENT_ID" ] || [ -z "$INPUT_TS_OAUTH_SECRET" ]; then
@@ -63,6 +72,26 @@ runs:
         printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid target"; exit 1; }
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid ssh_user"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid ssh_host"; exit 1; }
+        # Client-side gate before this value ever reaches a remote command
+        # string: empty (the default) or a positive integer with no leading
+        # zero. janitor.sh rejects "0" and non-numeric values again
+        # server-side (defense in depth), but failing here gives a readable
+        # CI error instead of a rejected SSH command.
+        #
+        # Bash `[[ =~ ]]`, not `grep`, and that distinction matters here:
+        # grep's `^`/`$` anchor each LINE of the input, not the whole
+        # buffer, so `printf '%s' "$multiline_value" | grep -qE '^[0-9]*$'`
+        # matches (and passes validation) as soon as ANY one line is
+        # numeric -- a value like "2\nrm -rf /" would clear it, and that
+        # value is interpolated straight into the remote SSH command below.
+        # Bash's `=~` anchors to the whole string, so it has no such gap.
+        # (Also sidesteps grep's other trap here: `printf '%s' ""` writes
+        # zero bytes -- zero LINES, not one empty line -- so `grep -q` on
+        # the legitimately-empty default would never match at all.)
+        if ! [[ "$INPUT_IMAGE_RETENTION" =~ ^([1-9][0-9]*)?$ ]]; then
+          echo "❌ Invalid image_retention (must be empty or a positive integer, no leading zero)"
+          exit 1
+        fi
         echo "✅ Inputs validated."
 
     - name: 📂 Sync ops scripts to server
@@ -93,7 +122,11 @@ runs:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_SCRIPTS_PATH: ${{ inputs.remote_scripts_path }}
+        IMAGE_RETENTION: ${{ inputs.image_retention }}
       run: |
         set -euo pipefail
+        # IMAGE_RETENTION was already validated (empty or digits-only) in the
+        # "Validate inputs" step above, so it's safe inside single quotes here.
+        # An empty value falls through janitor.sh's own "${VAR:-3}" default.
         ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
-          "bash ${REMOTE_SCRIPTS_PATH}/janitor.sh"
+          "JANITOR_IMAGE_RETENTION='${IMAGE_RETENTION}' bash ${REMOTE_SCRIPTS_PATH}/janitor.sh"
