@@ -610,6 +610,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
@@ -620,6 +622,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
@@ -633,6 +637,8 @@ jobs:
         run: |
           set +e
           docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
@@ -654,6 +660,8 @@ jobs:
         run: |
           set +e
           docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
             -e GIT_CONFIG_COUNT=1 \
             -e GIT_CONFIG_KEY_0=safe.directory \

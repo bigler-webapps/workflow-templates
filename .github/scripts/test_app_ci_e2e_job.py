@@ -181,6 +181,28 @@ class WftCi30StructuralTests(unittest.TestCase):
         capture = step_body(mutated, "Capture E2E screens and report")
         self.assertNotIn("GIT_CONFIG_COUNT", capture)
 
+    def test_playwright_containers_run_as_the_host_uid_not_root(self):
+        # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: the
+        # containers write into the bind-mounted host checkout (node_modules,
+        # pnpm's virtual store) as whatever user the image defaults to
+        # (root). Root-owned files in a self-hosted runner's shared checkout
+        # directory can't be removed by that runner's own (non-root) cleanup
+        # process -- the NEXT run's `actions/checkout` failed outright
+        # ("EACCES: permission denied, rmdir ... .pnpm-store"), and only
+        # recovered because the checkout action itself falls back to
+        # recreating the whole workdir. Matching the container's user to the
+        # host's own UID/GID is the fix, not a per-file cleanup step.
+        for name in ("Install Playwright dependencies", "Playwright specs", "Playwright quarantine specs", "Capture E2E screens and report"):
+            step = step_body(E2E_JOB, name)
+            self.assertIn('--user "$(id -u):$(id -g)" \\', step, f"{name} must run as the host UID, not the image default (root)")
+            self.assertIn("-e HOME=/tmp \\", step, f"{name} needs HOME set -- an arbitrary UID has no /etc/passwd entry, breaking pnpm/npm's config resolution")
+
+    def test_assertion_fails_if_a_step_drops_the_user_override(self):
+        mutated = E2E_JOB.replace('--user "$(id -u):$(id -g)" \\\n            -e HOME=/tmp \\\n', "", 1)
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live user/home lines")
+        step = step_body(mutated, "Install Playwright dependencies")
+        self.assertNotIn('--user "$(id -u):$(id -g)"', step)
+
     def test_playwright_containers_mount_the_full_checkout_not_just_frontend(self):
         # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: the capture
         # script's own build-provenance check (KZ-E2E-8) shells `git rev-parse
@@ -367,8 +389,8 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_quarantine_becomes_blocking(self):
         mutated = E2E_JOB.replace(
-            "        continue-on-error: true\n        run: |\n          set +e\n          docker run --rm --network host \\\n            -e PLAYWRIGHT_BASE_URL",
-            "        run: |\n          set -euo pipefail\n          docker run --rm --network host \\\n            -e PLAYWRIGHT_BASE_URL",
+            "        continue-on-error: true\n        run: |\n          set +e\n          docker run --rm --network host \\\n            --user",
+            "        run: |\n          set -euo pipefail\n          docker run --rm --network host \\\n            --user",
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match quarantine step")
