@@ -156,6 +156,28 @@ class WftCi30StructuralTests(unittest.TestCase):
         step = step_body(mutated, "Migrate and seed E2E database")
         self.assertNotIn("python manage.py migrate --noinput", step)
 
+    def test_playwright_containers_mount_the_full_checkout_not_just_frontend(self):
+        # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: the capture
+        # script's own build-provenance check (KZ-E2E-8) shells `git rev-parse
+        # HEAD`, which needs a reachable .git -- mounting only frontend-path
+        # (the pre-fix version of this workflow) put .git outside the mount
+        # entirely and every git-plumbing call inside the container failed.
+        for name in ("Install Playwright dependencies", "Playwright specs", "Playwright quarantine specs", "Capture E2E screens and report"):
+            step = step_body(E2E_JOB, name)
+            self.assertIn('-v "${{ github.workspace }}:/workspace" \\', step, f"{name} must mount the full checkout, not just frontend-path")
+            self.assertIn('-w "/workspace/${{ inputs.frontend-path }}" \\', step, f"{name} must still run from the frontend-path subdirectory")
+            self.assertNotIn(":/workspace/frontend", step, f"{name} must not use the old frontend-only mount target")
+
+    def test_assertion_fails_if_a_step_reverts_to_frontend_only_mount(self):
+        mutated = E2E_JOB.replace(
+            '-v "${{ github.workspace }}:/workspace" \\\n            -w "/workspace/${{ inputs.frontend-path }}" \\',
+            '-v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \\\n            -w /workspace/frontend \\',
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live mount lines")
+        step = step_body(mutated, "Install Playwright dependencies")
+        self.assertNotIn('-v "${{ github.workspace }}:/workspace" \\', step)
+
     def test_playwright_dependencies_are_installed_before_specs_run(self):
         step = step_body(E2E_JOB, "Install Playwright dependencies")
         self.assertIn("corepack enable", step)

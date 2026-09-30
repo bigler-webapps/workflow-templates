@@ -610,8 +610,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --network host \
-            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
-            -w /workspace/frontend \
+            -v "${{ github.workspace }}:/workspace" \
+            -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
             bash -lc 'corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install --frozen-lockfile'
 
@@ -621,8 +621,8 @@ jobs:
           set -euo pipefail
           docker run --rm --network host \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
-            -w /workspace/frontend \
+            -v "${{ github.workspace }}:/workspace" \
+            -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
             bash -lc 'npx playwright test --grep-invert "@quarantine"'
 
@@ -634,8 +634,8 @@ jobs:
           set +e
           docker run --rm --network host \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
-            -w /workspace/frontend \
+            -v "${{ github.workspace }}:/workspace" \
+            -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
             bash -lc 'npx playwright test --grep "@quarantine"'
           status=$?
@@ -655,8 +655,8 @@ jobs:
           set +e
           docker run --rm --network host \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
-            -w /workspace/frontend \
+            -v "${{ github.workspace }}:/workspace" \
+            -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
             bash -lc '${{ inputs.e2e-capture-command }}'
           status=$?
