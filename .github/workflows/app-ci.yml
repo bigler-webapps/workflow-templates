@@ -145,6 +145,25 @@ on:
           Multi-label JSON arrays are not supported by this input.
         type: string
         default: 'ubuntu-latest'
+      # End-to-end
+      run-e2e:
+        type: boolean
+        default: false
+      e2e-settings-module:
+        type: string
+        default: ''
+      e2e-seed-command:
+        type: string
+        default: ''
+      e2e-playwright-image:
+        type: string
+        default: ''
+      e2e-capture-command:
+        type: string
+        default: 'node tests/capture/capture.js'
+      e2e-capture-output-path:
+        type: string
+        default: 'tests/capture/output'
     secrets:
       VITE_APP_MUI_LICENSE_KEY:
         required: false
@@ -171,6 +190,12 @@ jobs:
         if: ${{ inputs.run-migration-check && !inputs.run-backend }}
         run: |
           echo "::error::run-migration-check: true has no effect with run-backend: false -- the backend job that would run it is skipped entirely. Set run-backend: true too, or drop run-migration-check."
+          exit 1
+
+      - name: run-e2e requires its own inputs
+        if: ${{ inputs.run-e2e && (inputs.e2e-settings-module == '' || inputs.e2e-seed-command == '' || inputs.e2e-playwright-image == '') }}
+        run: |
+          echo "::error::run-e2e: true requires e2e-settings-module, e2e-seed-command and e2e-playwright-image to all be set."
           exit 1
 
   backend:
@@ -456,3 +481,173 @@ jobs:
         if: ${{ inputs.run-frontend-tests }}
         working-directory: ${{ inputs.frontend-path }}
         run: pnpm test
+
+  e2e:
+    if: ${{ inputs.run-e2e }}
+    runs-on: ${{ inputs.runs-on }}
+    env:
+      CI_IMAGE: ci-e2e:${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_NETWORK: ci-e2e-net-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_DB_CONTAINER: ci-e2e-db-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_REDIS_CONTAINER: ci-e2e-redis-${{ github.run_id }}-${{ github.run_attempt }}
+      E2E_APP_CONTAINER: ci-e2e-app-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Build full app image
+        env:
+          HRAM_ENGINE_READ_TOKEN: ${{ secrets.HRAM_ENGINE_READ_TOKEN }}
+          VITE_APP_MUI_LICENSE_KEY: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
+            --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            -t "$CI_IMAGE" \
+            -f "${{ inputs.dockerfile }}" \
+            "${{ inputs.build-context }}"
+
+      - name: Create E2E network and dependencies
+        run: |
+          set -euo pipefail
+          docker network create "$E2E_NETWORK"
+          docker run -d --name "$E2E_DB_CONTAINER" --network "$E2E_NETWORK" \
+            -e POSTGRES_USER=test \
+            -e POSTGRES_PASSWORD=test \
+            -e POSTGRES_DB=test \
+            --health-cmd='pg_isready -U test' \
+            --health-interval=10s --health-timeout=5s --health-retries=10 \
+            "${{ inputs.db-image }}"
+          docker run -d --name "$E2E_REDIS_CONTAINER" --network "$E2E_NETWORK" \
+            --health-cmd='redis-cli ping' \
+            --health-interval=10s --health-timeout=5s --health-retries=10 \
+            redis:7
+          for container in "$E2E_DB_CONTAINER" "$E2E_REDIS_CONTAINER"; do
+            for attempt in $(seq 1 30); do
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
+              if [ "$status" = "healthy" ]; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "::error::$container did not become healthy"
+                docker logs "$container" || true
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+      - name: Start app and wait for health
+        run: |
+          set -euo pipefail
+          docker run -d --name "$E2E_APP_CONTAINER" --network "$E2E_NETWORK" -p 127.0.0.1::8000 \
+            -e DJANGO_SETTINGS_MODULE='${{ inputs.e2e-settings-module }}' \
+            -e DJANGO_SECRET_KEY='ci-dummy-secret' \
+            -e DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1' \
+            -e DEBUG='False' \
+            -e ENV_TYPE='local' \
+            -e DB_HOST="$E2E_DB_CONTAINER" \
+            -e DB_PORT='5432' \
+            -e DB_NAME='test' \
+            -e DB_USER='test' \
+            -e DB_PASSWORD='test' \
+            -e REDIS_HOST="$E2E_REDIS_CONTAINER" \
+            -e EMAIL_PORT='25' \
+            -e EMAIL_USE_TLS='False' \
+            "$CI_IMAGE"
+          APP_PORT="$(docker port "$E2E_APP_CONTAINER" 8000/tcp | head -n1 | sed -E 's/.*:([0-9]+)$/\1/')"
+          test -n "$APP_PORT"
+          echo "APP_PORT=$APP_PORT" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$APP_PORT/api/healthz" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::app health check did not become ready"
+          docker logs "$E2E_APP_CONTAINER" || true
+          exit 1
+
+      - name: Migrate and seed E2E database
+        run: |
+          set -euo pipefail
+          docker exec "$E2E_APP_CONTAINER" python manage.py migrate --noinput
+          docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
+
+      - name: Install Playwright dependencies
+        working-directory: ${{ inputs.frontend-path }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
+            -w /workspace/frontend \
+            "${{ inputs.e2e-playwright-image }}" \
+            bash -lc 'corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install --frozen-lockfile'
+
+      - name: Playwright specs
+        id: playwright_specs
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
+            -w /workspace/frontend \
+            "${{ inputs.e2e-playwright-image }}" \
+            bash -lc 'npx playwright test --grep-invert "@quarantine"'
+
+      - name: Playwright quarantine specs
+        id: quarantine
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          docker run --rm --network host \
+            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
+            -w /workspace/frontend \
+            "${{ inputs.e2e-playwright-image }}" \
+            bash -lc 'npx playwright test --grep "@quarantine"'
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::notice::Playwright quarantine specs passed (or matched no tests)."
+            echo '### Playwright quarantine specs: passed (or no tests matched)' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Playwright quarantine specs failed (non-blocking)."
+            echo '### Playwright quarantine specs: failed (non-blocking)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Capture E2E screens and report
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          docker run --rm --network host \
+            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+            -v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \
+            -w /workspace/frontend \
+            "${{ inputs.e2e-playwright-image }}" \
+            bash -lc '${{ inputs.e2e-capture-command }}'
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::E2E capture failed (non-blocking)."
+          else
+            echo "::notice::E2E capture completed."
+          fi
+          exit 0
+
+      - name: Upload E2E capture artifact
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: e2e-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.frontend-path }}/${{ inputs.e2e-capture-output-path }}
+          if-no-files-found: warn
+
+      - name: Cleanup E2E containers, network, and image
+        if: always()
+        run: |
+          docker rm -f "$E2E_APP_CONTAINER" "$E2E_REDIS_CONTAINER" "$E2E_DB_CONTAINER" 2>/dev/null || true
+          docker network rm "$E2E_NETWORK" 2>/dev/null || true
+          docker image rm -f "$CI_IMAGE" 2>/dev/null || true
