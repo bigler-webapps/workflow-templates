@@ -156,6 +156,70 @@ class WftCi30StructuralTests(unittest.TestCase):
         step = step_body(mutated, "Migrate and seed E2E database")
         self.assertNotIn("python manage.py migrate --noinput", step)
 
+    def test_capture_reads_manifest_cells_and_reseeds_before_each(self):
+        # Cell IDs come from reading the plain manifest.json already in the
+        # checkout (via node INSIDE the Playwright container, which has
+        # Node -- the runner itself does not, unlike the frontend job), never
+        # from hardcoding kerzenziehen's own cell names. Each cell gets its
+        # own reseed via docker exec (same mechanism as the specs loop) before
+        # the capture command runs with --routes=<cell-id>, and every capture
+        # invocation carries E2E_RESEED=runner too.
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        self.assertIn("require('./tests/capture/manifest.json').screens.map(s=>s.id)", capture)
+        self.assertIn('docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"', capture)
+        self.assertIn("-e E2E_RESEED=runner", capture)
+        self.assertIn("${{ inputs.e2e-capture-command }} --routes=$cell", capture)
+        self.assertIn('echo "::warning::E2E capture: no cells found in tests/capture/manifest.json."', capture)
+
+    def test_assertion_fails_if_capture_stops_reseeding_per_cell(self):
+        mutated = E2E_JOB.replace(
+            'echo "::notice::reseeding before capture cell $cell"\n            docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live per-cell reseed line")
+        capture = step_body(mutated, "Capture E2E screens and report")
+        self.assertNotIn('docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"', capture)
+
+    def test_capture_distinguishes_enumeration_failure_from_genuinely_zero_cells(self):
+        # Review finding: under `set +e`, a failed manifest-enumeration docker
+        # run produces the SAME empty $CELLS as a manifest that genuinely has
+        # zero cells -- silently misreporting a broken container/image as
+        # "nothing to capture" instead of a real setup failure.
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        self.assertIn("cells_status=$?", capture)
+        self.assertIn('if [ "$cells_status" -ne 0 ]; then', capture)
+        self.assertIn('echo "::warning::E2E capture: manifest enumeration itself failed', capture)
+
+    def test_assertion_fails_if_enumeration_failure_check_is_dropped(self):
+        mutated = E2E_JOB.replace(
+            'cells_status=$?\n          if [ "$cells_status" -ne 0 ]; then\n            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."\n            exit 0\n          fi\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live enumeration-failure check")
+        capture = step_body(mutated, "Capture E2E screens and report")
+        self.assertNotIn("cells_status=$?", capture)
+
+    def test_capture_skips_a_cell_when_its_reseed_fails_rather_than_capturing_stale_data(self):
+        # Review finding: under `set +e`, a failed reseed was silently ignored
+        # and Playwright/capture proceeded against stale data anyway, with the
+        # loop only ever recording the CAPTURE command's own exit code.
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        self.assertIn("reseed_status=$?", capture)
+        self.assertIn('if [ "$reseed_status" -ne 0 ]; then', capture)
+        self.assertIn("continue", capture)
+
+    def test_assertion_fails_if_capture_stops_skipping_on_reseed_failure(self):
+        mutated = E2E_JOB.replace(
+            'reseed_status=$?\n            if [ "$reseed_status" -ne 0 ]; then\n              echo "::warning::reseed failed before capture cell $cell -- skipping this cell rather than capturing stale data"\n              worst=$reseed_status\n              continue\n            fi\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live capture reseed-failure handling")
+        capture = step_body(mutated, "Capture E2E screens and report")
+        self.assertNotIn("reseed_status=$?", capture)
+
     def test_capture_step_declares_git_as_a_safe_directory(self):
         # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: even with
         # the full checkout mounted, git refuses to operate on it with
@@ -173,7 +237,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_the_safe_directory_override_is_dropped(self):
         mutated = E2E_JOB.replace(
-            "            -e GIT_CONFIG_COUNT=1 \\\n            -e GIT_CONFIG_KEY_0=safe.directory \\\n            -e GIT_CONFIG_VALUE_0=/workspace \\\n",
+            "              -e GIT_CONFIG_COUNT=1 \\\n              -e GIT_CONFIG_KEY_0=safe.directory \\\n              -e GIT_CONFIG_VALUE_0=/workspace \\\n",
             "",
             1,
         )
@@ -359,14 +423,32 @@ class WftCi30StructuralTests(unittest.TestCase):
         app = step_body(mutated, "Start app")
         self.assertIn("6379:6379", app)
 
-    def test_specs_gate_quarantine_is_non_blocking_and_capture_is_reported(self):
+    def test_specs_bucket_by_source_not_by_playwright_cli_output(self):
+        # Operator decision (amended after the live proof showed the Playwright
+        # image has no Docker at all): the runner resets the DB itself before
+        # each spec file, so specs run ONE FILE AT A TIME rather than in one
+        # bulk `playwright test` invocation. Bucketing must come from grepping
+        # each file's OWN source for "@quarantine" -- never from parsing
+        # Playwright's own --list/JSON-reporter output (version-fragile, never
+        # actually observed in --list mode).
         specs = step_body(E2E_JOB, "Playwright specs")
-        self.assertIn("--grep-invert \"@quarantine\"", specs)
+        self.assertNotIn("--grep-invert", specs, "must not depend on Playwright's own --grep filtering")
+        # Recursive discovery (review finding: a flat `tests/*.spec.js` glob
+        # silently skips a nested file, e.g. tests/auth/login.spec.js, even
+        # though Playwright's own testDir walks subdirectories by default).
+        self.assertIn("find tests -name '*.spec.js'", specs)
+        # Tightened to the same line as a `test(` call (review finding: a bare
+        # `grep -q '@quarantine'` over the whole file also matches the string
+        # appearing in a comment or unrelated literal, mis-bucketing the file).
+        self.assertIn("if ! grep -qE 'test\\(.*@quarantine' \"$f\"", specs)
         self.assertNotIn("continue-on-error: true", specs)
+        self.assertIn('echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"', specs)
+        self.assertIn("exit 1", specs)
 
         quarantine = step_body(E2E_JOB, "Playwright quarantine specs")
-        self.assertIn("continue-on-error: true", quarantine)
-        self.assertIn("--grep \"@quarantine\"", quarantine)
+        self.assertNotIn("--grep ", quarantine, "must not depend on Playwright's own --grep filtering")
+        self.assertIn("find tests -name '*.spec.js'", quarantine)
+        self.assertIn("if grep -qE 'test\\(.*@quarantine' \"$f\"", quarantine)
         self.assertIn("GITHUB_STEP_SUMMARY", quarantine)
         # Both must carry if: always() -- otherwise a FAILING (gating) specs
         # step causes GitHub Actions to skip every later step by default, and
@@ -381,6 +463,72 @@ class WftCi30StructuralTests(unittest.TestCase):
         upload = step_body(E2E_JOB, "Upload E2E capture artifact")
         self.assertIn("if: always()", upload)
         self.assertIn("inputs.e2e-capture-output-path", upload)
+
+    def test_specs_and_quarantine_reseed_before_each_file_with_runner_env_set(self):
+        # The job's shell reseeds via docker exec before each Playwright
+        # invocation (never inside the test container), and every Playwright
+        # invocation carries E2E_RESEED=runner so the app's own reseed.js /
+        # capture script skip their now-impossible docker-exec reseed.
+        for name in ("Playwright specs", "Playwright quarantine specs"):
+            step = step_body(E2E_JOB, name)
+            self.assertIn('docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"', step)
+            self.assertIn("-e E2E_RESEED=runner", step)
+            self.assertIn("npx playwright test '$f'", step)
+
+    def test_quarantine_skips_a_file_when_its_reseed_fails_rather_than_running_stale(self):
+        # Same review finding as the capture loop: under `set +e`, a failed
+        # reseed must not be silently ignored while the file still runs
+        # against stale data.
+        quarantine = step_body(E2E_JOB, "Playwright quarantine specs")
+        self.assertIn("reseed_status=$?", quarantine)
+        self.assertIn('if [ "$reseed_status" -ne 0 ]; then', quarantine)
+        self.assertIn("continue", quarantine)
+
+    def test_assertion_fails_if_quarantine_stops_skipping_on_reseed_failure(self):
+        mutated = E2E_JOB.replace(
+            'reseed_status=$?\n            if [ "$reseed_status" -ne 0 ]; then\n              echo "::warning::reseed failed before $f (quarantine) -- skipping this file rather than running it against stale data"\n              worst=$reseed_status\n              continue\n            fi\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live quarantine reseed-failure handling")
+        quarantine = step_body(mutated, "Playwright quarantine specs")
+        self.assertNotIn("reseed_status=$?", quarantine)
+
+    def test_assertion_fails_if_gating_specs_stop_failing_loudly_on_empty_bucket(self):
+        mutated = E2E_JOB.replace(
+            'if [ -z "$GATING_FILES" ]; then\n            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"\n            exit 1\n          fi\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live empty-bucket guard")
+        specs = step_body(mutated, "Playwright specs")
+        self.assertNotIn('echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"', specs)
+
+    def test_assertion_fails_if_empty_quarantine_bucket_stops_exiting_cleanly(self):
+        # Review finding: the gating step's empty-bucket mutation test only
+        # pinned that its OWN loud-failure text disappears -- nothing pinned
+        # that an empty QUARANTINE bucket keeps exiting 0 rather than, say,
+        # starting to fail the step. Mutate the quarantine empty-check away
+        # and confirm the guard's own success path (exit 0, notice text) is
+        # what disappears.
+        mutated = E2E_JOB.replace(
+            'if [ -z "$QUARANTINE_FILES" ]; then\n            echo "::notice::Playwright quarantine specs: no file tagged @quarantine yet."\n            echo \'### Playwright quarantine specs: no tests matched (nothing tagged yet)\' >> "$GITHUB_STEP_SUMMARY"\n            exit 0\n          fi\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live quarantine empty-bucket guard")
+        quarantine = step_body(mutated, "Playwright quarantine specs")
+        self.assertNotIn("no file tagged @quarantine yet", quarantine)
+
+    def test_assertion_fails_if_reseed_is_dropped_from_the_specs_loop(self):
+        mutated = E2E_JOB.replace(
+            'echo "::notice::reseeding before $f"\n            docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live reseed line in the specs loop")
+        specs = step_body(mutated, "Playwright specs")
+        self.assertNotIn('docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"', specs)
 
     def test_assertion_fails_if_quarantine_loses_its_always_gate(self):
         mutated = E2E_JOB.replace(
@@ -404,8 +552,8 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_quarantine_becomes_blocking(self):
         mutated = E2E_JOB.replace(
-            "        continue-on-error: true\n        run: |\n          set +e\n          docker run --rm --network host \\\n            --user",
-            "        run: |\n          set -euo pipefail\n          docker run --rm --network host \\\n            --user",
+            "        continue-on-error: true\n        working-directory: ${{ inputs.frontend-path }}\n        run: |\n          set +e\n          QUARANTINE_FILES",
+            "        working-directory: ${{ inputs.frontend-path }}\n        run: |\n          set -euo pipefail\n          QUARANTINE_FILES",
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match quarantine step")

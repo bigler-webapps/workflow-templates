@@ -619,35 +619,85 @@ jobs:
 
       - name: Playwright specs
         id: playwright_specs
+        working-directory: ${{ inputs.frontend-path }}
         run: |
           set -euo pipefail
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w "/workspace/${{ inputs.frontend-path }}" \
-            "${{ inputs.e2e-playwright-image }}" \
-            bash -lc 'npx playwright test --grep-invert "@quarantine"'
+          # The runner resets the database itself before each spec file (operator decision, after the
+          # live proof showed the Playwright image has no Docker at all) -- so specs are enumerated and
+          # run ONE FILE AT A TIME, reseeding between them, rather than in one bulk `playwright test`
+          # invocation. Enumerated from the plain files already on the runner's own filesystem, never
+          # from Playwright's own --list/JSON-reporter output (version-fragile, never observed in
+          # --list mode specifically) and never hardcoded to a caller's file names: each file is
+          # bucketed by grepping its OWN source for the literal "@quarantine" substring.
+          GATING_FILES=""
+          while IFS= read -r f; do
+            if ! grep -qE 'test\(.*@quarantine' "$f"; then
+              GATING_FILES="$GATING_FILES $f"
+            fi
+          done < <(find tests -name '*.spec.js' | sort)
+          if [ -z "$GATING_FILES" ]; then
+            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"
+            exit 1
+          fi
+          for f in $GATING_FILES; do
+            echo "::notice::reseeding before $f"
+            docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
+            docker run --rm --network host \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e E2E_RESEED=runner \
+              -v "${{ github.workspace }}:/workspace" \
+              -w "/workspace/${{ inputs.frontend-path }}" \
+              "${{ inputs.e2e-playwright-image }}" \
+              bash -lc "npx playwright test '$f'"
+          done
 
       - name: Playwright quarantine specs
         id: quarantine
         if: always()
         continue-on-error: true
+        working-directory: ${{ inputs.frontend-path }}
         run: |
           set +e
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w "/workspace/${{ inputs.frontend-path }}" \
-            "${{ inputs.e2e-playwright-image }}" \
-            bash -lc 'npx playwright test --grep "@quarantine"'
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "::notice::Playwright quarantine specs passed (or matched no tests)."
-            echo '### Playwright quarantine specs: passed (or no tests matched)' >> "$GITHUB_STEP_SUMMARY"
+          QUARANTINE_FILES=""
+          while IFS= read -r f; do
+            if grep -qE 'test\(.*@quarantine' "$f"; then
+              QUARANTINE_FILES="$QUARANTINE_FILES $f"
+            fi
+          done < <(find tests -name '*.spec.js' | sort)
+          if [ -z "$QUARANTINE_FILES" ]; then
+            echo "::notice::Playwright quarantine specs: no file tagged @quarantine yet."
+            echo '### Playwright quarantine specs: no tests matched (nothing tagged yet)' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          worst=0
+          for f in $QUARANTINE_FILES; do
+            echo "::notice::reseeding before $f (quarantine)"
+            docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
+            reseed_status=$?
+            if [ "$reseed_status" -ne 0 ]; then
+              echo "::warning::reseed failed before $f (quarantine) -- skipping this file rather than running it against stale data"
+              worst=$reseed_status
+              continue
+            fi
+            docker run --rm --network host \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e E2E_RESEED=runner \
+              -v "${{ github.workspace }}:/workspace" \
+              -w "/workspace/${{ inputs.frontend-path }}" \
+              "${{ inputs.e2e-playwright-image }}" \
+              bash -lc "npx playwright test '$f'"
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              worst=$status
+            fi
+          done
+          if [ "$worst" -eq 0 ]; then
+            echo "::notice::Playwright quarantine specs passed."
+            echo '### Playwright quarantine specs: passed' >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::Playwright quarantine specs failed (non-blocking)."
             echo '### Playwright quarantine specs: failed (non-blocking)' >> "$GITHUB_STEP_SUMMARY"
@@ -657,21 +707,53 @@ jobs:
       - name: Capture E2E screens and report
         if: always()
         continue-on-error: true
+        working-directory: ${{ inputs.frontend-path }}
         run: |
           set +e
-          docker run --rm --network host \
+          CELLS="$(docker run --rm --network host \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
-            -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
-            -e GIT_CONFIG_COUNT=1 \
-            -e GIT_CONFIG_KEY_0=safe.directory \
-            -e GIT_CONFIG_VALUE_0=/workspace \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
-            bash -lc '${{ inputs.e2e-capture-command }}'
-          status=$?
-          if [ "$status" -ne 0 ]; then
+            bash -lc "node -e \"console.log(require('./tests/capture/manifest.json').screens.map(s=>s.id).join('\n'))\"")"
+          cells_status=$?
+          if [ "$cells_status" -ne 0 ]; then
+            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."
+            exit 0
+          fi
+          if [ -z "$CELLS" ]; then
+            echo "::warning::E2E capture: no cells found in tests/capture/manifest.json."
+            exit 0
+          fi
+          worst=0
+          for cell in $CELLS; do
+            echo "::notice::reseeding before capture cell $cell"
+            docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
+            reseed_status=$?
+            if [ "$reseed_status" -ne 0 ]; then
+              echo "::warning::reseed failed before capture cell $cell -- skipping this cell rather than capturing stale data"
+              worst=$reseed_status
+              continue
+            fi
+            docker run --rm --network host \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e E2E_RESEED=runner \
+              -e GIT_CONFIG_COUNT=1 \
+              -e GIT_CONFIG_KEY_0=safe.directory \
+              -e GIT_CONFIG_VALUE_0=/workspace \
+              -v "${{ github.workspace }}:/workspace" \
+              -w "/workspace/${{ inputs.frontend-path }}" \
+              "${{ inputs.e2e-playwright-image }}" \
+              bash -lc "${{ inputs.e2e-capture-command }} --routes=$cell"
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              worst=$status
+            fi
+          done
+          if [ "$worst" -ne 0 ]; then
             echo "::warning::E2E capture failed (non-blocking)."
           else
             echo "::notice::E2E capture completed."

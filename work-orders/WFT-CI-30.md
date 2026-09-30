@@ -168,28 +168,64 @@ checkout — treat everything below as given fact, not something to (re)discover
    at `docker run` time (not re-passed per `exec`) — same as the `backend` job's env-var style,
    plus `EMAIL_PORT`/`EMAIL_USE_TLS` since the E2E settings module swaps the mail backend (see
    `e2e_settings.py`'s own `MAILERS` override — file-based backend, no real SMTP needed).
-8. **Playwright runs INSIDE the pinned official image, `--network host`, mounting the checked-out
-   `inputs.frontend-path` as a volume, reusing the already-declared `inputs.pnpm-version`**:
-   `corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install
-   --frozen-lockfile` first (the bind mount persists `node_modules` on the runner's filesystem across
-   the several separate `docker run` invocations below — no need to reinstall each time), then
-   `npx playwright test --grep-invert "@quarantine"` as the gating step.
-9. **`@quarantine` is a Playwright `--grep` TAG CONVENTION this job establishes, not a kerzenziehen
-   change** (tagging a specific spec is Phase 2b, a separate WO in that repo, already registered as
-   blocking on `kerzenziehen/KZ-FIX-4`). Run a second, **non-blocking** step:
-   `npx playwright test --grep "@quarantine"` with `continue-on-error: true` (or capture its exit
-   code without `exit`-ing the step) — its result must still be visible in the job summary (e.g. an
-   `::warning::` echo naming pass/fail), never silently swallowed, and it must never fail the job.
-   Today NO spec carries the tag yet — this step is expected to match zero tests and pass trivially
-   until Phase 2b lands; that is correct, not a bug.
-10. **Capture runs after both spec steps**, same container image, `${{ inputs.e2e-capture-command }}`,
-    with `continue-on-error: true` (mechanical capture failures report, they don't gate — explicit
-    Envelope requirement) — then `actions/upload-artifact` on
-    `${{ inputs.frontend-path }}/${{ inputs.e2e-capture-output-path }}`, `if: always()` so a failed
-    capture still uploads whatever partial `report.json`/screenshots exist. The capture script itself
-    already embeds provenance (commit + tree-cleanliness) per `kerzenziehen/KZ-E2E-8` — nothing
-    additional needed here for that half of the Expected Outcome.
-11. **Cleanup, unconditionally (`if: always()`)**: `docker rm -f` the three containers, `docker network
+8. **Playwright runs INSIDE the pinned official image, `--network host`, mounting the FULL checked-out
+   workspace (`${{ github.workspace }}:/workspace`, `-w /workspace/${{ inputs.frontend-path }}`) — not
+   just `frontend-path`**, so the capture script's own `git rev-parse HEAD` provenance check
+   (`kerzenziehen/KZ-E2E-8`) finds `.git`. Every container invocation below also needs:
+   `--user "$(id -u):$(id -g)"` + `-e HOME=/tmp` (a bind-mounted host checkout written to as the image's
+   default root user leaves root-owned files a self-hosted runner's own non-root cleanup can't remove
+   — confirmed live, broke a *different* job's checkout on two runner slots) and, for any step that
+   invokes git inside the container, `-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
+   -e GIT_CONFIG_VALUE_0=/workspace` (git ≥2.35 refuses to operate on a repo whose files are owned by a
+   different UID than the running process — confirmed live too). Install dependencies with
+   `npx --yes pnpm@${{ inputs.pnpm-version }} install --frozen-lockfile` — **not**
+   `corepack enable`, which writes a system-wide symlink and needs root, directly conflicting with
+   `--user` above; `npx` needs no shim install at all, and no other step ever invokes bare `pnpm`,
+   only `npx playwright`/`node`.
+9. **The runner resets the database, not the test container (operator decision, amended after the live
+   proof showed the Playwright image has no Docker at all — `/bin/sh: 1: docker: not found`).** Every
+   Playwright container invocation below additionally carries `-e E2E_RESEED=runner`, which tells the
+   app's own `reseed.js` (and, through it, the capture script, which already calls `reseedE2E()`) to
+   skip its own reseed — the job's shell does it instead, via the SAME `docker exec
+   "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"` already used once for the
+   initial seed, run again before each spec file and each capture cell. **Never** give the Playwright
+   container the Docker socket or a reseed HTTP endpoint — both were considered and explicitly
+   rejected (socket = root-equivalent host access from a third-party image on a shared runner; an
+   endpoint expands scope into the app's backend for no gain once the runner can reseed directly).
+   This changes the specs/quarantine/capture steps from one bulk invocation into a **loop over
+   individually-discovered units**, reseeding before each:
+   - **Enumerate matching spec FILES generically — never hardcode a caller's file names, and never
+     depend on Playwright's own `--list`/JSON-reporter output shape (version-fragile, unobserved in
+     `--list` mode specifically — the one format actually confirmed live was a FAILURE listing, not a
+     dry-run list).** Instead, read the plain files already sitting in the checkout, on the RUNNER
+     itself (no container round-trip needed for this step at all): `ls tests/*.spec.js` from
+     `inputs.frontend-path` (the one path convention, matching `playwright.config.js`'s own
+     `testDir: './tests'`), then bucket each file by grepping its OWN source for the literal substring
+     `@quarantine` — present → quarantine bucket, absent → gating bucket. This is the same "read the
+     file directly" approach already used for the capture manifest below, and it makes the split exact
+     and independent of any CLI tool's output format. Fail loudly (`::error::` + `exit 1`) if the
+     gating bucket comes back empty — an empty match is itself a defect worth surfacing, not a silent
+     no-op.
+   - **Gating step ("Playwright specs")**: `for f in $GATING_FILES; do` reseed via `docker exec` (same
+     command as the initial seed), `then docker run … bash -lc "npx playwright test 'tests/$f'"`,
+     `set -euo pipefail` so any file's failure fails the whole step — `done`.
+   - **Non-blocking step ("Playwright quarantine specs")**: same shape, iterating `$QUARANTINE_FILES`
+     instead, `set +e` inside the loop, track the worst exit code across all matched files, and report
+     pass/fail/"no tests matched" to `$GITHUB_STEP_SUMMARY` exactly as before — never `exit` non-zero
+     from the step itself. An empty bucket here is expected (today, before `KZ-E2E-9`'s own spec gets
+     the `@quarantine` tag) and must report cleanly, not error — that is the one place this loop's
+     "fail on empty" rule from the gating step does NOT apply.
+   - **Capture ("Capture E2E screens and report")**: enumerate cell IDs generically via
+     `node -e "console.log(require('./tests/capture/manifest.json').screens.map(s=>s.id).join('\n'))"`
+     run from `-w /workspace/${{ inputs.frontend-path }}` inside the container (the manifest's own
+     path convention, `tests/capture/manifest.json`, colocated with the default
+     `e2e-capture-command`'s `tests/capture/capture.js` — a documented assumption of the shared
+     capture-harness convention Phase 1 established, same class of assumption as the already-hardcoded
+     default `e2e-capture-output-path`). For each cell ID: reseed via `docker exec`, then run
+     `${{ inputs.e2e-capture-command }} --routes=<cell-id>` (the manifest's own existing
+     `--routes=<id,...>` filter, already part of the capture script per `kerzenziehen/KZ-E2E-1`) —
+     `set +e`, non-blocking exactly as before, worst exit code tracked for the summary/warning.
+10. **Cleanup, unconditionally (`if: always()`)**: `docker rm -f` the three containers, `docker network
     rm` the run's network, `docker image rm -f` the built `$CI_IMAGE` — mirrors the `backend` job's
     existing `Remove CI image` step's own `if: always()` + `|| true` style. A leaked container/network
     on the shared self-hosted runner is the Envelope's own named risk.
