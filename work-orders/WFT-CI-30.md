@@ -69,15 +69,219 @@ work order in that app's repo, written after this one is tagged. First consumer:
 
 ---
 
-# B. Implementation map — filled by the Orchestrator
+# B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-(Placeholder — not dispatchable in this state.)
+## Context package
+
+**Named files to change:**
+- `.github/workflows/app-ci.yml` — add six `workflow_call.inputs` (below), one guard step in the
+  existing `validate-inputs` job, and one new job `e2e`.
+- `.github/scripts/test_app_ci_e2e_job.py` — new structural test file, same idiom as the neighbouring
+  `.github/scripts/test_app_ci_security_gates.py` (read it first — it is the house style: slice the
+  job body out of the live YAML text by header, `re.search` on that slice, one deliberate "mutate the
+  live text, assert the guard fires" test per assertion, one falsifying-fixture test per guard). Do
+  **not** invent a different structural-test style.
+
+**New inputs (place in a new `# End-to-end` section after the existing `# Frontend` inputs, before
+`secrets:`):**
+
+| name | type | default | purpose |
+|---|---|---|---|
+| `run-e2e` | boolean | `false` | off by default; a caller opts in explicitly |
+| `e2e-settings-module` | string | `''` | e.g. `backend.e2e_settings`; passed as `DJANGO_SETTINGS_MODULE` |
+| `e2e-seed-command` | string | `''` | e.g. `seed_e2e`; run as `manage.py <this>` inside the app container |
+| `e2e-playwright-image` | string | `''` | e.g. `mcr.microsoft.com/playwright:v1.54.2-noble`; MUST match the caller's own `@playwright/test` version or the browsers refuse to start — no safe default exists, hence empty |
+| `e2e-capture-command` | string | `'node tests/capture/capture.js'` | run from `inputs.frontend-path` inside the Playwright image after the specs |
+| `e2e-capture-output-path` | string | `'tests/capture/output'` | relative to `inputs.frontend-path`; uploaded as an artifact |
+
+**`validate-inputs` job — add one step**, same shape as the existing `run-migration-check` guard
+right above it in the same job:
+```yaml
+      - name: run-e2e requires its own inputs
+        if: ${{ inputs.run-e2e && (inputs.e2e-settings-module == '' || inputs.e2e-seed-command == '' || inputs.e2e-playwright-image == '') }}
+        run: |
+          echo "::error::run-e2e: true requires e2e-settings-module, e2e-seed-command and e2e-playwright-image to all be set."
+          exit 1
+```
+
+**Do NOT write a literal `${{` inside any new `description:` field.** GitHub evaluates expressions
+in input-description text too; an empty/malformed one makes the whole reusable workflow unresolvable
+for every one of the ~13 callers (this exact failure already happened once, `WFT-CI-23`/`WM-TAKE-8`,
+and `test_no_expression_syntax_in_workflow_call_input_descriptions` in
+`test_app_ci_security_gates.py` already guards the WHOLE `workflow_call.inputs` block — your new
+inputs are automatically covered by that pre-existing test, do not duplicate it, just don't trip it.
+
+**New job `e2e`** — self-contained like `backend`/`security`/`frontend` (no shared artifacts between
+jobs in this file), `if: ${{ inputs.run-e2e }}`, `runs-on: ${{ inputs.runs-on }}`.
+
+Design constraints verified against the first consumer (`kerzenziehen`, not visible from this
+checkout — treat everything below as given fact, not something to (re)discover):
+
+1. **Build the FULL image, no `--target`.** Unlike the `backend` job's optional `backend_test`
+   target, the e2e job needs the `final` stage — it already contains the built frontend
+   (`COPY --from=frontend_build ... ./static/` + `./templates/index.html` in the app's
+   `backend/Dockerfile`), so what Playwright exercises is exactly what that commit ships. Reuse
+   `inputs.dockerfile` / `inputs.build-context` / the same `VITE_APP_MUI_LICENSE_KEY` /
+   `HRAM_ENGINE_READ_TOKEN` build-arg plumbing the `backend` job already uses — do not add new
+   secrets (explicit non-goal).
+2. **Isolated Docker network per run, not GH Actions `services:` for the app container.** `services:`
+   only works for images already resolvable from a registry (postgres, redis) — the app image is
+   built locally in THIS job and can't be a `services:` entry. Create
+   `docker network create ci-e2e-net-${{ github.run_id }}-${{ github.run_attempt }}`, and run
+   `db` / `redis` / the app container on it by container name (`ci-e2e-db-<runid>-<attempt>` etc.,
+   same uniqueness reasoning the `backend` job's `CI_IMAGE` tag already documents — three shared
+   runner slots, a fixed name collides across concurrent jobs on `netcup-runner-1`).
+3. **Redis's host is configurable, its PORT is NOT** — `django_core_micha`'s `settings_base.py`
+   hardcodes `env("REDIS_HOST", default="redis"), 6379` as a literal tuple (`CHANNEL_LAYERS` and the
+   cache backend both). This is exactly why the private per-run Docker network matters: address redis
+   by its **container name** on the network's internal port 6379 (`REDIS_HOST=ci-e2e-redis-<runid>`),
+   never by a host-mapped dynamic port the way the `backend` job's Postgres `services:` entry does —
+   there is no env var to carry a non-default Redis port to the app.
+4. **DB env vars, same names the `backend` job's `pytest` step already uses**: `DB_HOST`, `DB_PORT`
+   (`5432`, the container's own internal port on the private network — again no host-port dance
+   needed here since nothing publishes it), `DB_NAME`/`DB_USER`/`DB_PASSWORD` all `test`. Reuse
+   `inputs.db-image` (already `postgres:18` by default) for the `db` container — kerzenziehen has no
+   GeoDjango/postgis dependency (removed by its own `INF-29`), so no per-caller override is needed
+   for this consumer; a future GeoDjango caller would set `db-image` itself, same as the `backend`
+   job's existing pattern.
+5. **Publish the app's port 8000 to an ephemeral host port** (`docker run -p 8000 ...`, no fixed host
+   port — same "self-hosted runner, 3 shared slots" collision reasoning as the `backend` job's
+   Postgres comment), then read it back: `docker port <container> 8000/tcp` and parse the port number
+   out of its `0.0.0.0:NNNNN` output. This is the ONE port Playwright needs to reach from the host
+   network (`PLAYWRIGHT_BASE_URL=http://127.0.0.1:<that port>`).
+6. **Health-check before migrate/seed**: poll `curl -fsS http://127.0.0.1:<port>/api/healthz`
+   (the same endpoint the app's own `docker-compose.yml` Traefik healthcheck already targets) with a
+   bounded retry loop (model the `postgres` service's own `--health-retries`/`--health-interval`
+   shape) before running migrations — do not sleep a fixed duration.
+7. **Migrate then seed inside the running app container**: `docker exec <app-container>
+   python manage.py migrate --noinput`, then
+   `docker exec <app-container> python manage.py ${{ inputs.e2e-seed-command }}`, both with
+   `DJANGO_SETTINGS_MODULE=${{ inputs.e2e-settings-module }}` already set as the container's own env
+   at `docker run` time (not re-passed per `exec`) — same as the `backend` job's env-var style,
+   plus `EMAIL_PORT`/`EMAIL_USE_TLS` since the E2E settings module swaps the mail backend (see
+   `e2e_settings.py`'s own `MAILERS` override — file-based backend, no real SMTP needed).
+8. **Playwright runs INSIDE the pinned official image, `--network host`, mounting the checked-out
+   `inputs.frontend-path` as a volume, reusing the already-declared `inputs.pnpm-version`**:
+   `corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install
+   --frozen-lockfile` first (the bind mount persists `node_modules` on the runner's filesystem across
+   the several separate `docker run` invocations below — no need to reinstall each time), then
+   `npx playwright test --grep-invert "@quarantine"` as the gating step.
+9. **`@quarantine` is a Playwright `--grep` TAG CONVENTION this job establishes, not a kerzenziehen
+   change** (tagging a specific spec is Phase 2b, a separate WO in that repo, already registered as
+   blocking on `kerzenziehen/KZ-FIX-4`). Run a second, **non-blocking** step:
+   `npx playwright test --grep "@quarantine"` with `continue-on-error: true` (or capture its exit
+   code without `exit`-ing the step) — its result must still be visible in the job summary (e.g. an
+   `::warning::` echo naming pass/fail), never silently swallowed, and it must never fail the job.
+   Today NO spec carries the tag yet — this step is expected to match zero tests and pass trivially
+   until Phase 2b lands; that is correct, not a bug.
+10. **Capture runs after both spec steps**, same container image, `${{ inputs.e2e-capture-command }}`,
+    with `continue-on-error: true` (mechanical capture failures report, they don't gate — explicit
+    Envelope requirement) — then `actions/upload-artifact` on
+    `${{ inputs.frontend-path }}/${{ inputs.e2e-capture-output-path }}`, `if: always()` so a failed
+    capture still uploads whatever partial `report.json`/screenshots exist. The capture script itself
+    already embeds provenance (commit + tree-cleanliness) per `kerzenziehen/KZ-E2E-8` — nothing
+    additional needed here for that half of the Expected Outcome.
+11. **Cleanup, unconditionally (`if: always()`)**: `docker rm -f` the three containers, `docker network
+    rm` the run's network, `docker image rm -f` the built `$CI_IMAGE` — mirrors the `backend` job's
+    existing `Remove CI image` step's own `if: always()` + `|| true` style. A leaked container/network
+    on the shared self-hosted runner is the Envelope's own named risk.
+
+**Known pitfalls already paid for elsewhere in this file — do not reintroduce:**
+- No bare `pip`/`docker compose` assumptions; this design uses `docker run`/`docker exec`/`docker
+  network` directly, all already proven available on `netcup-runner-1` by the `backend` job.
+- Every container/network/image name MUST include `${{ github.run_id }}-${{ github.run_attempt }}`
+  (or equivalent) — a fixed name is the exact class of bug the `backend` job's own `CI_IMAGE` comment
+  documents.
+- No `${{` inside a new input `description:` (point 4 above).
+
+## Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\workflow-templates`
+
+## Preamble — REQUIRED, do not strip
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/
+> schema/CI beyond this file and its test unless the spec says so; do not update `MEMORY.md`. **Do NOT
+> edit `WORK_ORDERS.md` — the register row and the review verdicts are the orchestrator's alone.**
+> **Your tools are for editing source and test files and for running the tests you wrote —
+> nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or tidy up
+> stray files; if something in the repo state blocks you, stop and report it as
+> `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review, NOT
+> a live `docker`/`gh workflow run` dispatch — that proof is the orchestrator's, via a `ci-test/<ID>`
+> ref). The orchestrator re-runs the authoritative set + does the independent review + the live proof
+> run after you finish — those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
 
 ---
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
-> **If you are the implementer reading this work order as your own specification: STOP at this
-> line.** Everything below describes what the Orchestrator does after you finish.
+> **If you are the implementer reading this work order as your own specification: STOP at this line.
+> Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
+> reviewers, no verification run, no register edit, no commit.** You ARE the invocation described
+> below; do NOT shell out to `codex exec`.
 
-(Filled by the Orchestrator.)
+## Execution directive
+
+Implement through `codex exec` in the background (`.claude/models.local.json` → `implementation`:
+`codex`/`gpt-5.6-luna` as of this writing) — invoked directly via Bash, both
+`--skip-git-repo-check` and `--dangerously-bypass-approvals-and-sandbox`, `-m gpt-5.6-luna`, WO passed
+on stdin (this file is large). Fallback to direct Claude implementation only on Codex quota/rate-limit/
+non-zero exit — the fallback flips authorship, independent review becomes mandatory (it already is,
+Tier 3).
+
+## Review routing
+
+Tier 3, CI/CD entry criterion: `reviewer` — all four lenses (`envelope`, `regression`, `duplication`,
+`tests`) — **and** `sec_reviewer` (this job creates/uses known-credential seed users and wires a
+guarded seed command into CI; matches the precedent set by `kerzenziehen/KZ-E2E-1`'s own sec_review
+lens on the same seed-guard class of change). No `ui_reviewer` — this diff touches no app frontend
+code, only CI/YAML. All concurrent, one batch, diff inline + this WO's Part A + the one relevant
+skill section (`orchestrate-codex`'s "Proving a workflow change" + the risk/pitfall list above) — not
+the full governance stack.
+
+## Verification
+
+1. Scoped tests: `python .github/scripts/test_app_ci_e2e_job.py` (new) plus a re-run of
+   `python .github/scripts/test_app_ci_security_gates.py` (Codex's new inputs sit in the same
+   `workflow_call.inputs` block that file already asserts against) and
+   `python .github/scripts/test_app_ci_composite_checkout.py` (guards the `.wt-checkout` pattern the
+   `frontend` job depends on — confirm untouched). NOT the full `.github/scripts` suite beyond that —
+   no other file in this diff touches migration-check/pnpm-setup/etc.
+2. **Live proof — the WO's own gate, not optional**: push this repo's commit to
+   `refs/heads/ci-test/WFT-CI-30` (a ref, not a local branch), then coordinate with the operator/other
+   sessions before pointing a `kerzenziehen` `ci-test/<ID>` ref's `ci.yml` at
+   `app-ci.yml@ci-test/WFT-CI-30` with `run-e2e: true` and that repo's real
+   `e2e-settings-module: backend.e2e_settings` / `e2e-seed-command: seed_e2e` /
+   `e2e-playwright-image` (read the pinned `@playwright/test` version from
+   `kerzenziehen/frontend/package.json` at dispatch time, don't trust a memorised value — it can have
+   moved). `gh workflow run ci.yml --ref ci-test/<ID>` on the kerzenziehen side, read the run: specs
+   green, the quarantine step visible and non-blocking (0 tests matched today, since KZ-FIX-4 has not
+   yet applied the tag), capture artifact present. A second run on a caller that leaves `run-e2e`
+   unset (or the existing `develop` branch's own CI) shows no new job at all.
+3. Both `ci-test/*` refs are the operator's to delete afterward — do not delete them yourself.
+
+## Register + commit
+
+- `WORK_ORDERS.md` (this repo) — advance the existing `WFT-CI-30` row: `planned` → `done` once
+  the review is clean/findings fixed and the live proof (both refs) is green. Record:
+  `review: codex/gpt-5.6-luna · lenses: envelope,regression,duplication,tests,sec_review · <n> raised
+  · <k> accepted · worst accepted: …`, the live-proof run URLs/IDs, and — since the app-side opt-in
+  (Phase 2b) is a separate WO in `kerzenziehen` not yet written — note explicitly that this WO's own
+  "done" covers the shared workflow only, off by default for every existing caller.
+- Commit message: single concise English subject line, e.g. `WFT-CI-30: optional e2e job in
+  app-ci.yml (Playwright specs + capture)`.
+- Report back to session `local_e275ef27-dda0-4a16-996a-ce290719c917` per the mini-handover: WO ID,
+  landing SHA, register line, the live-proof run(s), and — importantly — that the `kerzenziehen`
+  `ci-test/<ID>` coordination step (Verification #2) needs that repo's own session to either already
+  have a compatible `ci.yml`/branch state or be looped in before the cross-repo dispatch, since this
+  session does not own that repo's working tree.
