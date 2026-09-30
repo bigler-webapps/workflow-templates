@@ -11,6 +11,7 @@ older work is in `git log`.
 
 | Prefix | Workstream |
 |---|---|
+| WFT-CI-30 | Optional end-to-end job in `app-ci.yml`: Playwright specs and screen capture | Phase 2a of `webapps/WS-GOV-1`. Off by default; an opting-in caller gets its specs run against the `final` stage of its own image built from the commit under test (frontend included), with DB + Redis, its E2E settings and guarded seed; Playwright inside the official Playwright image (host needs Docker only); `@quarantine` specs non-blocking; capture uploaded as artifact with its commit. Proof via ci-test refs on both sides before landing. | 2026-09-30 | planned | | Tier 3. First consumer `kerzenziehen` (Phase 2b, own WO). `work-orders/WFT-CI-30.md` |
 | `TS-*` | Tailnet/Tailscale CI resilience (probe-guard, joins, CDN dependency) |
 | `CI-*` | CI workflows / composite actions (non-tailnet) |
 | `INF-*` | Shared with webapp-management — the `biglerconsult.infra` collection half of an INF work order. Same ID in both registers (one WO, two repos); the full order lives in `webapp-management/work-orders/`. |
