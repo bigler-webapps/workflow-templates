@@ -26,12 +26,20 @@ work order in that app's repo, written after this one is tagged. First consumer:
   - The capture runs after the specs and is uploaded as an artifact (screenshots + report), with the
     commit it was built from recorded; its mechanical failures are reported, not gating, in this
     phase.
+  - **The runner resets the database, not the test container** (operator decision 2026-09-30, after
+    the live proof showed the Playwright image has no Docker): the job's own shell runs the app's seed
+    command (`docker exec <app container> python manage.py <seed command>`) before each spec file and
+    before each capture cell, and starts Playwright once per spec file / per capture cell. The test
+    container gets neither the Docker socket nor any reseed endpoint; the job tells the app's tooling
+    to skip its own reseed through an environment variable (`E2E_RESEED=runner`).
 
 ## Scope
 
 - `.github/workflows/app-ci.yml` in this repo: the new job and its inputs (enable flag, frontend path,
   E2E settings module, and whatever the app must name for its seed and reseed to work in CI).
-- The app side (tagging, reseed target configurable for CI, the opt-in) is Phase 2b, not this WO.
+- The app side (tagging, skipping its own reseed when `E2E_RESEED=runner`, the opt-in) is Phase 2b
+  (`kerzenziehen/KZ-E2E-9`), not this WO.
+- Never mount the Docker socket into the Playwright container (root-equivalent on a shared runner).
 
 ## Explicit non-goals / do-not-touch
 
