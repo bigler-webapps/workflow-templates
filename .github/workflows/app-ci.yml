@@ -615,7 +615,7 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
-            bash -lc 'corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install --frozen-lockfile'
+            bash -lc 'npx --yes pnpm@${{ inputs.pnpm-version }} install --frozen-lockfile'
 
       - name: Playwright specs
         id: playwright_specs

@@ -226,18 +226,33 @@ class WftCi30StructuralTests(unittest.TestCase):
         self.assertNotIn('-v "${{ github.workspace }}:/workspace" \\', step)
 
     def test_playwright_dependencies_are_installed_before_specs_run(self):
+        # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run:
+        # `corepack enable` tries to write a SYSTEM-WIDE symlink
+        # (/usr/bin/pnpx), which needs root -- directly conflicting with
+        # --user "$(id -u):$(id -g)" above. `npx` needs no shim install at
+        # all (it caches in $HOME, which is writable), so it is the only
+        # invocation compatible with running as a non-root, host-matching UID.
         step = step_body(E2E_JOB, "Install Playwright dependencies")
-        self.assertIn("corepack enable", step)
-        self.assertIn("corepack prepare pnpm@${{ inputs.pnpm-version }} --activate", step)
-        self.assertIn("pnpm install --frozen-lockfile", step)
+        self.assertNotIn("corepack enable", step, "corepack enable needs root for its system-wide shim; incompatible with --user")
+        self.assertIn("npx --yes pnpm@${{ inputs.pnpm-version }} install --frozen-lockfile", step)
         # the step must exist strictly before "Playwright specs" in the job body
         self.assertLess(E2E_JOB.index("- name: Install Playwright dependencies"), E2E_JOB.index("- name: Playwright specs"))
 
     def test_assertion_fails_if_pnpm_install_is_dropped(self):
-        mutated = E2E_JOB.replace("pnpm install --frozen-lockfile", "true", 1)
+        mutated = E2E_JOB.replace("npx --yes pnpm@${{ inputs.pnpm-version }} install --frozen-lockfile", "true", 1)
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live install command")
         step = step_body(mutated, "Install Playwright dependencies")
         self.assertNotIn("pnpm install --frozen-lockfile", step)
+
+    def test_assertion_fails_if_corepack_enable_is_reintroduced(self):
+        mutated = E2E_JOB.replace(
+            "npx --yes pnpm@${{ inputs.pnpm-version }} install --frozen-lockfile",
+            "corepack enable && corepack prepare pnpm@${{ inputs.pnpm-version }} --activate && pnpm install --frozen-lockfile",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live install command")
+        step = step_body(mutated, "Install Playwright dependencies")
+        self.assertIn("corepack enable", step)
 
     def test_health_wait_loop_retries_and_fails_loudly(self):
         step = step_body(E2E_JOB, "Wait for app health")
