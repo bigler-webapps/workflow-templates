@@ -172,10 +172,35 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_health_wait_loop_retries_and_fails_loudly(self):
         step = step_body(E2E_JOB, "Wait for app health")
-        self.assertIn('curl -fsS "http://127.0.0.1:$APP_PORT/api/healthz"', step)
+        self.assertIn("curl -s -o /dev/null -w '%{http_code}'", step)
+        self.assertIn('"http://127.0.0.1:$APP_PORT/api/healthz"', step)
         self.assertIn("for attempt in $(seq 1 60)", step)
         self.assertIn('echo "::error::app health check did not become ready"', step)
         self.assertIn("exit 1", step)
+
+    def test_health_wait_accepts_any_response_but_not_connection_refused(self):
+        # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 re-run: healthz's
+        # shared "config" check reports 503 whenever AUTH_METHODS.social_login
+        # is on with a provider missing its OAuth client_id -- true for every
+        # caller's CI env by design (never provisioning real third-party
+        # secrets here). Requiring status 200 would make readiness depend on
+        # config this job must never supply. DB/Redis are independently
+        # already proven reachable by this point (migrate just ran real SQL;
+        # Redis's own docker health-cmd had to pass earlier) -- "curl got ANY
+        # HTTP response" is what this step actually needs, not "got a 200".
+        step = step_body(E2E_JOB, "Wait for app health")
+        self.assertNotIn("curl -f", step, "must not fail out on a non-2xx status (e.g. healthz's own unrelated config-check 503)")
+        self.assertIn('if [ -n "$code" ] && [ "$code" != "000" ]; then', step)
+
+    def test_assertion_fails_if_health_check_reverts_to_requiring_200(self):
+        mutated = E2E_JOB.replace(
+            "            code=\"$(curl -s -o /dev/null -w '%{http_code}' \"http://127.0.0.1:$APP_PORT/api/healthz\" || true)\"\n            # curl prints the literal string \"000\" (not empty) when it never\n            # got a response at all (connection refused/reset) -- that is\n            # the \"not up yet\" case; anything else is a real HTTP response.\n            if [ -n \"$code\" ] && [ \"$code\" != \"000\" ]; then\n              exit 0\n            fi\n",
+            "            if curl -fsS \"http://127.0.0.1:$APP_PORT/api/healthz\" >/dev/null; then\n              exit 0\n            fi\n",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live health-wait body")
+        step = step_body(mutated, "Wait for app health")
+        self.assertIn("curl -f", step)
 
     def test_assertion_fails_if_health_failure_path_is_removed(self):
         mutated = E2E_JOB.replace(

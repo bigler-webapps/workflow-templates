@@ -575,10 +575,28 @@ jobs:
         # process answering 503 the whole time). docker exec above needs no
         # HTTP readiness at all, only the container running, so migrate/seed
         # never depended on this check in the first place.
+        #
+        # Accepts ANY HTTP response, not just 200: also confirmed live, on
+        # this same repo, after the migrate-ordering fix above -- healthz's
+        # "config" check independently fails whenever AUTH_METHODS.social_login
+        # is on with providers that have no OAuth client_id configured, which
+        # is every caller's CI env by design (no new secret -- real third-party
+        # client IDs, out of scope here). Requiring 200 would make readiness
+        # depend on config this job must never provision. DB and Redis are
+        # already independently proven reachable by this point in the
+        # sequence -- migrate above only just exec'd real SQL against the DB
+        # container, and Redis's own docker health-cmd (redis-cli ping) had
+        # to pass before that. So "the server answers HTTP at all" is what
+        # this step actually needs to prove; a non-2xx status from healthz's
+        # unrelated config check is not a readiness signal for E2E purposes.
         run: |
           set -euo pipefail
           for attempt in $(seq 1 60); do
-            if curl -fsS "http://127.0.0.1:$APP_PORT/api/healthz" >/dev/null; then
+            code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP_PORT/api/healthz" || true)"
+            # curl prints the literal string "000" (not empty) when it never
+            # got a response at all (connection refused/reset) -- that is
+            # the "not up yet" case; anything else is a real HTTP response.
+            if [ -n "$code" ] && [ "$code" != "000" ]; then
               exit 0
             fi
             sleep 2
