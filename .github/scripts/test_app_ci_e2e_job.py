@@ -156,6 +156,31 @@ class WftCi30StructuralTests(unittest.TestCase):
         step = step_body(mutated, "Migrate and seed E2E database")
         self.assertNotIn("python manage.py migrate --noinput", step)
 
+    def test_capture_step_declares_git_as_a_safe_directory(self):
+        # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: even with
+        # the full checkout mounted, git refuses to operate on it with
+        # "fatal: detected dubious ownership in repository at '/workspace'"
+        # -- git >=2.35's protection against a repo whose files are owned by
+        # a different UID than the process running git, which is exactly
+        # what a bind mount from the runner's host UID into the Playwright
+        # image's own container user produces. The GIT_CONFIG_* env vars are
+        # a stateless equivalent of `git config --global --add safe.directory`
+        # -- no config file written into the ephemeral container.
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        self.assertIn("-e GIT_CONFIG_COUNT=1", capture)
+        self.assertIn("-e GIT_CONFIG_KEY_0=safe.directory", capture)
+        self.assertIn("-e GIT_CONFIG_VALUE_0=/workspace", capture)
+
+    def test_assertion_fails_if_the_safe_directory_override_is_dropped(self):
+        mutated = E2E_JOB.replace(
+            "            -e GIT_CONFIG_COUNT=1 \\\n            -e GIT_CONFIG_KEY_0=safe.directory \\\n            -e GIT_CONFIG_VALUE_0=/workspace \\\n",
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live capture env vars")
+        capture = step_body(mutated, "Capture E2E screens and report")
+        self.assertNotIn("GIT_CONFIG_COUNT", capture)
+
     def test_playwright_containers_mount_the_full_checkout_not_just_frontend(self):
         # Live-confirmed on kerzenziehen's ci-test/WFT-CI-30 run: the capture
         # script's own build-provenance check (KZ-E2E-8) shells `git rev-parse

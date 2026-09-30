@@ -655,6 +655,9 @@ jobs:
           set +e
           docker run --rm --network host \
             -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/workspace \
             -v "${{ github.workspace }}:/workspace" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             "${{ inputs.e2e-playwright-image }}" \
