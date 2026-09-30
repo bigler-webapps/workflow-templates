@@ -538,7 +538,7 @@ jobs:
             done
           done
 
-      - name: Start app and wait for health
+      - name: Start app
         run: |
           set -euo pipefail
           docker run -d --name "$E2E_APP_CONTAINER" --network "$E2E_NETWORK" -p 127.0.0.1::8000 \
@@ -559,6 +559,24 @@ jobs:
           APP_PORT="$(docker port "$E2E_APP_CONTAINER" 8000/tcp | head -n1 | sed -E 's/.*:([0-9]+)$/\1/')"
           test -n "$APP_PORT"
           echo "APP_PORT=$APP_PORT" >> "$GITHUB_ENV"
+
+      - name: Migrate and seed E2E database
+        run: |
+          set -euo pipefail
+          docker exec "$E2E_APP_CONTAINER" python manage.py migrate --noinput
+          docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
+
+      - name: Wait for app health
+        # MUST run after migrate, not before: django_core_micha's shared
+        # /api/healthz view fails its own "migrations" check (503) while any
+        # migration is pending, so waiting on it before migrate is a
+        # deadlock -- confirmed live on kerzenziehen's ci-test/WFT-CI-30 run
+        # (curl looped to its own timeout, healthz logs showed a live Daphne
+        # process answering 503 the whole time). docker exec above needs no
+        # HTTP readiness at all, only the container running, so migrate/seed
+        # never depended on this check in the first place.
+        run: |
+          set -euo pipefail
           for attempt in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:$APP_PORT/api/healthz" >/dev/null; then
               exit 0
@@ -568,12 +586,6 @@ jobs:
           echo "::error::app health check did not become ready"
           docker logs "$E2E_APP_CONTAINER" || true
           exit 1
-
-      - name: Migrate and seed E2E database
-        run: |
-          set -euo pipefail
-          docker exec "$E2E_APP_CONTAINER" python manage.py migrate --noinput
-          docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
 
       - name: Install Playwright dependencies
         working-directory: ${{ inputs.frontend-path }}

@@ -106,7 +106,7 @@ class WftCi30StructuralTests(unittest.TestCase):
         for var in ("CI_IMAGE", "E2E_NETWORK", "E2E_DB_CONTAINER", "E2E_REDIS_CONTAINER", "E2E_APP_CONTAINER"):
             match = re.search(rf"^      {var}: \S+\$\{{\{{ github\.run_id \}}\}}-\$\{{\{{ github\.run_attempt \}}\}}$", E2E_JOB, re.MULTILINE)
             self.assertIsNotNone(match, f"{var} is not scoped by both github.run_id and github.run_attempt")
-        app = step_body(E2E_JOB, "Start app and wait for health")
+        app = step_body(E2E_JOB, "Start app")
         self.assertIn("-e REDIS_HOST=\"$E2E_REDIS_CONTAINER\"", app)
         self.assertIn("-e DB_PORT='5432'", app)
         self.assertIn("docker port \"$E2E_APP_CONTAINER\" 8000/tcp", app)
@@ -171,7 +171,7 @@ class WftCi30StructuralTests(unittest.TestCase):
         self.assertNotIn("pnpm install --frozen-lockfile", step)
 
     def test_health_wait_loop_retries_and_fails_loudly(self):
-        step = step_body(E2E_JOB, "Start app and wait for health")
+        step = step_body(E2E_JOB, "Wait for app health")
         self.assertIn('curl -fsS "http://127.0.0.1:$APP_PORT/api/healthz"', step)
         self.assertIn("for attempt in $(seq 1 60)", step)
         self.assertIn('echo "::error::app health check did not become ready"', step)
@@ -184,11 +184,34 @@ class WftCi30StructuralTests(unittest.TestCase):
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live failure path")
-        step = step_body(mutated, "Start app and wait for health")
+        step = step_body(mutated, "Wait for app health")
         self.assertNotIn('echo "::error::app health check did not become ready"', step)
 
+    def test_health_wait_runs_after_migrate_not_before(self):
+        # django_core_micha's shared /api/healthz view fails its own
+        # "migrations" check (503) while any migration is pending -- waiting
+        # on it BEFORE migrate is a deadlock the app can never recover from.
+        # Confirmed live on kerzenziehen's ci-test/WFT-CI-30 run: Daphne was
+        # up and answering the whole time, just always 503, because migrate
+        # never got a chance to run first. docker exec (the migrate step)
+        # needs no HTTP readiness at all, only the container running.
+        migrate_idx = E2E_JOB.index("- name: Migrate and seed E2E database")
+        health_idx = E2E_JOB.index("- name: Wait for app health")
+        self.assertLess(migrate_idx, health_idx, "the health-wait step must come AFTER migrate, or it can never pass")
+
+    def test_assertion_fails_if_health_wait_is_moved_back_before_migrate(self):
+        mutated_job = (
+            E2E_JOB.replace("      - name: Migrate and seed E2E database\n", "__MIGRATE_MARKER__\n", 1)
+            .replace("      - name: Wait for app health\n", "      - name: Migrate and seed E2E database\n", 1)
+            .replace("__MIGRATE_MARKER__\n", "      - name: Wait for app health\n", 1)
+        )
+        self.assertNotEqual(mutated_job, E2E_JOB, "fixture setup did not swap the two step headers")
+        migrate_idx = mutated_job.index("- name: Migrate and seed E2E database")
+        health_idx = mutated_job.index("- name: Wait for app health")
+        self.assertGreater(migrate_idx, health_idx, "swap fixture did not actually invert the order")
+
     def test_app_port_is_loopback_only_and_parsed_from_a_single_line(self):
-        step = step_body(E2E_JOB, "Start app and wait for health")
+        step = step_body(E2E_JOB, "Start app")
         self.assertIn("-p 127.0.0.1::8000", step)
         self.assertNotRegex(step, r"docker run -d --name \"\$E2E_APP_CONTAINER\" --network \"\$E2E_NETWORK\" -p 8000 ")
         # `docker port` can emit an IPv4 AND an IPv6 line for one publish;
@@ -204,7 +227,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live bind flag")
-        step = step_body(mutated, "Start app and wait for health")
+        step = step_body(mutated, "Start app")
         self.assertNotIn("-p 127.0.0.1::8000", step)
 
     def test_assertion_fails_if_head_n1_is_dropped_from_port_parsing(self):
@@ -214,7 +237,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live port-parsing line")
-        step = step_body(mutated, "Start app and wait for health")
+        step = step_body(mutated, "Start app")
         self.assertNotIn('docker port "$E2E_APP_CONTAINER" 8000/tcp | head -n1 | sed', step)
 
     def test_assertion_fails_if_redis_gets_a_host_port_mapping(self):
@@ -224,7 +247,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match Redis wiring")
-        app = step_body(mutated, "Start app and wait for health")
+        app = step_body(mutated, "Start app")
         self.assertIn("6379:6379", app)
 
     def test_specs_gate_quarantine_is_non_blocking_and_capture_is_reported(self):
