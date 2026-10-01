@@ -101,9 +101,186 @@ Non-goals:
 
 # B. Implementation map, filled by the Orchestrator and ADDRESSED TO THE IMPLEMENTER
 
-*Placeholder. The Orchestrator fills the context package, the absolute working directory, the
-progress contract and the preamble block on `git pull`, per `AGENTS.md` -> "Work Order". Do not
-dispatch while this placeholder stands.*
+## Context package
+
+**Named file to change:** `.github/workflows/staging-health.yml` (the single `probe` job). Add the
+new steps at the END of the existing job, after the Tailnet probe step — do not restructure or touch
+any existing step. Create `.github/scripts/test_staging_health_auth_smoke.py` (new structural test
+file; no existing test file covers this workflow yet — follow the house idiom already established in
+`.github/scripts/test_app_ci_security_gates.py` and `.github/scripts/test_app_ci_e2e_job.py`: slice
+the job body out of the live YAML text by header string, `re.search` on that slice, one deliberate
+"mutate the live text, assert the guard fires" test per assertion).
+
+**New inputs** (place after the existing `runs-on` input, before `permissions:`):
+
+```yaml
+      auth-smoke:
+        description: >
+          Opt-in browser smoke: after the health probe passes, open the login page in a headless
+          browser and confirm a malformed email produces a translated sentence, not a raw backend
+          code. Off by default -- existing callers are unaffected.
+        type: boolean
+        default: false
+      login-path:
+        description: 'Path to the kit login page, relative to the resolved staging domain.'
+        type: string
+        default: '/login'
+```
+
+Do NOT write a literal `${{` inside either description — `WFT-CI-23` made exactly this mistake once
+(an empty/malformed expression inside a description breaks the whole reusable workflow for every one
+of the 16+ callers, with zero jobs and no log). Both descriptions above are safe as written; do not
+add anything that embeds `${{`.
+
+**New step, appended at the end of the `probe` job** (after the "Probe /api/healthz via Tailnet"
+step — this step runs regardless of `HAS_TS`, since the smoke needs no Tailscale at all; default
+GitHub Actions behaviour — no `if: always()` — already means it is skipped if any PRIOR step in the
+job genuinely failed, which is exactly "after the existing probe passes"):
+
+```yaml
+      - name: Auth smoke (opt-in): login renders a translated error, not a raw code
+        if: ${{ inputs.auth-smoke }}
+        env:
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+          LOGIN_PATH: ${{ inputs.login-path }}
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="${RUNNER_TEMP}/auth-smoke"
+          mkdir -p "${SMOKE_DIR}"
+          cat > "${SMOKE_DIR}/auth-smoke.js" <<'NODE'
+          <the Node script, see below>
+          NODE
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e SMOKE_URL="https://${DOMAIN}${LOGIN_PATH}" \
+            -v "${SMOKE_DIR}:/workspace" \
+            -w /workspace \
+            mcr.microsoft.com/playwright:v1.63.0-noble \
+            bash -lc "npm install --no-save --no-audit --no-fund playwright@1.63.0 >/dev/null 2>&1 && node auth-smoke.js"
+```
+
+**Why this exact shape — verified facts, not guesses, do not re-derive differently:**
+1. **The official `mcr.microsoft.com/playwright` image ships browser binaries + OS deps ONLY — the
+   `playwright` npm PACKAGE itself is NOT pre-installed.** (Confirmed against the upstream
+   `Dockerfile.noble`.) The image's own `ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` (world-writable,
+   777) is already set at the IMAGE level and persists into the running container automatically — do
+   not set it again, and do not add `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD`. `npm install
+   playwright@1.63.0` (version pinned to EXACTLY match the image tag's own version) resolves this
+   path and its own postinstall skip-check finds the matching browsers already present, so it does
+   NOT re-download them — only the lightweight JS package itself is fetched.
+2. **`--user "$(id -u):$(id -g)"` + `-e HOME=/tmp`** — the same fix `WFT-CI-30` needed: writing
+   `node_modules` into a bind-mounted directory as the image's default root user leaves root-owned
+   files a self-hosted runner's own non-root cleanup cannot remove (confirmed live, broke other jobs'
+   checkouts on `netcup-runner-1` twice already). `$RUNNER_TEMP` is already writable by the runner's
+   own user, so the mount is consistent.
+3. **The exact DOM structure** (verified against `ui-core-micha` 3.9.1 source, not guessed):
+   - Email input: `input[type="email"]`. Password: `input[type="password"]`.
+   - Submit button: `form button[type="submit"]` — the ONLY button in the form with this type (every
+     other button — passkey, signup, forgot-password — uses `type="button"`), so this selector is
+     unique without needing a visible-text match.
+   - **Error message container: `.MuiAlert-colorError .MuiAlert-message`.** MUI gives every `Alert`
+     `role="alert"`, including unrelated INFO alerts on the same page (e.g. a two-factor hint) — a
+     bare `getByRole('alert')` can match the wrong box. The `-colorError` class is what narrows it to
+     the actual error alert.
+   - A malformed email with a digit in the TLD (e.g. `smoke-test@example.com2`) passes the browser's
+     own native `type="email"` constraint validation (HTML5's email pattern permits a digit in the
+     last label) but fails the backend's stricter validator — exactly the value the Envelope
+     specifies, verified against the kit's own validation code path, not assumed.
+4. **No `e2e-playwright-image` input is added** — the Envelope's own "New inputs" list names only
+   `auth-smoke` and `login-path`. This smoke needs no app-specific `@playwright/test` resolution at
+   all (it never runs a project's own test suite, only a freshly-installed, hardcoded-version
+   `playwright` package against a public URL), so the image + version are internal implementation
+   details of this workflow, hardcoded, not a caller-configurable input.
+
+**The Node script** (`${SMOKE_DIR}/auth-smoke.js`, written by the heredoc above):
+
+```js
+const { chromium } = require('playwright');
+
+const url = process.env.SMOKE_URL;
+const BARE_CODE = /^[a-z][a-z0-9_]*$/;
+const KIT_KEY = /^Auth\./;
+
+(async () => {
+  const browser = await chromium.launch();
+  let exitCode = 1;
+  try {
+    const page = await browser.newPage();
+    console.log(`Opening ${url}`);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    const email = page.locator('input[type="email"]').first();
+    const password = page.locator('input[type="password"]').first();
+    const submit = page.locator('form button[type="submit"]').first();
+
+    await email.waitFor({ state: 'visible', timeout: 15000 });
+    await password.waitFor({ state: 'visible', timeout: 15000 });
+    await submit.waitFor({ state: 'visible', timeout: 15000 });
+    console.log('Login form rendered (email, password, submit present).');
+
+    await email.fill('smoke-test@example.com2');
+    await password.fill('irrelevant-dummy-password-00');
+    await submit.click();
+
+    const errorLocator = page.locator('.MuiAlert-colorError .MuiAlert-message').first();
+    await errorLocator.waitFor({ state: 'visible', timeout: 15000 });
+    const text = (await errorLocator.innerText()).trim();
+    console.log(`Error message: ${JSON.stringify(text)}`);
+
+    if (!text) {
+      console.error('SMOKE FAILED: error message is empty.');
+    } else if (BARE_CODE.test(text)) {
+      console.error('SMOKE FAILED: error message is a bare backend code, not a sentence.');
+    } else if (KIT_KEY.test(text)) {
+      console.error('SMOKE FAILED: error message is an untranslated kit key.');
+    } else {
+      console.log('SMOKE PASSED: a translated sentence was shown.');
+      exitCode = 0;
+    }
+  } catch (err) {
+    console.error(`SMOKE FAILED: ${err && err.message ? err.message : err}`);
+  } finally {
+    await browser.close();
+  }
+  process.exit(exitCode);
+})();
+```
+
+Embed this script verbatim inside the YAML heredoc exactly as given — do not rewrite its logic. If a
+genuine bug is found in it during your own test-writing, fix it narrowly and note what changed.
+
+**Known pitfall already paid for elsewhere in this file — do not reintroduce:** every container
+invocation across `app-ci.yml`'s `e2e` job needed `--user "$(id -u):$(id -g)"` + `-e HOME=/tmp` for
+this exact reason (root-owned residue on the shared runner); this step must carry both from the
+start, not discover the need later via a live failure.
+
+## Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\workflow-templates`
+
+## Preamble — REQUIRED, do not strip
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/
+> schema/CI beyond this file and its test unless the spec says so; do not update `MEMORY.md`. **Do NOT
+> edit `WORK_ORDERS.md` — the register row and the review verdicts are the orchestrator's alone.**
+> **Your tools are for editing source and test files and for running the tests you wrote —
+> nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or tidy up
+> stray files; if something in the repo state blocks you, stop and report it as
+> `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT any live `gh workflow run` dispatch — that proof is
+> the orchestrator's, via `ci-test/<ID>` refs on both sides). The orchestrator re-runs the
+> authoritative set + does the independent review + the live proof run after you finish — those are
+> the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
 
 ---
 
