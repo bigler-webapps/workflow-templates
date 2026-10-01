@@ -15,20 +15,34 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = (ROOT / ".github/workflows/staging-health.yml").read_text(encoding="utf-8")
 INPUTS_BLOCK = WORKFLOW.split("workflow_call:\n", 1)[1].split("\n\npermissions:", 1)[0]
-PROBE_JOB = WORKFLOW.split("\n  probe:\n", 1)[1]
+
+
+def slice_probe_job(workflow):
+    # Bounded on BOTH ends: stops at the next top-level (2-space-indented)
+    # job key if one is ever added after `probe:`, not just at end-of-file.
+    # An unbounded slice (the pre-fix version of this helper) would let a
+    # stub step in a LATER job satisfy an ordering/membership assertion
+    # meant to pin something inside THIS job specifically (tests-lens
+    # review finding).
+    after_probe = workflow.split("\n  probe:\n", 1)[1]
+    next_job = re.search(r"\n  [A-Za-z_][\w-]*:\n", after_probe)
+    return after_probe[: next_job.start()] if next_job else after_probe
+
+
+PROBE_JOB = slice_probe_job(WORKFLOW)
 AUTH_STEP = re.search(
     r"^      - name: Auth smoke \(opt-in\) - login renders a translated error, not a raw code\n"
-    r"(?P<body>.*?)(?=\Z)",
+    r"(?P<body>.*?)(?=^      - name:|\Z)",
     PROBE_JOB,
     re.MULTILINE | re.DOTALL,
 )
 
 
 def auth_step_body(workflow=WORKFLOW):
-    probe_job = workflow.split("\n  probe:\n", 1)[1]
+    probe_job = slice_probe_job(workflow)
     match = re.search(
         r"^      - name: Auth smoke \(opt-in\) - login renders a translated error, not a raw code\n"
-        r"(?P<body>.*?)(?=\Z)",
+        r"(?P<body>.*?)(?=^      - name:|\Z)",
         probe_job,
         re.MULTILINE | re.DOTALL,
     )
@@ -37,7 +51,18 @@ def auth_step_body(workflow=WORKFLOW):
     return match.group("body")
 
 
+
+
 class WftCi31StructuralTests(unittest.TestCase):
+    def test_only_one_job_exists_today(self):
+        # Documents the assumption slice_probe_job relies on when there is no
+        # next job to bound against -- if this ever fails, slice_probe_job's
+        # fallback (whole rest of file) is back in play and should be
+        # revisited (tests-lens review finding: the pre-fix slice was
+        # unbounded at the file end, so a stub step in a later job could
+        # have satisfied an assertion meant to pin something inside `probe`).
+        self.assertIsNone(re.search(r"\n  [A-Za-z_][\w-]*:\n", PROBE_JOB))
+
     def test_workflow_is_valid_yaml(self):
         # None of this file's other checks run the file through an actual YAML
         # parser -- they slice the live text by string, which makes them blind
@@ -187,6 +212,28 @@ class WftCi31StructuralTests(unittest.TestCase):
         )
         self.assertNotEqual(mutated, WORKFLOW, "fixture setup did not match bare-code guard")
         self.assertNotIn("} else if (BARE_CODE.test(text)) {", auth_step_body(mutated))
+
+    def test_assertion_fails_if_empty_message_guard_is_removed(self):
+        # Review finding (tests lens, blocker): only the bare-code branch had
+        # a mutation test; a stub implementation could drop the empty-message
+        # check entirely (`if (!text)`) and every other test here would still
+        # pass. Each of the three pass/fail branches now has its own.
+        mutated = WORKFLOW.replace(
+            "            if (!text) {\n",
+            "            if (false) {\n",
+            1,
+        )
+        self.assertNotEqual(mutated, WORKFLOW, "fixture setup did not match empty-message guard")
+        self.assertNotIn("if (!text) {", auth_step_body(mutated))
+
+    def test_assertion_fails_if_kit_key_guard_is_removed(self):
+        mutated = WORKFLOW.replace(
+            "              } else if (KIT_KEY.test(text)) {\n",
+            "              } else if (false) {\n",
+            1,
+        )
+        self.assertNotEqual(mutated, WORKFLOW, "fixture setup did not match kit-key guard")
+        self.assertNotIn("} else if (KIT_KEY.test(text)) {", auth_step_body(mutated))
 
     def test_assertion_fails_if_browser_failure_becomes_green(self):
         mutated = WORKFLOW.replace(

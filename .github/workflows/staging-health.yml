@@ -328,4 +328,4 @@ jobs:
             -v "${SMOKE_DIR}:/workspace" \
             -w /workspace \
             mcr.microsoft.com/playwright:v1.63.0-noble \
-            bash -lc "npm install --no-save --no-audit --no-fund playwright@1.63.0 >/dev/null 2>&1 && node auth-smoke.js"
+            bash -lc "npm install --no-save --no-audit --no-fund playwright@1.63.0 && node auth-smoke.js"
