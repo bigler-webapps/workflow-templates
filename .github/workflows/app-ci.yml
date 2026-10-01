@@ -642,7 +642,7 @@ jobs:
           for f in $GATING_FILES; do
             echo "::notice::reseeding before $f"
             docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
-            docker run --rm --network host \
+            if ! docker run --rm --network host \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
               -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
@@ -650,7 +650,12 @@ jobs:
               -v "${{ github.workspace }}:/workspace" \
               -w "/workspace/${{ inputs.frontend-path }}" \
               "${{ inputs.e2e-playwright-image }}" \
-              bash -lc "npx playwright test '$f'"
+              bash -lc "npx playwright test '$f' --trace retain-on-failure"; then
+              echo "::error::$f failed -- trace and error context: artifact e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}"
+              echo "### Spec failure: \`$f\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "Trace + error context: artifact \`e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           done
 
       - name: Playwright quarantine specs
@@ -681,6 +686,15 @@ jobs:
               worst=$reseed_status
               continue
             fi
+            # Each invocation gets its OWN output subdirectory: unlike the gating
+            # loop (which stops at the first failure, so there is only ever one
+            # invocation's output to keep), this loop keeps going after a
+            # failure -- and Playwright wipes test-results/ at the START of
+            # every `npx playwright test` invocation, so a second file's run
+            # would otherwise silently erase the first file's trace. Computed
+            # in THIS (outer/runner) shell, not inside the container's string,
+            # to avoid a nested double-quote breaking the outer string.
+            OUTPUT_SUBDIR="test-results/$(echo "$f" | tr '/' '-')"
             docker run --rm --network host \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
@@ -689,10 +703,13 @@ jobs:
               -v "${{ github.workspace }}:/workspace" \
               -w "/workspace/${{ inputs.frontend-path }}" \
               "${{ inputs.e2e-playwright-image }}" \
-              bash -lc "npx playwright test '$f'"
+              bash -lc "npx playwright test '$f' --trace retain-on-failure --output '$OUTPUT_SUBDIR'"
             status=$?
             if [ "$status" -ne 0 ]; then
               worst=$status
+              echo "::warning::$f failed (quarantine, non-blocking) -- trace and error context: artifact e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}"
+              echo "### Quarantined spec failure: \`$f\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "Trace + error context: artifact \`e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}\`" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
           if [ "$worst" -eq 0 ]; then
@@ -702,7 +719,23 @@ jobs:
             echo "::warning::Playwright quarantine specs failed (non-blocking)."
             echo '### Playwright quarantine specs: failed (non-blocking)' >> "$GITHUB_STEP_SUMMARY"
           fi
+          echo "had_failure=$([ "$worst" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           exit 0
+
+      - name: Upload E2E failure artifacts
+        # `failure()` alone would NOT see a quarantine-only failure: continue-on-error: true reports
+        # that step's own conclusion as success regardless of its internal exit code, hence the
+        # quarantine step's own `had_failure` output above. A fully green run uploads nothing: trace
+        # mode `retain-on-failure` means test-results/ is empty when nothing failed, and
+        # if-no-files-found: ignore on an empty match is silent by design (same convention this file
+        # already uses for the capture artifact).
+        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.frontend-path }}/test-results
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Capture E2E screens and report
         if: always()

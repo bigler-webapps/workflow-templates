@@ -579,5 +579,124 @@ class WftCi30StructuralTests(unittest.TestCase):
         self.assertNotIn("if: always()", cleanup)
 
 
+def load_e2e_steps(workflow_text=CI_WORKFLOW):
+    """Parsed with a real YAML loader (WFT-CI-32) -- WFT-CI-31 showed that
+    string-slicing checks miss invalid YAML entirely; this also guarantees
+    each step is read structurally (by its `name` key), never by a text
+    boundary that could drift."""
+    import yaml
+
+    data = yaml.safe_load(workflow_text)
+    return data["jobs"]["e2e"]["steps"]
+
+
+def find_step(steps, name):
+    for step in steps:
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"step not found: {name}")
+
+
+class WftCi32StructuralTests(unittest.TestCase):
+    """WFT-CI-32: traces + error context survive a failing e2e spec."""
+
+    def test_gating_and_quarantine_specs_run_with_trace_retain_on_failure(self):
+        steps = load_e2e_steps()
+        gating = find_step(steps, "Playwright specs")
+        quarantine = find_step(steps, "Playwright quarantine specs")
+        self.assertIn("--trace retain-on-failure", gating["run"])
+        self.assertIn("--trace retain-on-failure", quarantine["run"])
+
+    def test_assertion_fails_if_gating_trace_flag_is_dropped(self):
+        mutated_text = CI_WORKFLOW.replace(
+            "npx playwright test '$f' --trace retain-on-failure\"; then",
+            "npx playwright test '$f'\"; then",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live gating invocation")
+        gating = find_step(load_e2e_steps(mutated_text), "Playwright specs")
+        self.assertNotIn("--trace retain-on-failure", gating["run"])
+
+    def test_quarantine_isolates_each_invocations_output_directory(self):
+        # Review-anticipated gap: the gating loop stops at the first failure
+        # (only one invocation's output ever exists), but the quarantine loop
+        # keeps iterating after a failure, and Playwright wipes test-results/
+        # at the START of every invocation -- a second file's run would
+        # otherwise silently erase the first file's trace.
+        quarantine = find_step(load_e2e_steps(), "Playwright quarantine specs")["run"]
+        self.assertIn('OUTPUT_SUBDIR="test-results/$(echo "$f" | tr \'/\' \'-\')"', quarantine)
+        self.assertIn("--output '$OUTPUT_SUBDIR'", quarantine)
+
+    def test_assertion_fails_if_quarantine_output_isolation_is_dropped(self):
+        mutated_text = CI_WORKFLOW.replace(
+            "npx playwright test '$f' --trace retain-on-failure --output '$OUTPUT_SUBDIR'\"",
+            "npx playwright test '$f' --trace retain-on-failure\"",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live quarantine invocation")
+        quarantine = find_step(load_e2e_steps(mutated_text), "Playwright quarantine specs")
+        self.assertNotIn("--output", quarantine["run"])
+
+    def test_quarantine_reports_its_own_failure_as_a_step_output(self):
+        # `failure()` alone cannot see a quarantine-only failure: this step's
+        # own `continue-on-error: true` reports its conclusion as success
+        # regardless of its internal exit code, so the upload step's `if:`
+        # needs this step's OWN output instead.
+        quarantine = find_step(load_e2e_steps(), "Playwright quarantine specs")
+        self.assertIn('echo "had_failure=$([ "$worst" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"', quarantine["run"])
+
+    def test_assertion_fails_if_quarantine_stops_reporting_had_failure(self):
+        mutated_text = CI_WORKFLOW.replace(
+            '          echo "had_failure=$([ "$worst" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live had_failure output line")
+        quarantine = find_step(load_e2e_steps(mutated_text), "Playwright quarantine specs")
+        self.assertNotIn("had_failure", quarantine["run"])
+
+    def test_upload_failure_artifact_step_is_correctly_wired(self):
+        upload = find_step(load_e2e_steps(), "Upload E2E failure artifacts")
+        self.assertEqual(
+            upload["if"],
+            "${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
+        )
+        self.assertEqual(upload["with"]["name"], "e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}")
+        self.assertEqual(upload["with"]["path"], "${{ inputs.frontend-path }}/test-results")
+        self.assertEqual(upload["with"]["retention-days"], 7)
+        self.assertEqual(upload["with"]["if-no-files-found"], "ignore")
+
+    def test_assertion_fails_if_upload_step_loses_its_conditional(self):
+        mutated_text = CI_WORKFLOW.replace(
+            "        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",
+            "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live upload step header")
+        upload = find_step(load_e2e_steps(mutated_text), "Upload E2E failure artifacts")
+        self.assertNotIn("if", upload)
+
+    def test_upload_step_is_positioned_after_quarantine_before_capture(self):
+        steps = load_e2e_steps()
+        names = [s.get("name") for s in steps]
+        self.assertLess(
+            names.index("Playwright quarantine specs"),
+            names.index("Upload E2E failure artifacts"),
+        )
+        self.assertLess(
+            names.index("Upload E2E failure artifacts"),
+            names.index("Capture E2E screens and report"),
+        )
+
+    def test_job_summary_names_the_artifact_next_to_the_failed_spec(self):
+        steps = load_e2e_steps()
+        gating = find_step(steps, "Playwright specs")["run"]
+        quarantine = find_step(steps, "Playwright quarantine specs")["run"]
+        self.assertIn("Trace + error context: artifact", gating)
+        self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", gating)
+        self.assertIn("Trace + error context: artifact", quarantine)
+        self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", quarantine)
+
+
 if __name__ == "__main__":
     unittest.main()
