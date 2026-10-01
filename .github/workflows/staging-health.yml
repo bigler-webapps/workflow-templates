@@ -52,6 +52,17 @@ on:
           Multi-label JSON arrays are not supported by this input.
         type: string
         default: 'ubuntu-latest'
+      auth-smoke:
+        description: >
+          Opt-in browser smoke: after the health probe passes, open the login page in a headless
+          browser and confirm a malformed email produces a translated sentence, not a raw backend
+          code. Off by default -- existing callers are unaffected.
+        type: boolean
+        default: false
+      login-path:
+        description: 'Path to the kit login page, relative to the resolved staging domain.'
+        type: string
+        default: '/login'
 
 permissions:
   contents: read
@@ -249,3 +260,72 @@ jobs:
           echo "Last body:"
           printf '%s\n' "${last_body}"
           exit 1
+
+      - name: Auth smoke (opt-in) - login renders a translated error, not a raw code
+        if: ${{ inputs.auth-smoke }}
+        env:
+          DOMAIN: ${{ steps.domain.outputs.domain }}
+          LOGIN_PATH: ${{ inputs.login-path }}
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="${RUNNER_TEMP}/auth-smoke"
+          mkdir -p "${SMOKE_DIR}"
+          cat > "${SMOKE_DIR}/auth-smoke.js" <<'NODE'
+          const { chromium } = require('playwright');
+
+          const url = process.env.SMOKE_URL;
+          const BARE_CODE = /^[a-z][a-z0-9_]*$/;
+          const KIT_KEY = /^Auth\./;
+
+          (async () => {
+            const browser = await chromium.launch();
+            let exitCode = 1;
+            try {
+              const page = await browser.newPage();
+              console.log(`Opening ${url}`);
+              await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+              const email = page.locator('input[type="email"]').first();
+              const password = page.locator('input[type="password"]').first();
+              const submit = page.locator('form button[type="submit"]').first();
+
+              await email.waitFor({ state: 'visible', timeout: 15000 });
+              await password.waitFor({ state: 'visible', timeout: 15000 });
+              await submit.waitFor({ state: 'visible', timeout: 15000 });
+              console.log('Login form rendered (email, password, submit present).');
+
+              await email.fill('smoke-test@example.com2');
+              await password.fill('irrelevant-dummy-password-00');
+              await submit.click();
+
+              const errorLocator = page.locator('.MuiAlert-colorError .MuiAlert-message').first();
+              await errorLocator.waitFor({ state: 'visible', timeout: 15000 });
+              const text = (await errorLocator.innerText()).trim();
+              console.log(`Error message: ${JSON.stringify(text)}`);
+
+              if (!text) {
+                console.error('SMOKE FAILED: error message is empty.');
+              } else if (BARE_CODE.test(text)) {
+                console.error('SMOKE FAILED: error message is a bare backend code, not a sentence.');
+              } else if (KIT_KEY.test(text)) {
+                console.error('SMOKE FAILED: error message is an untranslated kit key.');
+              } else {
+                console.log('SMOKE PASSED: a translated sentence was shown.');
+                exitCode = 0;
+              }
+            } catch (err) {
+              console.error(`SMOKE FAILED: ${err && err.message ? err.message : err}`);
+            } finally {
+              await browser.close();
+            }
+            process.exit(exitCode);
+          })();
+          NODE
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e SMOKE_URL="https://${DOMAIN}${LOGIN_PATH}" \
+            -v "${SMOKE_DIR}:/workspace" \
+            -w /workspace \
+            mcr.microsoft.com/playwright:v1.63.0-noble \
+            bash -lc "npm install --no-save --no-audit --no-fund playwright@1.63.0 >/dev/null 2>&1 && node auth-smoke.js"
