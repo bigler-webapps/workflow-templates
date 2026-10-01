@@ -677,7 +677,9 @@ jobs:
             exit 0
           fi
           worst=0
+          idx=0
           for f in $QUARANTINE_FILES; do
+            idx=$((idx + 1))
             echo "::notice::reseeding before $f (quarantine)"
             docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
             reseed_status=$?
@@ -686,15 +688,19 @@ jobs:
               worst=$reseed_status
               continue
             fi
-            # Each invocation gets its OWN output subdirectory: unlike the gating
-            # loop (which stops at the first failure, so there is only ever one
-            # invocation's output to keep), this loop keeps going after a
-            # failure -- and Playwright wipes test-results/ at the START of
-            # every `npx playwright test` invocation, so a second file's run
-            # would otherwise silently erase the first file's trace. Computed
-            # in THIS (outer/runner) shell, not inside the container's string,
-            # to avoid a nested double-quote breaking the outer string.
-            OUTPUT_SUBDIR="test-results/$(echo "$f" | tr '/' '-')"
+            # Each invocation gets its OWN output subdirectory, prefixed with its
+            # loop position so two distinct spec paths can never collide after
+            # the slash-to-dash substitution below (e.g. "a/b.spec.js" and a
+            # literal "a-b.spec.js" would otherwise both sanitize to the same
+            # name, silently overwriting one trace with the other's). Unlike
+            # the gating loop (which stops at the first failure, so there is
+            # only ever one invocation's output to keep), this loop keeps going
+            # after a failure -- and Playwright wipes test-results/ at the
+            # START of every `npx playwright test` invocation, so a second
+            # file's run would otherwise silently erase the first file's trace.
+            # Computed in THIS (outer/runner) shell, not inside the container's
+            # string, to avoid a nested double-quote breaking the outer string.
+            OUTPUT_SUBDIR="test-results/$(printf '%03d' "$idx")-$(echo "$f" | tr '/' '-')"
             docker run --rm --network host \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
@@ -725,17 +731,18 @@ jobs:
       - name: Upload E2E failure artifacts
         # `failure()` alone would NOT see a quarantine-only failure: continue-on-error: true reports
         # that step's own conclusion as success regardless of its internal exit code, hence the
-        # quarantine step's own `had_failure` output above. A fully green run uploads nothing: trace
-        # mode `retain-on-failure` means test-results/ is empty when nothing failed, and
-        # if-no-files-found: ignore on an empty match is silent by design (same convention this file
-        # already uses for the capture artifact).
+        # quarantine step's own `had_failure` output above. A fully green run never reaches this
+        # step at all (the `if:` is false), so retention/if-no-files-found only matter on an actual
+        # failure -- `warn` (matching the existing capture-artifact step below) surfaces the case
+        # where a failure happened but test-results/ is still empty (for example the container
+        # crashed before Playwright could write a trace), rather than staying silent about it.
         if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
         with:
           name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ inputs.frontend-path }}/test-results
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Capture E2E screens and report
         if: always()

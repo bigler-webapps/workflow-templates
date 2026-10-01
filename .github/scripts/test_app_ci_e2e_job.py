@@ -624,8 +624,32 @@ class WftCi32StructuralTests(unittest.TestCase):
         # at the START of every invocation -- a second file's run would
         # otherwise silently erase the first file's trace.
         quarantine = find_step(load_e2e_steps(), "Playwright quarantine specs")["run"]
-        self.assertIn('OUTPUT_SUBDIR="test-results/$(echo "$f" | tr \'/\' \'-\')"', quarantine)
+        self.assertIn(
+            'OUTPUT_SUBDIR="test-results/$(printf \'%03d\' "$idx")-$(echo "$f" | tr \'/\' \'-\')"',
+            quarantine,
+        )
         self.assertIn("--output '$OUTPUT_SUBDIR'", quarantine)
+
+    def test_quarantine_output_subdir_is_disambiguated_by_loop_position(self):
+        # Review finding (independently raised by my own pass, the regression
+        # lens, and the envelope lens): tr '/' '-' alone can collide two
+        # distinct spec paths into the same subdirectory name (e.g.
+        # "a/b.spec.js" and a literal "a-b.spec.js" both sanitize to
+        # "a-b.spec.js"), silently overwriting one trace with another's. The
+        # idx prefix (the loop position, zero-padded) makes that impossible.
+        quarantine = find_step(load_e2e_steps(), "Playwright quarantine specs")["run"]
+        self.assertIn("idx=0", quarantine)
+        self.assertIn("idx=$((idx + 1))", quarantine)
+
+    def test_assertion_fails_if_quarantine_output_subdir_loses_its_index_prefix(self):
+        mutated_text = CI_WORKFLOW.replace(
+            'OUTPUT_SUBDIR="test-results/$(printf \'%03d\' "$idx")-$(echo "$f" | tr \'/\' \'-\')"',
+            'OUTPUT_SUBDIR="test-results/$(echo "$f" | tr \'/\' \'-\')"',
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live OUTPUT_SUBDIR computation")
+        quarantine = find_step(load_e2e_steps(mutated_text), "Playwright quarantine specs")["run"]
+        self.assertNotIn("printf '%03d' \"$idx\"", quarantine)
 
     def test_assertion_fails_if_quarantine_output_isolation_is_dropped(self):
         mutated_text = CI_WORKFLOW.replace(
@@ -664,7 +688,41 @@ class WftCi32StructuralTests(unittest.TestCase):
         self.assertEqual(upload["with"]["name"], "e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(upload["with"]["path"], "${{ inputs.frontend-path }}/test-results")
         self.assertEqual(upload["with"]["retention-days"], 7)
-        self.assertEqual(upload["with"]["if-no-files-found"], "ignore")
+        # `warn`, not `ignore`: a clean run never reaches this step (the `if:`
+        # is false), so this only fires on an actual failure -- and a failure
+        # with nothing to upload (sec-review finding: e.g. the container
+        # crashed before Playwright could write anything) should say so, not
+        # stay silent. Matches the existing capture-artifact step's own value.
+        self.assertEqual(upload["with"]["if-no-files-found"], "warn")
+
+    def test_had_failure_is_unset_on_the_early_exit_no_quarantine_files_path(self):
+        # Tests-lens finding: the echo of `had_failure` must sit AFTER the
+        # early-exit guard's own `exit 0` (no @quarantine-tagged files found
+        # yet) -- otherwise that branch would never reach it, and the upload
+        # step's `if:` would read an unset output. GitHub Actions treats an
+        # unset step output as the empty string, so `== 'true'` is correctly
+        # false there -- but only by virtue of this ordering, pinned here.
+        quarantine_run = find_step(load_e2e_steps(), "Playwright quarantine specs")["run"]
+        early_exit_marker = "no file tagged @quarantine yet"
+        early_exit_pos = quarantine_run.index(early_exit_marker)
+        early_exit_block_end = quarantine_run.index("exit 0", early_exit_pos)
+        text_before_early_exit = quarantine_run[:early_exit_block_end]
+        self.assertNotIn("had_failure", text_before_early_exit)
+
+    def test_assertion_fails_if_had_failure_echo_moves_before_the_early_exit(self):
+        marker = '            echo "::notice::Playwright quarantine specs: no file tagged @quarantine yet."\n'
+        hoisted = (
+            '            echo "had_failure=$([ "$worst" -ne 0 ] && echo true || echo false)" '
+            '>> "$GITHUB_OUTPUT"\n' + marker
+        )
+        mutated_text = CI_WORKFLOW.replace(marker, hoisted, 1)
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live early-exit notice line")
+        quarantine_run = find_step(load_e2e_steps(mutated_text), "Playwright quarantine specs")["run"]
+        early_exit_marker = "no file tagged @quarantine yet"
+        early_exit_pos = quarantine_run.index(early_exit_marker)
+        early_exit_block_end = quarantine_run.index("exit 0", early_exit_pos)
+        text_before_early_exit = quarantine_run[:early_exit_block_end]
+        self.assertIn("had_failure", text_before_early_exit)
 
     def test_assertion_fails_if_upload_step_loses_its_conditional(self):
         mutated_text = CI_WORKFLOW.replace(
