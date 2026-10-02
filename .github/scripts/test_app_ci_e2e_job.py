@@ -748,6 +748,30 @@ class WftCi32StructuralTests(unittest.TestCase):
         step = find_step(load_e2e_steps(mutated_text), "Save app container log for failed specs")
         self.assertNotIn("docker logs", step["run"])
 
+    def test_app_log_step_fires_on_the_exact_same_condition_as_the_upload_step(self):
+        # Tests-lens finding: each step's `if:` was only ever checked against
+        # a hardcoded literal, so the two could silently drift apart (e.g. the
+        # upload step narrowing to `failure()` alone) without either
+        # assertion catching it. Compare the two LIVE values directly.
+        steps = load_e2e_steps()
+        log_step = find_step(steps, "Save app container log for failed specs")
+        upload_step = find_step(steps, "Upload E2E failure artifacts")
+        self.assertEqual(log_step["if"], upload_step["if"])
+
+    def test_assertion_fails_if_the_two_conditions_diverge(self):
+        mutated_text = CI_WORKFLOW.replace(
+            "        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n"
+            "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0",
+            "        if: ${{ failure() }}\n"
+            "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live upload step if/uses pair")
+        steps = load_e2e_steps(mutated_text)
+        log_step = find_step(steps, "Save app container log for failed specs")
+        upload_step = find_step(steps, "Upload E2E failure artifacts")
+        self.assertNotEqual(log_step["if"], upload_step["if"])
+
     def test_app_log_step_runs_before_cleanup_removes_the_container(self):
         steps = load_e2e_steps()
         names = [s.get("name") for s in steps]

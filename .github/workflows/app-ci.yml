@@ -730,10 +730,12 @@ jobs:
 
       - name: Save app container log for failed specs
         # Mirrors the health-check-timeout path's own `docker logs "$E2E_APP_CONTAINER"` above --
-        # the container is created fresh per run (named with run_id/run_attempt), so its plain log
-        # with no --since flag already covers exactly "since the job started". Written into
-        # test-results/ so it rides along in the SAME artifact the next step uploads, no second
-        # upload-artifact path needed. Runs before cleanup removes the container.
+        # the container is created fresh per run (named with run_id/run_attempt) partway through
+        # THIS job, so it cannot have produced any output before it exists; its plain log with no
+        # --since flag therefore already covers the entire window there is anything to capture,
+        # i.e. "since the job started" has no earlier content to miss. Written into test-results/
+        # so it rides along in the SAME artifact the next step uploads, no second upload-artifact
+        # path needed. Runs before cleanup removes the container.
         if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
         working-directory: ${{ inputs.frontend-path }}
         run: |
