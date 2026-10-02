@@ -20,10 +20,16 @@ be described, not diagnosed (`kerzenziehen/KZ-FIX-9`).
     (traces, error contexts, screenshots) as an artifact with a short retention, named per run and
     attempt. A run without failures uploads nothing extra.
   - The job summary names the artifact next to the failed spec.
+  - **The backend log goes with it** (operator decision 2026-10-02, after `kerzenziehen/KZ-FIX-9`
+    could not reproduce the failure locally): when a gating or quarantined spec file fails, the job
+    also saves `docker logs` of the app container since the job started into the same artifact. Every
+    diagnosis so far (`kerzenziehen/KZ-FIX-3`, `-4`, `-5`, `-8`) needed the trace and the backend log of
+    the same time window side by side; a trace alone shows only the browser's half.
 
 ## Scope
 
-- `.github/workflows/app-ci.yml`, the `e2e` job only.
+- `.github/workflows/app-ci.yml`, the `e2e` job only. The backend-log capture mirrors the existing
+  `docker logs "$E2E_APP_CONTAINER"` call on the health-check-timeout path.
 
 ## Explicit non-goals / do-not-touch
 
