@@ -724,6 +724,46 @@ class WftCi32StructuralTests(unittest.TestCase):
         text_before_early_exit = quarantine_run[:early_exit_block_end]
         self.assertIn("had_failure", text_before_early_exit)
 
+    def test_app_log_is_saved_into_the_same_artifact_on_a_failure(self):
+        # Envelope amendment 2026-10-02: every diagnosis so far needed the
+        # trace and the backend log of the same time window side by side.
+        # E2E_APP_CONTAINER is a fresh per-run container (named with
+        # run_id/run_attempt), so a plain `docker logs` with no --since
+        # flag already covers exactly "since the job started" -- mirrors
+        # the health-check-timeout path's own call to the same command.
+        step = find_step(load_e2e_steps(), "Save app container log for failed specs")
+        self.assertEqual(
+            step["if"],
+            "${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
+        )
+        self.assertIn('docker logs "$E2E_APP_CONTAINER" > test-results/docker-logs-app.log', step["run"])
+
+    def test_assertion_fails_if_app_log_capture_is_dropped(self):
+        mutated_text = CI_WORKFLOW.replace(
+            '          docker logs "$E2E_APP_CONTAINER" > test-results/docker-logs-app.log 2>&1 || true\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live app-log capture line")
+        step = find_step(load_e2e_steps(mutated_text), "Save app container log for failed specs")
+        self.assertNotIn("docker logs", step["run"])
+
+    def test_app_log_step_runs_before_cleanup_removes_the_container(self):
+        steps = load_e2e_steps()
+        names = [s.get("name") for s in steps]
+        self.assertLess(
+            names.index("Playwright quarantine specs"),
+            names.index("Save app container log for failed specs"),
+        )
+        self.assertLess(
+            names.index("Save app container log for failed specs"),
+            names.index("Upload E2E failure artifacts"),
+        )
+        self.assertLess(
+            names.index("Upload E2E failure artifacts"),
+            names.index("Cleanup E2E containers, network, and image"),
+        )
+
     def test_assertion_fails_if_upload_step_loses_its_conditional(self):
         mutated_text = CI_WORKFLOW.replace(
             "        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",

@@ -728,6 +728,19 @@ jobs:
           echo "had_failure=$([ "$worst" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Save app container log for failed specs
+        # Mirrors the health-check-timeout path's own `docker logs "$E2E_APP_CONTAINER"` above --
+        # the container is created fresh per run (named with run_id/run_attempt), so its plain log
+        # with no --since flag already covers exactly "since the job started". Written into
+        # test-results/ so it rides along in the SAME artifact the next step uploads, no second
+        # upload-artifact path needed. Runs before cleanup removes the container.
+        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
+        working-directory: ${{ inputs.frontend-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          docker logs "$E2E_APP_CONTAINER" > test-results/docker-logs-app.log 2>&1 || true
+
       - name: Upload E2E failure artifacts
         # `failure()` alone would NOT see a quarantine-only failure: continue-on-error: true reports
         # that step's own conclusion as success regardless of its internal exit code, hence the
