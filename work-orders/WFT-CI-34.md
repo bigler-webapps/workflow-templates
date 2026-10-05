@@ -24,6 +24,24 @@ other apps (`webapp-management/WM-INF-77`). A report nobody reads is not a contr
   - Proof on `ci-test` refs on both sides (this repo's candidate, one app pointing at it): a run with a
     known-vulnerable pin fails the security job, a clean run passes.
 
+## Amendment 2026-10-05 — audit what the image installs (operator decision)
+
+Found by `webapp-management/WM-INF-77`: in hram, cockpit and Photogallery the CI pip-audit **cannot
+resolve** the requirements (cockpit/Photogallery build with `uv pip install --overrides
+uv-overrides.txt`, which lifts `django-celery-beat`'s `Django<6.1` cap; plain pip does not see the
+override; hram's cause was not identified), and the report-only wrapper (`|| echo ::warning::`) swallows
+the error — those security jobs are green without having audited anything. Flipping to blocking as
+written would turn them red for the wrong reason, and would never have caught a real finding there.
+
+- **The audit covers the dependency set the app's image actually installs** — overrides and
+  constraints included — not a fresh resolution of `requirements.txt` (for example by auditing the
+  installed packages inside the built image, or a freeze taken from it; the mechanism is the
+  Orchestrator's).
+- **An audit that cannot run or cannot resolve fails the job**, in blocking and in report-only mode
+  alike. "Could not check" is never a green job.
+- Order: after `webapp-management/INF-61` (exact pins) and `webapp-management/WM-INF-78` (the remaining
+  advisories in Photogallery, cockpit, Cinevia), so the clean-estate measurement can come out clean.
+
 ## Scope
 
 - `.github/workflows/app-ci.yml` (the default and the description), its structural tests.
