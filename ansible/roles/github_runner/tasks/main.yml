@@ -297,6 +297,29 @@
     mode: "0600"
   no_log: true
 
+- name: Assert per-slot runner labels are safe and in range
+  ansible.builtin.assert:
+    that:
+      - github_runner_slot_extra_labels is mapping
+      - >-
+        github_runner_slot_extra_labels.keys()
+        | select('integer') | list | length
+        == github_runner_slot_extra_labels | length
+      - >-
+        github_runner_slot_extra_labels.keys()
+        | map('int') | select('lt', 1) | list | length == 0
+      - >-
+        github_runner_slot_extra_labels.keys()
+        | map('int') | select('gt', github_runner_slots) | list | length == 0
+      - >-
+        github_runner_slot_extra_labels.values()
+        | select('match', '^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')
+        | list | length == github_runner_slot_extra_labels | length
+    fail_msg: >-
+      github_runner_slot_extra_labels must map integer slot numbers from 1
+      through github_runner_slots to comma-separated labels containing only
+      letters, digits, underscores, periods, and hyphens.
+
 - name: Deploy JIT-config broker script
   become: true
   ansible.builtin.template:

@@ -79,3 +79,8 @@ github_runner_group_id: 1
 
 # Labels applied to all slots (comma-separated, no spaces around commas)
 github_runner_labels: "self-hosted,netcup"
+
+# Optional extra labels by slot number (integer key); each comma-separated
+# value is appended only to that slot's registration. Empty preserves the
+# registration labels for every slot exactly as before.
+github_runner_slot_extra_labels: {}
