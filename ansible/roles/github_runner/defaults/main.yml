@@ -55,6 +55,10 @@ github_runner_node_major: "20"
 # concrete version for a reproducible runner fleet and update together with tests.
 github_runner_claude_code_version: "latest"
 
+# @openai/codex npm package version - empty leaves the runner unchanged;
+# set to a concrete version (for example "0.161.0") to install Codex CLI.
+github_runner_codex_version: ""
+
 # System account and base path
 github_runner_user: gh-runner
 github_runner_base_dir: /opt/gh-runner

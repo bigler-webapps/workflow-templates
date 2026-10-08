@@ -195,6 +195,43 @@
   when: _github_runner_claude_needs_install | bool
   register: _github_runner_claude_npm_install
 
+- name: Check installed Codex CLI version
+  become: true
+  ansible.builtin.command:
+    cmd: npm list -g @openai/codex --depth=0 --json
+  register: _github_runner_codex_installed
+  changed_when: false
+  failed_when: false
+  when: github_runner_codex_version | length > 0
+
+- name: Determine whether Codex CLI needs installation
+  ansible.builtin.set_fact:
+    _github_runner_codex_needs_install: >-
+      {{ _github_runner_codex_installed.rc != 0
+         or github_runner_codex_version !=
+            (((_github_runner_codex_installed.stdout | default('{}', true) | from_json).dependencies | default({})).get('@openai/codex', {}).get('version', '')) }}
+  when: github_runner_codex_version | length > 0
+
+- name: Install configured Codex CLI release
+  become: true
+  ansible.builtin.command:
+    cmd: "npm install -g @openai/codex@{{ github_runner_codex_version }}"
+  when:
+    - github_runner_codex_version | length > 0
+    - _github_runner_codex_needs_install | bool
+  register: _github_runner_codex_npm_install
+
+- name: Verify configured Codex CLI version
+  become: true
+  ansible.builtin.command:
+    cmd: codex --version
+  register: _github_runner_codex_version_check
+  changed_when: false
+  failed_when: github_runner_codex_version not in _github_runner_codex_version_check.stdout
+  when:
+    - github_runner_codex_version | length > 0
+    - not ansible_check_mode
+
 - name: Verify pre-baked runner tooling versions
   # Keep these checks read-only: their output appears in the provision log and
   # confirms the commands available to every persistent runner slot.
