@@ -15,7 +15,7 @@ TASKS = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8")
 
 
 def render(source, extra_labels):
-    env = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
+    env = Environment(undefined=StrictUndefined, keep_trailing_newline=True, trim_blocks=True)  # Ansible template module defaults: trim_blocks=True
     variables = {
         name: "dummy"
         for name in re.findall(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}", source)
@@ -60,7 +60,7 @@ def test_empty_mapping_keeps_the_pre_change_registration_rendering():
 def test_empty_mapping_renders_byte_identical_to_the_template_without_the_block():
     # Cut the whole `{% if github_runner_slot_extra_labels %} ... {% endif %}` span out of the source:
     # what remains is the pre-change template. The full rendering must match it exactly (every byte).
-    block = re.compile(r"{% if github_runner_slot_extra_labels %}.*?{%- endif %}", re.DOTALL)
+    block = re.compile(r"{% if github_runner_slot_extra_labels %}.*?{% endif %}\n", re.DOTALL)
     assert block.search(TEMPLATE)
     pre_change = block.sub("", TEMPLATE, count=1)
     assert render(TEMPLATE, {}) == render(pre_change, {})
@@ -123,3 +123,34 @@ def test_slot_label_assertion_precedes_deploy_and_rejects_unsafe_inputs():
     for bad in ("a b", "a;b", "$(x)", 'a"b', "", "a,,b"):
         assert not passes({2: bad}), bad
     assert not passes(["netcup-heavy"])           # not a mapping
+
+
+def test_rendered_script_is_valid_bash_with_and_without_a_mapping(tmp_path):
+    # The first version of this template glued `esac` to the next line under Ansible's trim_blocks=True and
+    # only the --check --diff of the real provision showed it. Render exactly like Ansible and syntax-check.
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if not bash:
+        import pytest
+        pytest.skip("bash unavailable")
+    for name, mapping in (("empty", {}), ("mapped", {1: "a", 3: "netcup-heavy"})):
+        script = tmp_path / f"{name}.sh"
+        script.write_bytes(render(TEMPLATE, mapping).encode("utf-8"))
+        result = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
+        assert result.returncode == 0, (name, result.stderr)
+
+
+def test_every_block_tag_sits_on_its_own_line_so_trim_blocks_cannot_glue_lines():
+    # With trim_blocks the newline after a block tag is removed: a tag sharing a line with script text would
+    # swallow that line's end. Pin that the slot-label tags are alone on their lines.
+    for number, text in enumerate(TEMPLATE.splitlines(), 1):
+        if "{%" in text and not text.lstrip().startswith("#"):
+            assert re.fullmatch(r"\s*{%[^%]*%}\s*", text), (number, text)
+
+
+def test_empty_mapping_keeps_the_original_adjacent_lines_under_ansible_settings():
+    # The ORIGINAL (pre-WM-INF-79) template had these two lines directly adjacent; pinned independent of the
+    # current block layout.
+    assert 'LABELS="self-hosted,netcup"\nGH_API="https://api.github.com"\n' in render(TEMPLATE, {})

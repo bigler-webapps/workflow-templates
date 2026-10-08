@@ -21,13 +21,15 @@ INSTALLATION_ID="{{ github_runner_app_installation_id }}"
 ORG="{{ github_runner_org }}"
 PEM_FILE="{{ github_runner_base_dir }}/app.pem"
 RUNNER_GROUP_ID="{{ github_runner_group_id }}"
-LABELS="{{ github_runner_labels }}"{% if github_runner_slot_extra_labels %}{{ '\n' }}SLOT="${RUNNER_NAME##*-slot}"
+LABELS="{{ github_runner_labels }}"
+{% if github_runner_slot_extra_labels %}
+SLOT="${RUNNER_NAME##*-slot}"
 case "${SLOT}" in
-{% for slot, extra_labels in github_runner_slot_extra_labels | dictsort -%}
+{% for slot, extra_labels in github_runner_slot_extra_labels | dictsort %}
   {{ slot }}) LABELS="${LABELS},{{ extra_labels }}" ;;
-{% endfor -%}
+{% endfor %}
 esac
-{%- endif %}
+{% endif %}
 GH_API="https://api.github.com"
 
 # ── base64url helper ──────────────────────────────────────────────────────────
