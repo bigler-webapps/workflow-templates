@@ -43,6 +43,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             "e2e-playwright-image": ("string", "''"),
             "e2e-capture-command": ("string", "'node tests/capture/capture.js'"),
             "e2e-capture-output-path": ("string", "'tests/capture/output'"),
+            "e2e-mail-dir": ("boolean", "false"),
         }
         for name, (input_type, default) in expected.items():
             match = re.search(
@@ -818,6 +819,39 @@ class WftCi32StructuralTests(unittest.TestCase):
         self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", gating)
         self.assertIn("Trace + error context: artifact", quarantine)
         self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", quarantine)
+
+
+class WftCi35MailDirectoryTests(unittest.TestCase):
+    def test_mail_directory_input_is_opt_in_boolean(self):
+        self.assertRegex(INPUTS_BLOCK, r"      e2e-mail-dir:\n        type: boolean\n        default: false(?:\n|\Z)")
+
+    def test_setup_is_gated_and_owns_mount_construction(self):
+        setup = step_body(E2E_JOB, "Prepare shared E2E mail directory")
+        self.assertEqual(setup.splitlines()[0], "        if: ${{ inputs.e2e-mail-dir }}")
+        self.assertIn('rm -rf "$mail_dir"', setup)
+        self.assertIn('chmod 0777 "$mail_dir"', setup)
+        self.assertIn("$mail_dir:/e2e-mail", setup)
+        self.assertIn("$mail_dir:/e2e-mail:ro", setup)
+        outside_setup = E2E_JOB.replace(setup, "")
+        self.assertNotIn(":/e2e-mail", outside_setup)
+        self.assertIn("E2E_MAIL_APP_ARGS", outside_setup)
+        self.assertIn("E2E_MAIL_PW_ARGS", outside_setup)
+
+    def test_app_and_every_playwright_invocation_receive_mail_args(self):
+        start = step_body(E2E_JOB, "Start app")
+        self.assertIn("${E2E_MAIL_APP_ARGS:-}", start)
+        self.assertEqual(E2E_JOB.count("${{ inputs.e2e-playwright-image }}"), 5)
+        self.assertEqual(E2E_JOB.count("${E2E_MAIL_PW_ARGS:-}"), 5)
+
+    def test_failure_artifact_copies_mail_directory(self):
+        copy_step = step_body(E2E_JOB, "Copy E2E mail files for failed specs")
+        self.assertIn("inputs.e2e-mail-dir", copy_step)
+        self.assertIn('cp -a "$E2E_MAIL_HOST_DIR/." test-results/e2e-mail/ || true', copy_step)
+        self.assertLess(E2E_JOB.index("Copy E2E mail files for failed specs"), E2E_JOB.index("Upload E2E failure artifacts"))
+
+    def test_cleanup_removes_mail_directory_when_created(self):
+        cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
+        self.assertIn('if [ -d "$RUNNER_TEMP/e2e-mail" ]; then rm -rf "$RUNNER_TEMP/e2e-mail"; fi', cleanup)
 
 
 if __name__ == "__main__":
