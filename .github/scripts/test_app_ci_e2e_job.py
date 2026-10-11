@@ -829,11 +829,16 @@ class WftCi35MailDirectoryTests(unittest.TestCase):
         setup = step_body(E2E_JOB, "Prepare shared E2E mail directory")
         self.assertEqual(setup.splitlines()[0], "        if: ${{ inputs.e2e-mail-dir }}")
         self.assertIn('rm -rf "$mail_dir"', setup)
+        self.assertIn('mail_dir="$RUNNER_TEMP/e2e-mail"', setup)
+        self.assertIn('echo "E2E_MAIL_HOST_DIR=$mail_dir"', setup)
         self.assertIn('chmod 0777 "$mail_dir"', setup)
         self.assertIn("$mail_dir:/e2e-mail", setup)
         self.assertIn("$mail_dir:/e2e-mail:ro", setup)
         outside_setup = E2E_JOB.replace(setup, "")
         self.assertNotIn(":/e2e-mail", outside_setup)
+        cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
+        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi', cleanup)
+        self.assertNotIn("RUNNER_TEMP", cleanup)
         self.assertIn("E2E_MAIL_APP_ARGS", outside_setup)
         self.assertIn("E2E_MAIL_PW_ARGS", outside_setup)
 
@@ -851,7 +856,8 @@ class WftCi35MailDirectoryTests(unittest.TestCase):
 
     def test_cleanup_removes_mail_directory_when_created(self):
         cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
-        self.assertIn('if [ -d "$RUNNER_TEMP/e2e-mail" ]; then rm -rf "$RUNNER_TEMP/e2e-mail"; fi', cleanup)
+        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi', cleanup)
+        self.assertNotIn("RUNNER_TEMP", cleanup)
 
 
 if __name__ == "__main__":

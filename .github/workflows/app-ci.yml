@@ -857,4 +857,4 @@ jobs:
           docker rm -f "$E2E_APP_CONTAINER" "$E2E_REDIS_CONTAINER" "$E2E_DB_CONTAINER" 2>/dev/null || true
           docker network rm "$E2E_NETWORK" 2>/dev/null || true
           docker image rm -f "$CI_IMAGE" 2>/dev/null || true
-          if [ -d "$RUNNER_TEMP/e2e-mail" ]; then rm -rf "$RUNNER_TEMP/e2e-mail"; fi
+          if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi
