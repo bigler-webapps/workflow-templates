@@ -7,8 +7,13 @@ make a generic YAML parser a poor fit here, and this matches the neighboring
 app-ci structural tests.
 """
 
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -32,6 +37,36 @@ def step_body(job, name):
     if match is None:
         raise AssertionError(f"step not found: {name}")
     return match.group("body")
+
+
+def shell_body(step):
+    match = re.search(
+        r"^        run: \|\n(?P<run>(?:^          .*\n|^\n)*)",
+        step,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError("step does not have a literal run block")
+    return "\n".join(line[10:] if line.startswith("          ") else "" for line in match.group("run").splitlines()) + "\n"
+
+
+def mail_copy_step_is_guarded(job):
+    step = step_body(job, "Copy E2E mail files for failed specs")
+    condition = next((line for line in step.splitlines() if line.strip().startswith("if:")), "")
+    run = shell_body(step).splitlines()
+    # The wording of the diagnostic is free; the `:?` expansion on this variable is the guard.
+    refusal = next((line for line in run if line.startswith(': "${E2E_MAIL_HOST_DIR:?')), None)
+    mkdir = "mkdir -p test-results/e2e-mail"
+    return (
+        "inputs.e2e-mail-dir" in condition
+        and "env.E2E_MAIL_HOST_DIR != ''" in condition
+        and "failure() || steps.quarantine.outputs.had_failure == 'true'" in condition
+        and len(run) >= 3
+        and run[0] == "set -euo pipefail"
+        and refusal in run
+        and mkdir in run
+        and run.index(refusal) < run.index(mkdir)
+    )
 
 
 class WftCi30StructuralTests(unittest.TestCase):
@@ -858,6 +893,107 @@ class WftCi35MailDirectoryTests(unittest.TestCase):
         cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
         self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi', cleanup)
         self.assertNotIn("RUNNER_TEMP", cleanup)
+
+
+class WftCi36FailedMailCopyTests(unittest.TestCase):
+    def test_failed_spec_copy_requires_prepared_mail_directory_and_refuses_empty_value(self):
+        self.assertTrue(mail_copy_step_is_guarded(E2E_JOB))
+        copy_step = step_body(E2E_JOB, "Copy E2E mail files for failed specs")
+        self.assertIn('cp -a "$E2E_MAIL_HOST_DIR/." test-results/e2e-mail/ || true', copy_step)
+
+    def test_guard_predicate_rejects_missing_if_guard_or_shell_refusal(self):
+        missing_if_guard = E2E_JOB.replace("env.E2E_MAIL_HOST_DIR != '' && ", "", 1)
+        self.assertNotEqual(missing_if_guard, E2E_JOB, "fixture setup did not match mail-copy if guard")
+        self.assertFalse(mail_copy_step_is_guarded(missing_if_guard))
+
+        missing_refusal = E2E_JOB.replace(
+            '          : "${E2E_MAIL_HOST_DIR:?E2E_MAIL_HOST_DIR was not prepared}"\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(missing_refusal, E2E_JOB, "fixture setup did not match mail-copy refusal")
+        self.assertFalse(mail_copy_step_is_guarded(missing_refusal))
+
+    @unittest.skipIf(sys.platform == "win32" or shutil.which("bash") is None, "requires bash on a non-Windows host")
+    def test_unset_mail_directory_fails_before_copy_or_output_creation(self):
+        copy_step = step_body(E2E_JOB, "Copy E2E mail files for failed specs")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workdir = root / "work"
+            bin_dir = root / "bin"
+            workdir.mkdir()
+            bin_dir.mkdir()
+            cp_log = root / "cp-args.log"
+            # Log-only stub: it must NEVER forward to the real cp here. If the step ever
+            # regressed to the old unguarded `cp -a "$E2E_MAIL_HOST_DIR/." ...`, a forwarding
+            # stub would copy the whole filesystem root into the temp directory.
+            cp_stub = bin_dir / "cp"
+            cp_stub.write_text(
+                '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >> "$CP_LOG"\n',
+                encoding="utf-8",
+            )
+            cp_stub.chmod(0o755)
+            script = root / "copy-mail.sh"
+            script.write_text(shell_body(copy_step), encoding="utf-8")
+
+            environment = dict(os.environ)
+            environment.pop("E2E_MAIL_HOST_DIR", None)
+            environment.update(
+                PATH=f"{bin_dir}{os.pathsep}{environment.get('PATH', '')}",
+                CP_LOG=str(cp_log),
+            )
+            result = subprocess.run(
+                [shutil.which("bash"), str(script)], cwd=workdir, env=environment,
+                capture_output=True, text=True, check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            logged_args = cp_log.read_text(encoding="utf-8").splitlines() if cp_log.exists() else []
+            self.assertFalse(any(argument.endswith("/.") for argument in logged_args), logged_args)
+            self.assertFalse((workdir / "test-results").exists())
+
+    @unittest.skipIf(sys.platform == "win32" or shutil.which("bash") is None, "requires bash on a non-Windows host")
+    def test_prepared_mail_directory_is_copied_into_failure_artifact(self):
+        copy_step = step_body(E2E_JOB, "Copy E2E mail files for failed specs")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workdir = root / "work"
+            bin_dir = root / "bin"
+            source = root / "mail"
+            workdir.mkdir()
+            bin_dir.mkdir()
+            source.mkdir()
+            (source / "message.eml").write_text("failed spec mail", encoding="utf-8")
+            cp_log = root / "cp-args.log"
+            real_cp = shutil.which("cp")
+            self.assertIsNotNone(real_cp, "cp is required for the shell behavior check")
+            cp_stub = bin_dir / "cp"
+            cp_stub.write_text(
+                '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" >> "$CP_LOG"\nexec "$REAL_CP" "$@"\n',
+                encoding="utf-8",
+            )
+            cp_stub.chmod(0o755)
+            script = root / "copy-mail.sh"
+            script.write_text(shell_body(copy_step), encoding="utf-8")
+
+            environment = dict(os.environ)
+            environment.update(
+                E2E_MAIL_HOST_DIR=str(source),
+                PATH=f"{bin_dir}{os.pathsep}{environment.get('PATH', '')}",
+                CP_LOG=str(cp_log),
+                REAL_CP=real_cp,
+            )
+            result = subprocess.run(
+                [shutil.which("bash"), str(script)], cwd=workdir, env=environment,
+                capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                (workdir / "test-results/e2e-mail/message.eml").read_text(encoding="utf-8"),
+                "failed spec mail",
+            )
+            self.assertTrue(any(argument.endswith("/.") for argument in cp_log.read_text(encoding="utf-8").splitlines()))
 
 
 if __name__ == "__main__":
