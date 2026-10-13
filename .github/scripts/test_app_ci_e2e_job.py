@@ -26,6 +26,8 @@ VALIDATE_JOB = CI_WORKFLOW.split("\n  validate-inputs:\n", 1)[1].split(
     "\n  backend:\n", 1
 )[0]
 E2E_JOB = CI_WORKFLOW.split("\n  e2e:\n", 1)[1]
+GIT_BASH = Path("C:/Program Files/Git/bin/bash.exe")
+CAPTURE_BASH = str(GIT_BASH) if sys.platform == "win32" and GIT_BASH.is_file() else shutil.which("bash")
 
 
 def step_body(job, name):
@@ -78,6 +80,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             "e2e-playwright-image": ("string", "''"),
             "e2e-capture-command": ("string", "'node tests/capture/capture.js'"),
             "e2e-capture-output-path": ("string", "'tests/capture/output'"),
+            "e2e-capture-gate": ("boolean", "false"),
             "e2e-mail-dir": ("boolean", "false"),
         }
         for name, (input_type, default) in expected.items():
@@ -229,7 +232,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_enumeration_failure_check_is_dropped(self):
         mutated = E2E_JOB.replace(
-            'cells_status=$?\n          if [ "$cells_status" -ne 0 ]; then\n            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."\n            exit 0\n          fi\n',
+            'cells_status=$?\n          if [ "$cells_status" -ne 0 ]; then\n            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."\n            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then exit "$cells_status"; else exit 0; fi\n          fi\n',
             "",
             1,
         )
@@ -495,7 +498,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
         capture = step_body(E2E_JOB, "Capture E2E screens and report")
         self.assertIn("inputs.e2e-capture-command", capture)
-        self.assertIn("        if: always()\n        continue-on-error: true", capture)
+        self.assertIn("        if: always()\n        continue-on-error: ${{ !inputs.e2e-capture-gate }}", capture)
         upload = step_body(E2E_JOB, "Upload E2E capture artifact")
         self.assertIn("if: always()", upload)
         self.assertIn("inputs.e2e-capture-output-path", upload)
@@ -578,13 +581,13 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_capture_loses_its_always_gate(self):
         mutated = E2E_JOB.replace(
-            "      - name: Capture E2E screens and report\n        if: always()\n        continue-on-error: true",
-            "      - name: Capture E2E screens and report\n        continue-on-error: true",
+            "      - name: Capture E2E screens and report\n        if: always()\n        continue-on-error: ${{ !inputs.e2e-capture-gate }}",
+            "      - name: Capture E2E screens and report\n        continue-on-error: ${{ !inputs.e2e-capture-gate }}",
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live capture step header")
         capture = step_body(mutated, "Capture E2E screens and report")
-        self.assertNotIn("        if: always()\n        continue-on-error: true", capture)
+        self.assertNotIn("        if: always()\n        continue-on-error: ${{ !inputs.e2e-capture-gate }}", capture)
 
     def test_assertion_fails_if_quarantine_becomes_blocking(self):
         mutated = E2E_JOB.replace(
@@ -995,6 +998,111 @@ class WftCi36FailedMailCopyTests(unittest.TestCase):
             )
             self.assertTrue(any(argument.endswith("/.") for argument in cp_log.read_text(encoding="utf-8").splitlines()))
 
+
+class WftCi37CaptureGateTests(unittest.TestCase):
+    def test_capture_gate_is_opt_in_and_rejects_run_e2e_false(self):
+        self.assertRegex(INPUTS_BLOCK, r"      e2e-capture-gate:\n        description: '[^\n]+'\n        type: boolean\n        default: false\n")
+        guard = step_body(VALIDATE_JOB, "e2e-capture-gate requires run-e2e")
+        self.assertIn("if: ${{ inputs.e2e-capture-gate && !inputs.run-e2e }}", guard)
+        self.assertIn("exit 1", guard)
+
+    def test_capture_failure_policy_and_artifact_upload_are_gated_correctly(self):
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        upload = step_body(E2E_JOB, "Upload E2E capture artifact")
+        self.assertIn("if: always()", capture)
+        self.assertIn("continue-on-error: ${{ !inputs.e2e-capture-gate }}", capture)
+        self.assertIn("if: always()", upload)
+        self.assertIn("inputs.e2e-capture-output-path", upload)
+        steps = load_e2e_steps()
+        names = [step.get("name") for step in steps]
+        self.assertLess(names.index("Capture E2E screens and report"), names.index("Upload E2E capture artifact"))
+        self.assertLess(names.index("Upload E2E capture artifact"), names.index("Cleanup E2E containers, network, and image"))
+        parsed_upload = find_step(steps, "Upload E2E capture artifact")
+        self.assertEqual(parsed_upload["if"], "always()")
+        self.assertTrue(parsed_upload["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(parsed_upload["with"]["name"], "e2e-capture-${{ github.run_id }}-${{ github.run_attempt }}")
+        self.assertEqual(parsed_upload["with"]["path"], "${{ inputs.frontend-path }}/${{ inputs.e2e-capture-output-path }}")
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash")
+    def test_extracted_capture_shell_honors_gate_for_all_failure_modes(self):
+        capture_step = step_body(E2E_JOB, "Capture E2E screens and report")
+        scenarios = (
+            ("enabled success", True, 0, "cell-a", 0, 0, 0),
+            ("enabled capture failure", True, 0, "cell-a", 0, 7, 7),
+            ("disabled capture failure", False, 0, "cell-a", 0, 7, 0),
+            ("enabled enumeration failure", True, 5, "cell-a", 0, 0, 5),
+            ("disabled enumeration failure", False, 5, "cell-a", 0, 0, 0),
+            ("enabled empty cells", True, 0, "", 0, 0, 1),
+            ("disabled empty cells", False, 0, "", 0, 0, 0),
+            ("enabled reseed failure", True, 0, "cell-a", 6, 0, 6),
+            ("disabled reseed failure", False, 0, "cell-a", 6, 0, 0),
+            ("enabled earlier capture failure", True, 0, "cell-a cell-b", 0, 7, 7),
+            ("enabled earlier reseed failure", True, 0, "cell-a cell-b", 6, 0, 6),
+        )
+        for label, gate, enum_status, cells, reseed_status, capture_status, expected in scenarios:
+            with self.subTest(scenario=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                docker_stub = bin_dir / "docker"
+                docker_stub.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+                    "joined=\" $* \"\n"
+                    "if [[ \"$joined\" == *\"node -e\"* ]]; then\n"
+                    "  printf '%s' \"$CELLS\"\n"
+                    "  exit \"$ENUM_STATUS\"\n"
+                    "fi\n"
+                    "if [ \"$1\" = exec ]; then\n"
+                    "  if [ \"$(grep -c '^exec app' \"$DOCKER_LOG\")\" = 1 ]; then exit \"$RESEED_STATUS\"; fi\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "if [[ \"$joined\" == *\"capture.js\"* && \"$joined\" == *\"--routes=cell-a\"* ]]; then exit \"$CAPTURE_STATUS\"; fi\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                docker_stub.chmod(0o755)
+                script = root / "capture.sh"
+                script_text = shell_body(capture_step)
+                script_text = script_text.replace("${{ inputs.e2e-capture-gate }}", "true" if gate else "false")
+                script_text = script_text.replace("${{ inputs.e2e-playwright-image }}", "fixture-image")
+                script_text = script_text.replace("${{ inputs.frontend-path }}", "frontend")
+                script_text = script_text.replace("${{ github.workspace }}", str(root))
+                script_text = script_text.replace("${{ inputs.e2e-seed-command }}", "seed")
+                script_text = script_text.replace("${{ inputs.e2e-capture-command }}", "node tests/capture/capture.js")
+                # Constrain PATH and refuse a real Docker binary before running
+                # the extracted workflow, including under Windows Git Bash.
+                script_text = 'PATH="$PWD/bin:/usr/bin:/bin"\nexport PATH\n[ "$(command -v docker)" = "$PWD/bin/docker" ] || exit 99\n' + script_text
+                script.write_text(script_text, encoding="utf-8")
+                docker_log = root / "docker.log"
+                environment = dict(os.environ)
+                environment.update(
+                    PATH=f"{bin_dir}{os.pathsep}{environment.get('PATH', '')}",
+                    DOCKER_LOG=str(docker_log),
+                    CELLS=cells,
+                    ENUM_STATUS=str(enum_status),
+                    RESEED_STATUS=str(reseed_status),
+                    CAPTURE_STATUS=str(capture_status),
+                    E2E_APP_CONTAINER="app",
+                    APP_PORT="8000",
+                )
+                environment.pop("BASH_ENV", None)
+                result = subprocess.run(
+                    [CAPTURE_BASH, "--noprofile", "--norc", str(script)], cwd=root, env=environment,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                calls = docker_log.read_text(encoding="utf-8").splitlines()
+                self.assertIn("node -e", "\n".join(calls))
+                if enum_status or not cells:
+                    self.assertEqual(len(calls), 1, calls)
+                elif reseed_status:
+                    self.assertTrue(any(call.startswith("exec app") for call in calls), calls)
+                    self.assertFalse(any("--routes=cell-a" in call for call in calls), calls)
+                    if len(cells.split()) > 1:
+                        self.assertTrue(any("--routes=cell-b" in call for call in calls), calls)
+                elif capture_status == 7:
+                    self.assertTrue(any("capture.js" in call for call in calls), calls)
 
 if __name__ == "__main__":
     unittest.main()

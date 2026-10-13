@@ -164,6 +164,10 @@ on:
       e2e-capture-output-path:
         type: string
         default: 'tests/capture/output'
+      e2e-capture-gate:
+        description: 'Fail the E2E job when screen capture fails. Requires run-e2e: true.'
+        type: boolean
+        default: false
       e2e-mail-dir:
         type: boolean
         default: false
@@ -199,6 +203,12 @@ jobs:
         if: ${{ inputs.run-e2e && (inputs.e2e-settings-module == '' || inputs.e2e-seed-command == '' || inputs.e2e-playwright-image == '') }}
         run: |
           echo "::error::run-e2e: true requires e2e-settings-module, e2e-seed-command and e2e-playwright-image to all be set."
+          exit 1
+
+      - name: e2e-capture-gate requires run-e2e
+        if: ${{ inputs.e2e-capture-gate && !inputs.run-e2e }}
+        run: |
+          echo "::error::e2e-capture-gate: true requires run-e2e: true."
           exit 1
 
   backend:
@@ -789,7 +799,7 @@ jobs:
 
       - name: Capture E2E screens and report
         if: always()
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.e2e-capture-gate }}
         working-directory: ${{ inputs.frontend-path }}
         run: |
           set +e
@@ -804,11 +814,11 @@ jobs:
           cells_status=$?
           if [ "$cells_status" -ne 0 ]; then
             echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."
-            exit 0
+            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then exit "$cells_status"; else exit 0; fi
           fi
           if [ -z "$CELLS" ]; then
             echo "::warning::E2E capture: no cells found in tests/capture/manifest.json."
-            exit 0
+            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then exit 1; else exit 0; fi
           fi
           worst=0
           for cell in $CELLS; do
@@ -839,6 +849,10 @@ jobs:
             fi
           done
           if [ "$worst" -ne 0 ]; then
+            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then
+              echo "::error::E2E capture failed (blocking)."
+              exit "$worst"
+            fi
             echo "::warning::E2E capture failed (non-blocking)."
           else
             echo "::notice::E2E capture completed."

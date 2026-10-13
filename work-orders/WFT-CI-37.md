@@ -82,3 +82,33 @@ innoservice; app points at app-ci.yml@ci-test/WFT-CI-37. Prove gate=true green
 and deliberate capture failure red with artifact retained before main landing.
 Respect estate CI budget; the earlier ONE exception was consumed by run38444366349,
 not reusable here. App opt-in waits for FIX11/12/13 landing. No app promotion.
+
+Accepted initial native instance `/root/capture_gate_initial`, explicit requested
+gpt-6-luna/high, fresh context; effective native model/provider metadata unexposed.
+Delivered only the two assigned files, no commits. Own scoped class run6passed1skip
+was not acceptance. Parent corrected integration findings: YAML colon quoting,
+preserved original mail-test class ownership, live mutation fixture anchors,
+and Windows-safe Bash capture fixtures with strict stub-only PATH.
+Authoritative affected file:81tests79passed2pre-existing Linux-only mail skips;
+all11 capture shell scenarios execute and pass, including earlier failure followed
+by a successful cell. Gate-r1 four independent concurrent codex/gpt-6-luna/openai
+read-only lenses:2 deduplicated raised,1 accepted,worst accepted defect.
+Aggregation fixture gap accepted/fixed; requiring unit execution of GitHub's
+artifact upload rejected because the unchanged always-upload step is structurally
+pinned and real negative paired CI must prove retained artifacts before landing.
+Source-only corrected review and paired CI proofs remain pending; no main push.
+
+Corrected gate-r2 accepted the concrete artifact ordering/action-stub countercase:
+parsed YAML now pins capture < upload < cleanup, upload always(), real
+upload-artifact action and exact artifact name/output path. Parent affected-file
+run remains81tests79passed2pre-existing Linux mail skips, all11 capture shell
+cases executed. Gate-r3 four fresh concurrent readonly codex/gpt-6-luna/openai
+lenses completed: envelope/regression/duplication no findings. Tests R1 claimed
+empty-cell exit mutation could escape; rejected against the actual enabled empty
+case expecting exit1 versus disabled exit0 at test lines1035-1036, checked by
+assertEqual(returncode, expected) at1094. Returning0 there fails the enabled
+scenario; no requirement for additional self-mutation tests is in Part A.
+Across rounds:3 deduplicated raised,2accepted,worst accepted defect. Source
+review is complete; paired green/red CI and retained-artifact proof remain open.
+Operator explicitly approved scoped source/WO/repo-context transmission to
+configured OpenAI/Luna reviews and the74 E2E test capture images2026-10-13.
