@@ -1,0 +1,231 @@
+{
+  "shared_source_candidate": "009474e; source/test files unchanged through final review",
+  "positive": {
+    "run_id": 38601444526,
+    "head_sha": "bddadfba47bb7d2b04b52146d4c19f5273e88610",
+    "five_jobs_green": true,
+    "capture_records": 74,
+    "mechanical_failures": 0
+  },
+  "regular_negative": {
+    "run_id": 38610424378,
+    "head_sha": "196c9ec6a9e67cdc25e0bc518c35537c0c75db9b",
+    "conclusion": "failure",
+    "expected_failure": true,
+    "jobs": {
+      "frontend": "success",
+      "backend": "success",
+      "security": "success",
+      "validate_inputs": "success",
+      "e2e": "failure"
+    },
+    "regular_step": "failure",
+    "intentional_failures": {
+      "file": "tests/000-ci-collection-proof.spec.js",
+      "widths": [
+        "desktop",
+        "mobile"
+      ],
+      "exact_marker": "CI_COLLECTION_PROOF_INTENTIONALLY_ABSENT",
+      "timeout_ms": 1000,
+      "retained_traces": 2,
+      "retained_error_contexts": 2,
+      "no_other_regular_failure_artifacts": true
+    },
+    "continuation": {
+      "regular_files_reseeded": 23,
+      "later_existing_spec_files_passed": 22,
+      "later_cases_passed": 89,
+      "reseed_summaries": [
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T17:59:05.5053957Z ##[notice]reseeding before tests/000-ci-collection-proof.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T17:59:23.5888150Z ##[notice]reseeding before tests/admin-client-contact.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:00:03.2449309Z ##[notice]reseeding before tests/admin-project-access.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:01:06.3073000Z ##[notice]reseeding before tests/admin-role-tool-right.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:01:54.1123521Z ##[notice]reseeding before tests/admin-work-codes.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:02:37.6250019Z ##[notice]reseeding before tests/billing-discounts.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:03:13.8323769Z ##[notice]reseeding before tests/delivery-note-pdf.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:03:44.1431943Z ##[notice]reseeding before tests/delivery-note.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:04:39.7493980Z ##[notice]reseeding before tests/first-visit.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:05:18.2105702Z ##[notice]reseeding before tests/login-access.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:05:52.4186283Z ##[notice]reseeding before tests/measurement-first-save.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:06:18.9455070Z ##[notice]reseeding before tests/order-create.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:07:00.7410472Z ##[notice]reseeding before tests/place-structure.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:07:38.0158062Z ##[notice]reseeding before tests/plan-draw.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:08:48.2366924Z ##[notice]reseeding before tests/plan-points.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:09:40.7720977Z ##[notice]reseeding before tests/plan-sources.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:12:06.7871719Z ##[notice]reseeding before tests/plan-values.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:12:44.5144291Z ##[notice]reseeding before tests/project-header.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:13:13.0953605Z ##[notice]reseeding before tests/responsive-home.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:13:54.9951811Z ##[notice]reseeding before tests/responsive-protocol-settings.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:14:56.0345796Z ##[notice]reseeding before tests/room-protocol.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:17:00.0258465Z ##[notice]reseeding before tests/time-entries.spec.js",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:17:43.2489126Z ##[notice]reseeding before tests/visit-record.spec.js"
+      ],
+      "passed_summaries": [
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:00:02.9421180Z   2 passed (27.3s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:01:06.0609431Z   2 passed (49.3s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:01:53.5302728Z   2 passed (34.8s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:02:37.3780406Z   2 passed (30.4s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:03:13.4211764Z   2 passed (23.5s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:03:43.9074018Z   2 passed (17.7s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:04:39.4443742Z   6 passed (43.2s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:05:17.8284328Z   2 passed (24.4s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:05:52.1202315Z   4 passed (19.4s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:06:18.7032948Z   1 passed (13.2s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:07:00.3815888Z   4 passed (28.7s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:07:37.5982234Z   2 passed (22.6s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:08:47.9583838Z   6 passed (57.7s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:09:40.2902476Z   4 passed (39.5s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:12:06.5058870Z   14 passed (2.2m)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:12:44.2218008Z   2 passed (25.5s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:13:12.8254937Z   4 passed (16.4s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:13:54.7305639Z   2 passed (29.6s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:14:55.8127914Z   10 passed (49.1s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:16:59.7922532Z   10 passed (1.9m)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:17:43.0128833Z   4 passed (29.0s)",
+        "ci / e2e\tUNKNOWN STEP\t2026-10-14T18:18:09.4714989Z   2 passed (14.5s)"
+      ],
+      "per_file_reseed_observed": true
+    },
+    "artifacts": {
+      "failure": "e2e-failures-38610424378-1",
+      "capture": "e2e-capture-38610424378-1",
+      "uploads_success": true,
+      "sentinel_traces_survive_all_later_regular_and_quarantine_invocations": true
+    },
+    "capture": {
+      "step": "success",
+      "cells": 74,
+      "mechanical_failures": 0,
+      "axe_critical_serious": 0,
+      "same_source_clean_tree": true,
+      "images_reviewed": 0
+    },
+    "existing_quarantines": [
+      "INNO-FIX-22",
+      "INNO-FIX-23"
+    ],
+    "proof": "WFT-CI-38 collection-enabled real negative continuation/nonzero/artifact evidence satisfied. Source reviews and87affected tests already recorded. Shared landing still waits for separate WFT-CI-37 capture-negative proof and clean source/reference restoration."
+  },
+  "capture_negative": {
+    "run_id": 38617202940,
+    "head_sha": "703791baf0933856ef7e5a5875a8e86dd3fa40cc",
+    "conclusion": "failure",
+    "expected_failure": true,
+    "jobs": {
+      "backend": "success",
+      "frontend": "success",
+      "security": "success",
+      "validate_inputs": "success",
+      "e2e": "failure"
+    },
+    "regular_step": "success",
+    "capture_step": "failure",
+    "capture_upload": "success",
+    "artifact": "e2e-capture-38617202940-1",
+    "capture": {
+      "records": 74,
+      "failed_records": [
+        {
+          "id": "home-project-admin-populated",
+          "width": 1280,
+          "failures": [
+            "state verification failed: locator.waitFor: Timeout 15000ms exceeded."
+          ]
+        },
+        {
+          "id": "home-project-admin-populated",
+          "width": 375,
+          "failures": [
+            "state verification failed: locator.waitFor: Timeout 15000ms exceeded."
+          ]
+        }
+      ],
+      "later_successful_records": 72,
+      "axe_critical_serious_on_successful_records": 0,
+      "same_source_clean_tree": true,
+      "images_reviewed": 0
+    },
+    "controlled_source_fault": "Only first existing home-project cell adds exact absent marker CI_CAPTURE_PROOF_INTENTIONALLY_ABSENT; all existing regular tests restored. Observed first-cell state-verification timeouts match this deliberate fault; reports contain generic timeout, not marker text.",
+    "proof": "Regular specs green; mechanical capture failure makes E2E/job red; later records and always-upload artifact survive. Paired WFT-CI-37 real gate proof satisfied.",
+    "finalize_remaining": [
+      "Remove temporary marker.",
+      "Land reviewed/tested shared source on main.",
+      "Restore app stable @main reference and remove evidence-only capture input before prerequisite package delivery.",
+      "Final app verification and develop landing; permanent E2E-6 still follows FIX11/12/13 landing."
+    ]
+  },
+  "final_reviews": [
+    {
+      "lens": "envelope",
+      "runtime": "codex",
+      "model": "gpt-6-luna",
+      "provider": "openai",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "status": {
+        "lens": "envelope",
+        "exit_code": 0,
+        "elapsed_seconds": 16.2
+      },
+      "final_report": "Mode: Analysis\n\nFindings:\nNo findings.\n\nEvidence:\n- Diff inspected: yes — the supplied shared-source and test diff, reviewed against Part A of WFT-CI-37 and WFT-CI-38.\n- Files inspected: `.github/workflows/app-ci.yml`; `.github/scripts/test_app_ci_e2e_job.py`.\n- Commands run: read-only `git diff --stat` and `git status` scoped to those files; no tests, build, or app run. The commands returned no file-change output; Git emitted only permissions warnings for its global ignore file.\n- Orchestrator evidence: affected-file run **87 passed, 2 pre-existing Linux-only mail skips, 13 subtests passed**. Positive paired CI run **38601444526** had all five jobs green and all 74 capture records clean. Regular-failure proof **38610424378** failed on the deliberate sentinel while 22 later files passed (89 cases); both sentinel traces and error contexts survived later regular and quarantine invocations, and capture uploaded 74 clean records. Capture-failure proof **38617202940** failed at the deliberate first-cell fault, uploaded the artifact, and completed 72 later records.\n\nResidual risks:\n- These are candidate CI proofs; the shared main landing and final app reference restoration are still pending. Per the stated scope, permanent E2E-6 opt-in remains separate.\n- Review is limited to the supplied diff and named files; no new image inspection was performed."
+    },
+    {
+      "lens": "regression",
+      "runtime": "codex",
+      "model": "gpt-6-luna",
+      "provider": "openai",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "status": {
+        "lens": "regression",
+        "exit_code": 0,
+        "elapsed_seconds": 15.0
+      },
+      "final_report": "Findings:\nNo findings.\n\nEvidence:\n- Diff inspected: yes — the approved WFT-CI-37 and WFT-CI-38 workflow and test changes.\n- Files inspected: `.github/workflows/app-ci.yml`, `.github/scripts/test_app_ci_e2e_job.py`.\n- Commands run: one read-only `rg` check of the workflow’s input guards, E2E steps, and surrounding shell context.\n- Orchestrator evidence: 87 affected tests passed, 2 pre-existing Linux-only mail skips, and 13 subtests passed. Positive paired CI had all five jobs green and all 74 capture records clean. Separate negative runs showed regular-spec collection failing the job while 22 later files (89 cases) passed and failure artifacts survived; capture gating also failed the job while its upload succeeded and 72 later records completed.\n\nResidual risks:\n- Static review did not independently inspect caller repositories or rerun CI; conclusions rely on the supplied shared-candidate and paired-run evidence."
+    },
+    {
+      "lens": "duplication",
+      "runtime": "codex",
+      "model": "gpt-6-luna",
+      "provider": "openai",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "status": {
+        "lens": "duplication",
+        "exit_code": 0,
+        "elapsed_seconds": 20.2
+      },
+      "final_report": "Findings:\nNo findings.\n\nEvidence:\n- Diff inspected: yes — approved WFT-CI-37/38 source and test diff, scoped to the two assigned files.\n- Files inspected: `webapp-management/SHARED_CAPABILITIES.md`; `.github/workflows/app-ci.yml`; `.github/scripts/test_app_ci_e2e_job.py`.\n- No named export, component, or registry entry in the shared capability index anchors either workflow capability.\n- Commands run: narrow read-only `git diff`/`rg` inspection and a directory/index read; no tests or builds run.\n- Orchestrator evidence: 87 passed, 2 pre-existing Linux-only mail skips, and 13 subtests passed. Paired CI showed the positive run green; the regular-spec negative run failed as intended while 22 later files passed and failure artifacts were retained; the capture negative run failed as intended while 72 later records succeeded and the capture artifact uploaded.\n\nResidual risks:\n- The shared index documents dcm/ucm capability categories, not an exhaustive inventory of exports. No specific matching anchor is identified there; the inspected changes are workflow-level behavior in `workflow-templates`."
+    },
+    {
+      "lens": "tests",
+      "runtime": "codex",
+      "model": "gpt-6-luna",
+      "provider": "openai",
+      "effort": "medium",
+      "sandbox": "read-only",
+      "status": {
+        "lens": "tests",
+        "exit_code": 0,
+        "elapsed_seconds": 13.9
+      },
+      "final_report": "Findings:\n- The new and changed assertions pin the intended behavior. I found none that would still pass with the approved changes reverted or with the workflow replaced by a hardcoded stub.\n- The structural assertions pin both opt-in defaults, invalid input combinations, capture failure policy, output isolation, and artifact upload configuration. The extracted-shell fixtures check actual exit status and Docker invocation order across success, failure, reseed, empty-set, and continuation cases. The collision fixture also checks that regular and quarantine outputs retain distinct markers.\n- The artifact-upload contract is structurally pinned in the tests; the paired negative CI runs provide runtime evidence that failed-run artifacts were uploaded and retained.\n- Orchestrator evidence: positive run 38601444526 passed all five jobs with 74 clean capture records. Regular-negative run 38610424378 failed at the deliberate sentinel while 22 later files passed; capture and failure artifacts uploaded, with sentinel traces and error contexts retained. Capture-negative run 38617202940 failed at the deliberate capture fault; the capture artifact uploaded and 72 later records succeeded. These results corroborate the test contracts; they do not replace the diff review.\n\nEvidence:\n- Diff inspected: yes\n- Files inspected: `.github/scripts/test_app_ci_e2e_job.py`, `.github/workflows/app-ci.yml`\n- Commands run: none — static review\n\nResidual risks:\n- Static review did not independently verify the cited CI artifacts or rerun tests; those results are from the Orchestrator’s supplied evidence."
+    }
+  ],
+  "final_source_findings": {
+    "raised": 0,
+    "accepted": 0,
+    "open": 0
+  },
+  "affected_test_gate": {
+    "command": "python -m pytest .github/scripts/test_app_ci_e2e_job.py -q --tb=short",
+    "passed": 87,
+    "skipped": 2,
+    "skip_reason": "pre-existing Linux-only mail tests",
+    "subtests_passed": 13,
+    "seconds": 7.88,
+    "runtime_note": "Default Windows sandbox attempts hit PermissionError creating/cleaning own temporary fixture folders; unchanged scoped command with runtime escalation passed. No source edits or new skips."
+  },
+  "publication": "Approved automatic main landing; app stable-reference restoration follows. Permanent E2E-6 remains separate and prerequisite-gated."
+}

@@ -112,3 +112,7 @@ Across rounds:3 deduplicated raised,2accepted,worst accepted defect. Source
 review is complete; paired green/red CI and retained-artifact proof remain open.
 Operator explicitly approved scoped source/WO/repo-context transmission to
 configured OpenAI/Luna reviews and the74 E2E test capture images2026-10-13.
+
+## Final gates and automatic publication
+
+Final shared gate2026-10-14: explicit initial Luna authors retained; final four concurrent independent codex/gpt-6-luna/medium envelope/regression/duplication/tests all clean,0open. Unchanged affected file87passed2pre-existing Linux skips13subtests7.88s. Positive38601444526 allfive jobs/capture74green; regular-negative38610424378 only sentinel fails,23reseeds/22later files89cases pass/early artifacts retained; capture-negative38617202940 regulargreen,first cell2widths fail,72later records/artifact retained. [Final source/real-proof evidence](assets/WFT-CI-37-38-final-proof.json). App temporary faults removed locally; shared main publication automatic on these gates. Permanent app capture opt-in still follows FIX11/12/13 landing.
