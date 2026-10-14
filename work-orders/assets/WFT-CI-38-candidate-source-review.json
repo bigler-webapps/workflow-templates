@@ -1,0 +1,81 @@
+{
+  "status": "source-reviewed; paired CI pending",
+  "date": "2026-10-14",
+  "review": {
+    "runtime": "codex",
+    "model": "gpt-6-luna",
+    "lenses": [
+      "envelope",
+      "regression",
+      "duplication",
+      "tests"
+    ],
+    "batch": "spec-collect-r1",
+    "clarifications": "spec-collect-r2 envelope/tests",
+    "raised": 5,
+    "accepted": 0,
+    "open_accepted": 0,
+    "dispositions": [
+      {
+        "id": "envelope.R1",
+        "accepted": false,
+        "reason": "Temporary capture proof explicitly authorized in WFT-CI-38 Part C; not permanent E2E-6. Clarification review confirms no scope defect."
+      },
+      {
+        "id": "envelope.R2",
+        "accepted": false,
+        "reason": "Actual shared input default is false; caller explicitly true. Candidate source is pushed before caller. Claimed alternate default has no evidence."
+      },
+      {
+        "id": "tests.R1",
+        "accepted": false,
+        "reason": "Unchanged artifact assertions deliberately pin required preservation; new stub shell cases pin changed output isolation and marker survival."
+      },
+      {
+        "id": "tests.R2",
+        "accepted": false,
+        "reason": "Capture upload preservation is explicitly required by WFT-CI-37, independently of the new failure policy."
+      },
+      {
+        "id": "tests.R3",
+        "accepted": false,
+        "reason": "INNO-CI-2 Envelope expressly specifies no unit tests, paired real caller green/red proof required and still pending."
+      }
+    ]
+  },
+  "tests": {
+    "command": "python -m pytest .github/scripts/test_app_ci_e2e_job.py -q --tb=short --junitxml=scratchpad/ci38-parent-r2.xml",
+    "passed": 87,
+    "skipped": 2,
+    "subtests_passed": 13,
+    "failures": 0,
+    "errors": 0,
+    "logs": "workflow-templates/scratchpad/ci38-parent-r2.log",
+    "note": "Two pre-existing Linux-only mail skips. Runtime includes overnight host interruption; no gate timeout changed."
+  },
+  "initial_authors": {
+    "shared": "/root/spec_failure_collection",
+    "app": "/root/ci2_optin",
+    "requested_model": "gpt-6-luna",
+    "requested_effort": "high",
+    "effective_native_metadata": "not exposed",
+    "inherited_cwd": "workspace root",
+    "target_cwd": "respective repo absolute paths per WO"
+  },
+  "parent_fixes": [
+    "Restored read-only quarantine block/output path",
+    "Fixed fixture stub PATH and workflow substitutions",
+    "Updated existing trace-contract mutation anchor without weakening assertion"
+  ],
+  "proofs_pending": [
+    "all-pass real caller",
+    "controlled regular-spec failure retains artifacts and later execution",
+    "controlled capture failure with retained capture artifact"
+  ],
+  "temporary_capture_probe": "Remove before prerequisite app landing; ordinary E2E-6 still waits for FIX11/12/13 and fresh Luna author",
+  "source_hashes": {
+    "workflow-templates\\.github\\workflows\\app-ci.yml": "723dcef5f3f9cda193eadf1bcb123299f368763dbb6e5cd52f80a4b3c5e18957",
+    "workflow-templates\\.github\\scripts\\test_app_ci_e2e_job.py": "61cbddbc60f7b933646680235860e1804478aa54c796880f12f73bcb4d00ec10",
+    "innoservice\\.github\\workflows\\ci.yml": "1f7a3fc9881b28ef77d0761a692aeae432485e042263c84622f07f760a7fc2af"
+  }
+}

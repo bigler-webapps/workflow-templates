@@ -81,6 +81,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             "e2e-capture-command": ("string", "'node tests/capture/capture.js'"),
             "e2e-capture-output-path": ("string", "'tests/capture/output'"),
             "e2e-capture-gate": ("boolean", "false"),
+            "e2e-collect-spec-failures": ("boolean", "false"),
             "e2e-mail-dir": ("boolean", "false"),
         }
         for name, (input_type, default) in expected.items():
@@ -648,8 +649,8 @@ class WftCi32StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_gating_trace_flag_is_dropped(self):
         mutated_text = CI_WORKFLOW.replace(
-            "npx playwright test '$f' --trace retain-on-failure\"; then",
-            "npx playwright test '$f'\"; then",
+            "npx playwright test '$f' --trace retain-on-failure$OUTPUT_ARGS\"; then",
+            "npx playwright test '$f'$OUTPUT_ARGS\"; then",
             1,
         )
         self.assertNotEqual(mutated_text, CI_WORKFLOW, "fixture setup did not match live gating invocation")
@@ -1103,6 +1104,211 @@ class WftCi37CaptureGateTests(unittest.TestCase):
                         self.assertTrue(any("--routes=cell-b" in call for call in calls), calls)
                 elif capture_status == 7:
                     self.assertTrue(any("capture.js" in call for call in calls), calls)
+
+class WftCi38SpecFailureTests(unittest.TestCase):
+    def test_collection_input_is_opt_in_and_requires_run_e2e(self):
+        self.assertRegex(
+            INPUTS_BLOCK,
+            r"      e2e-collect-spec-failures:\n        description: '[^\n]+'\n        type: boolean\n        default: false\n",
+        )
+        guard = step_body(VALIDATE_JOB, "e2e-collect-spec-failures requires run-e2e")
+        self.assertIn("inputs.e2e-collect-spec-failures && !inputs.run-e2e", guard)
+        self.assertIn("exit 1", guard)
+
+    def test_regular_outputs_are_isolated_and_failure_artifact_is_retained(self):
+        specs = step_body(E2E_JOB, "Playwright specs")
+        quarantine = step_body(E2E_JOB, "Playwright quarantine specs")
+        self.assertIn('OUTPUT_SUBDIR="test-results/regular-$(printf \'%03d\' "$idx")-', specs)
+        self.assertIn("OUTPUT_ARGS=\" --output '$OUTPUT_SUBDIR'\"", specs)
+        self.assertIn('--trace retain-on-failure$OUTPUT_ARGS', specs)
+        self.assertIn('OUTPUT_SUBDIR="test-results/$(printf \'%03d\' "$idx")-', quarantine)
+        upload = find_step(load_e2e_steps(), "Upload E2E failure artifacts")
+        self.assertEqual(upload["with"]["path"], "${{ inputs.frontend-path }}/test-results")
+        self.assertEqual(upload["with"]["retention-days"], 7)
+        self.assertIn("failure()", upload["if"])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_false_input_exits_on_first_spec_failure(self):
+        result, calls, _ = self._run_regular(collect=False, fail_spec="tests/first.spec.js")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self._spec_calls(calls), ["tests/first.spec.js"])
+        self.assertEqual(self._reseed_count(calls), 1)
+        self.assertFalse(any("--output" in call for call in calls))
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_collection_runs_later_specs_after_failure_and_fails_job(self):
+        result, calls, markers = self._run_regular(collect=True, fail_spec="tests/first.spec.js")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._spec_calls(calls), ["tests/first.spec.js", "tests/second.spec.js"])
+        self.assertEqual(self._reseed_count(calls), 2)
+        self.assertEqual(sorted(markers.values()), ["tests/first.spec.js", "tests/second.spec.js"])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_collection_all_pass_returns_zero(self):
+        for collect in (False, True):
+            with self.subTest(collect=collect):
+                result, calls, _ = self._run_regular(collect=collect)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self._spec_calls(calls), ["tests/first.spec.js", "tests/second.spec.js"])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_reseed_failure_is_fatal_before_running_stale_spec(self):
+        result, calls, _ = self._run_regular(
+            collect=True, fail_spec="tests/first.spec.js", reseed_fail_at=2
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._spec_calls(calls), ["tests/first.spec.js"])
+        self.assertEqual(self._reseed_count(calls), 2)
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_empty_regular_spec_set_is_fatal(self):
+        result, calls, _ = self._run_regular(collect=True, spec_files=())
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._spec_calls(calls), [])
+        self.assertEqual(calls, [])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_colliding_regular_names_keep_markers_when_quarantine_runs_afterward(self):
+        files = ("tests/a/b.spec.js", "tests/a-b.spec.js", "tests/quarantine.spec.js")
+        result, calls, workdir = self._run_regular(
+            collect=True,
+            fail_spec="tests/a/b.spec.js",
+            spec_files=files,
+            run_quarantine=True,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        spec_calls = self._spec_calls(calls)
+        expected = ["tests/a-b.spec.js", "tests/a/b.spec.js", "tests/quarantine.spec.js"]
+        self.assertEqual(spec_calls, expected)
+        markers = workdir
+        self.assertEqual(len(markers), 3, markers)
+        self.assertEqual(
+            sorted(markers.values()),
+            sorted(files),
+        )
+        self.assertEqual(
+            set(markers),
+            {
+                "regular-001-tests-a-b.spec.js",
+                "regular-002-tests-a-b.spec.js",
+                "001-tests-quarantine.spec.js",
+            },
+        )
+
+    @staticmethod
+    def _spec_calls(calls):
+        result = []
+        for call in calls:
+            match = re.search(r"playwright test '([^']+)'", call)
+            if match:
+                result.append(match.group(1))
+        return result
+
+    @staticmethod
+    def _reseed_count(calls):
+        return sum(call.startswith("exec app ") for call in calls)
+
+    def _run_regular(
+        self,
+        *,
+        collect,
+        fail_spec="",
+        reseed_fail_at=0,
+        spec_files=("tests/first.spec.js", "tests/second.spec.js"),
+        run_quarantine=False,
+    ):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            workdir = root / "frontend"
+            bin_dir = root / "bin"
+            workdir.mkdir()
+            bin_dir.mkdir()
+            for spec in spec_files:
+                if not spec.endswith("quarantine.spec.js"):
+                    source = workdir / spec
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text("test('regular spec', () => {});\n", encoding="utf-8")
+                else:
+                    source = workdir / spec
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text("test('@quarantine spec', () => {});\n", encoding="utf-8")
+
+            docker_stub = bin_dir / "docker"
+            docker_stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "joined=\"$*\"\n"
+                "printf '%s\\n' \"$joined\" >> \"$DOCKER_LOG\"\n"
+                "if [ \"$1\" = exec ]; then\n"
+                "  count=$(grep -c '^exec app ' \"$DOCKER_LOG\" || true)\n"
+                "  [ \"$count\" = \"$RESEED_FAIL_AT\" ] && [ \"$RESEED_FAIL_AT\" -ne 0 ] && exit 8\n"
+                "  exit 0\n"
+                "fi\n"
+                "case \"$joined\" in *'npx playwright test '*) ;; *) exit 0 ;; esac\n"
+                "spec=$(printf '%s' \"$joined\" | sed -n \"s/.*playwright test '\\([^']*\\)'.*/\\1/p\")\n"
+                "out=$(printf '%s' \"$joined\" | sed -n \"s/.*--output '\\([^']*\\)'.*/\\1/p\")\n"
+                "[ -n \"$out\" ] || out=test-results\n"
+                "case \"$out\" in test-results|test-results/*) ;; *) exit 99 ;; esac\n"
+                "mkdir -p \"$out\"\n"
+                "printf '%s' \"$spec\" > \"$out/marker.txt\"\n"
+                "[ \"$spec\" = \"$FAIL_SPEC\" ] && exit 7\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker_stub.chmod(0o755)
+            log = root / "docker.log"
+            summary = root / "summary.md"
+            env = dict(os.environ)
+            env.update(
+                PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                DOCKER_LOG=str(log),
+                FAIL_SPEC=fail_spec,
+                RESEED_FAIL_AT=str(reseed_fail_at),
+                GITHUB_STEP_SUMMARY=str(summary),
+                GITHUB_OUTPUT=str(root / "output"),
+                E2E_APP_CONTAINER="app",
+                APP_PORT="8000",
+                E2E_MAIL_PW_ARGS="",
+            )
+            env.pop("BASH_ENV", None)
+            prefix = 'FIXTURE_BIN="$(cd ../bin && pwd)"\nPATH="$FIXTURE_BIN:/usr/bin:/bin"\nexport PATH\n[ "$(command -v docker)" = "$FIXTURE_BIN/docker" ] || exit 99\n'
+            replacements = {
+                "${{ inputs.e2e-collect-spec-failures }}": "true" if collect else "false",
+                "${{ inputs.e2e-seed-command }}": "seed",
+                "${{ inputs.e2e-playwright-image }}": "fixture-image",
+                "${{ inputs.frontend-path }}": "frontend",
+                "${{ github.workspace }}": str(root).replace("\\", "/"),
+                "${{ github.run_id }}": "fixture-run",
+                "${{ github.run_attempt }}": "1",
+            }
+            regular = shell_body(step_body(E2E_JOB, "Playwright specs"))
+            for source, destination in replacements.items():
+                regular = regular.replace(source, destination)
+            self.assertNotIn("${{", regular, "unrendered workflow expression in fixture")
+            regular_script = root / "regular.sh"
+            regular_script.write_text(prefix + regular, encoding="utf-8")
+            result = subprocess.run(
+                [CAPTURE_BASH, "--noprofile", "--norc", str(regular_script)],
+                cwd=workdir, env=env, capture_output=True, text=True, check=False,
+            )
+            if run_quarantine:
+                quarantine = shell_body(step_body(E2E_JOB, "Playwright quarantine specs"))
+                for source, destination in replacements.items():
+                    quarantine = quarantine.replace(source, destination)
+                self.assertNotIn("${{", quarantine, "unrendered workflow expression in fixture")
+                quarantine_script = root / "quarantine.sh"
+                quarantine_script.write_text(prefix + quarantine, encoding="utf-8")
+                subprocess.run(
+                    [CAPTURE_BASH, "--noprofile", "--norc", str(quarantine_script)],
+                    cwd=workdir, env=env, capture_output=True, text=True, check=False,
+                )
+            calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+            copied = workdir / "test-results"
+            markers = {
+                marker.parent.name: marker.read_text(encoding="utf-8")
+                for marker in copied.glob("*/marker.txt")
+            } if copied.exists() else {}
+            return result, calls, markers
+
 
 if __name__ == "__main__":
     unittest.main()

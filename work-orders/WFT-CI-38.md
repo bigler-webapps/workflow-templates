@@ -101,3 +101,17 @@ mark CI37 or E2E6 done from this opt-in. Respect queue budget and branch rules.
 Final shared main and app develop references require the actual reviewed/tested
 source; no production promotion. Record tests/reviews/run/artifact, then automatic
 own-path commit/landing-SHA register update/push on green.
+
+## Source checkpoint 2026-10-14
+
+Initial native author /root/spec_failure_collection, requested codex/gpt-6-luna/high, fresh context;
+effective native metadata unexposed. Workspace-root bootstrap, target repo per B.
+Parent integrated fixture corrections and restored unchanged quarantine source.
+Author test attempt was blocked by temporary-path permissions, not model unavailability;
+parent authoritative affected-file run: 87 passed, 2 pre-existing Linux-only mail skips,
+13 subtests passed, zero failures/errors. Four concurrent independent readonly
+Luna lenses plus envelope/tests clarifications: 5 raised, 0 accepted, no open findings.
+See [source evidence](assets/WFT-CI-38-candidate-source-review.json) for dispositions.
+Paired real green/red CI and retained artifacts remain required; no done claim.
+Temporary shared ref and capture proof probe are evidence-only and restored before
+prerequisite landing; permanent E2E6 still requires its own fresh author.

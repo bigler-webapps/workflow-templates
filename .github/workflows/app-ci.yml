@@ -168,6 +168,10 @@ on:
         description: 'Fail the E2E job when screen capture fails. Requires run-e2e: true.'
         type: boolean
         default: false
+      e2e-collect-spec-failures:
+        description: 'Run all regular E2E spec files after failures. Requires run-e2e: true.'
+        type: boolean
+        default: false
       e2e-mail-dir:
         type: boolean
         default: false
@@ -209,6 +213,12 @@ jobs:
         if: ${{ inputs.e2e-capture-gate && !inputs.run-e2e }}
         run: |
           echo "::error::e2e-capture-gate: true requires run-e2e: true."
+          exit 1
+
+      - name: e2e-collect-spec-failures requires run-e2e
+        if: ${{ inputs.e2e-collect-spec-failures && !inputs.run-e2e }}
+        run: |
+          echo "::error::e2e-collect-spec-failures: true requires run-e2e: true."
           exit 1
 
   backend:
@@ -666,10 +676,18 @@ jobs:
             echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"
             exit 1
           fi
+          failed=0
+          idx=0
           for f in $GATING_FILES; do
+            idx=$((idx + 1))
             echo "::notice::reseeding before $f"
             docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
-            if ! docker run --rm --network host \
+            OUTPUT_ARGS=""
+            if [ "${{ inputs.e2e-collect-spec-failures }}" = "true" ]; then
+              OUTPUT_SUBDIR="test-results/regular-$(printf '%03d' "$idx")-$(echo "$f" | tr '/' '-')"
+              OUTPUT_ARGS=" --output '$OUTPUT_SUBDIR'"
+            fi
+            if docker run --rm --network host \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
               -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
@@ -678,13 +696,21 @@ jobs:
               -w "/workspace/${{ inputs.frontend-path }}" \
               ${E2E_MAIL_PW_ARGS:-} \
               "${{ inputs.e2e-playwright-image }}" \
-              bash -lc "npx playwright test '$f' --trace retain-on-failure"; then
+              bash -lc "npx playwright test '$f' --trace retain-on-failure$OUTPUT_ARGS"; then
+              :
+            else
               echo "::error::$f failed -- trace and error context: artifact e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}"
               echo "### Spec failure: \`$f\`" >> "$GITHUB_STEP_SUMMARY"
               echo "Trace + error context: artifact \`e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}\`" >> "$GITHUB_STEP_SUMMARY"
-              exit 1
+              failed=1
+              if [ "${{ inputs.e2e-collect-spec-failures }}" != "true" ]; then
+                exit 1
+              fi
             fi
           done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Playwright quarantine specs
         id: quarantine
