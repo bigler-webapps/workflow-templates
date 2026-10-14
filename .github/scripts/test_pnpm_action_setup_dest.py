@@ -101,12 +101,13 @@ class CI21StructuralTests(unittest.TestCase):
         self.assertNotIn("runner.temp", dest)
 
     def test_security_job_still_does_not_use_the_action(self):
-        """CI-21's Envelope correction: security provisions pnpm via corepack, not this
+        """CI-21's Envelope correction: security invokes pnpm via corepack, not this
         action -- guard against the fix later being (wrongly) duplicated onto a step
         that was never part of the race."""
         security_job = CI_WORKFLOW.split("\n  security:\n", 1)[1].split("\n  frontend:\n", 1)[0]
         self.assertNotIn("pnpm/action-setup", security_job)
-        self.assertIn("corepack enable", security_job)
+        self.assertIn("corepack pnpm audit --audit-level high", security_job)
+        self.assertNotIn("corepack enable", security_job)
 
 
 if __name__ == "__main__":

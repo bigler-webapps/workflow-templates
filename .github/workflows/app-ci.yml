@@ -434,8 +434,7 @@ jobs:
         shell: bash
         run: |
           if [ -f ${{ inputs.frontend-path }}/pnpm-lock.yaml ]; then
-            corepack enable
-            (cd ${{ inputs.frontend-path }} && pnpm audit --audit-level high) || echo "::warning::pnpm audit findings (non-blocking v1)"
+            (cd ${{ inputs.frontend-path }} && corepack pnpm audit --audit-level high) || echo "::warning::pnpm audit findings (non-blocking v1)"
           fi
         continue-on-error: true
 
