@@ -61,6 +61,50 @@ class PnpmAuditCorepackTests(unittest.TestCase):
         )
         self.assertIn("continue-on-error: true", self.step)
 
+    def test_security_node_setup_uses_frontend_pin_and_precedes_audit(self):
+        setup = step_body(SECURITY_JOB, "Set up Node for the pnpm audit")
+        frontend_job = CI_WORKFLOW.split("\n  frontend:\n", 1)[1]
+        frontend_setup = re.search(
+            r"^      - uses: actions/setup-node@(?P<sha>[0-9a-f]{40})[^\n]*\n"
+            r"        with:\n"
+            r"          node-version: (?P<version>[^\n]+)",
+            frontend_job,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(frontend_setup, "frontend setup-node pin/input not found")
+        assert frontend_setup is not None
+        self.assertIn(
+            f"uses: actions/setup-node@{frontend_setup.group('sha')}",
+            setup,
+            "security must reuse the frontend's pinned setup-node action",
+        )
+        self.assertIn(
+            f"node-version: {frontend_setup.group('version')}",
+            setup,
+            "security must use the frontend's node-version input",
+        )
+        self.assertEqual(
+            frontend_setup.group("sha"),
+            "49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "the frontend's approved setup-node pin changed",
+        )
+        self.assertEqual(frontend_setup.group("version"), "${{ inputs.node-version }}")
+        self.assertRegex(
+            setup,
+            r"(?m)^        if: " + re.escape("${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.frontend-path)) != '' }}") + r"$",
+        )
+        self.assertNotIn("run-frontend-tests", setup)
+        self.assertRegex(setup, r"(?m)^        continue-on-error: true$")
+        self.assertRegex(
+            setup,
+            r"(?m)^        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020[^\n]*\n"
+            r"        with:\n          node-version: " + re.escape("${{ inputs.node-version }}") + r"\n",
+        )
+        self.assertLess(
+            SECURITY_JOB.index("- name: Set up Node for the pnpm audit"),
+            SECURITY_JOB.index("- name: pnpm audit (report-only)"),
+        )
+
     @unittest.skipUnless(CAPTURE_BASH, "Bash is required to execute the extracted workflow step")
     def test_lockfile_runs_audit_in_frontend_and_forwards_arguments(self):
         result, cwd, args = self._run_step(lockfile=True)
