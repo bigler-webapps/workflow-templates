@@ -19,6 +19,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = (ROOT / ".github/workflows/app-ci.yml").read_text(encoding="utf-8")
+SPESIX_CI_PATH = ROOT.parent / "spesix/.github/workflows/ci.yml"
 INPUTS_BLOCK = CI_WORKFLOW.split("workflow_call:\n    inputs:\n", 1)[1].split(
     "\n    secrets:\n", 1
 )[0]
@@ -102,6 +103,7 @@ class WftCi30StructuralTests(unittest.TestCase):
             "e2e-capture-output-path": ("string", "'tests/capture/output'"),
             "e2e-capture-gate": ("boolean", "false"),
             "e2e-collect-spec-failures": ("boolean", "false"),
+            "e2e-spec-files": ("string", "''"),
             "e2e-mail-dir": ("boolean", "false"),
         }
         for name, (input_type, default) in expected.items():
@@ -556,7 +558,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_gating_specs_stop_failing_loudly_on_empty_bucket(self):
         mutated = E2E_JOB.replace(
-            'if [ -z "$GATING_FILES" ]; then\n            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"\n            exit 1\n          fi\n',
+            'if [ "${#GATING_FILES[@]}" -eq 0 ]; then\n            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"\n            exit 1\n          fi\n',
             "",
             1,
         )
@@ -1232,6 +1234,7 @@ class WftCi38SpecFailureTests(unittest.TestCase):
         self,
         *,
         collect,
+        selection="",
         fail_spec="",
         reseed_fail_at=0,
         spec_files=("tests/first.spec.js", "tests/second.spec.js"),
@@ -1288,6 +1291,7 @@ class WftCi38SpecFailureTests(unittest.TestCase):
                 E2E_APP_CONTAINER="app",
                 APP_PORT="8000",
                 E2E_MAIL_PW_ARGS="",
+                E2E_SPEC_FILES=selection,
             )
             env.pop("BASH_ENV", None)
             prefix = 'FIXTURE_BIN="$(cd ../bin && pwd)"\nPATH="$FIXTURE_BIN:/usr/bin:/bin"\nexport PATH\n[ "$(command -v docker)" = "$FIXTURE_BIN/docker" ] || exit 99\n'
@@ -1328,6 +1332,115 @@ class WftCi38SpecFailureTests(unittest.TestCase):
                 for marker in copied.glob("*/marker.txt")
             } if copied.exists() else {}
             return result, calls, markers
+
+
+class WftCi41SpecSelectionTests(unittest.TestCase):
+    def test_input_defaults_to_full_suite_and_uses_environment_data(self):
+        self.assertRegex(
+            INPUTS_BLOCK,
+            r"      e2e-spec-files:\n        description: '[^\n]+'\n        type: string\n        default: ''\n",
+        )
+        step = step_body(E2E_JOB, "Playwright specs")
+        self.assertIn("E2E_SPEC_FILES: ${{ inputs.e2e-spec-files }}", step)
+        self.assertNotIn("${{ inputs.e2e-spec-files }}", shell_body(step))
+
+    @unittest.skipUnless(SPESIX_CI_PATH.is_file(), "optional sibling consumer integration")
+    def test_spesix_exposes_selection_only_for_manual_dispatch(self):
+        caller = SPESIX_CI_PATH.read_text(encoding="utf-8")
+        dispatch = caller.split("  workflow_dispatch:\n", 1)[1].split(
+            "\npermissions:", 1
+        )[0]
+        self.assertRegex(
+            dispatch,
+            r"    inputs:\n      e2e-spec-files:\n        description: [^\n]+\n        required: false\n        type: string\n        default: ''",
+        )
+        self.assertIn("e2e-spec-files: ${{ inputs.e2e-spec-files }}", caller)
+        self.assertEqual(
+            len(re.findall(r"(?m)^\s+e2e-spec-files:\s*$", caller)),
+            1,
+            "the selection input must be declared only for workflow_dispatch",
+        )
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_blank_selection_runs_the_complete_regular_suite(self):
+        result, calls, _ = WftCi38SpecFailureTests._run_regular(
+            self, collect=False, selection="  \n\t  "
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            WftCi38SpecFailureTests._spec_calls(calls),
+            ["tests/first.spec.js", "tests/second.spec.js"],
+        )
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_subset_is_nested_deduplicated_and_runs_in_discovery_order(self):
+        result, calls, _ = WftCi38SpecFailureTests._run_regular(
+            self,
+            collect=False,
+            spec_files=("tests/second.spec.js", "tests/nested/mobile.spec.js", "tests/first.spec.js"),
+            selection="tests/nested/mobile.spec.js tests/first.spec.js tests/nested/mobile.spec.js",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            WftCi38SpecFailureTests._spec_calls(calls),
+            ["tests/first.spec.js", "tests/nested/mobile.spec.js"],
+        )
+        self.assertEqual(WftCi38SpecFailureTests._reseed_count(calls), 2)
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_invalid_unknown_quarantined_or_shell_like_selection_fails_before_reseed(self):
+        invalid = (
+            "tests/missing.spec.js",
+            "tests/quarantine.spec.js",
+            "/tests/first.spec.js",
+            "tests/../first.spec.js",
+            "tests/./first.spec.js",
+            "tests/first.spec.js,,tests/second.spec.js",
+            "tests/first.spec.js tests/missing.spec.js",
+            "tests/*.spec.js",
+            "tests/first.spec.js;touch /tmp/wft-ci-41-payload",
+            "$(touch /tmp/wft-ci-41-payload)",
+        )
+        for selection in invalid:
+            with self.subTest(selection=selection):
+                result, calls, _ = WftCi38SpecFailureTests._run_regular(
+                    self,
+                    collect=True,
+                    spec_files=("tests/first.spec.js", "tests/quarantine.spec.js"),
+                    selection=selection,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(calls, [], "invalid selection must fail before reseeding or Playwright")
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_collection_continues_only_selected_files_after_selected_failure(self):
+        result, calls, _ = WftCi38SpecFailureTests._run_regular(
+            self, collect=True,
+            spec_files=("tests/first.spec.js", "tests/second.spec.js", "tests/unselected.spec.js"),
+            selection="tests/first.spec.js tests/second.spec.js",
+            fail_spec="tests/first.spec.js",
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(WftCi38SpecFailureTests._spec_calls(calls),
+                         ["tests/first.spec.js", "tests/second.spec.js"])
+        self.assertEqual(WftCi38SpecFailureTests._reseed_count(calls), 2)
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_selected_failure_remains_fatal_in_fail_fast_and_collection_modes(self):
+        for collect in (False, True):
+            with self.subTest(collect=collect):
+                result, calls, _ = WftCi38SpecFailureTests._run_regular(
+                    self,
+                    collect=collect,
+                    spec_files=("tests/first.spec.js", "tests/second.spec.js"),
+                    selection="tests/second.spec.js",
+                    fail_spec="tests/second.spec.js",
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(
+                    WftCi38SpecFailureTests._spec_calls(calls), ["tests/second.spec.js"]
+                )
+                self.assertEqual(WftCi38SpecFailureTests._reseed_count(calls), 1)
 
 
 if __name__ == "__main__":

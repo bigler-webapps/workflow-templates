@@ -172,6 +172,10 @@ on:
         description: 'Run all regular E2E spec files after failures. Requires run-e2e: true.'
         type: boolean
         default: false
+      e2e-spec-files:
+        description: 'Optional whitespace-separated regular E2E spec paths under tests/. Empty runs the complete regular suite.'
+        type: string
+        default: ''
       e2e-mail-dir:
         type: boolean
         default: false
@@ -664,6 +668,8 @@ jobs:
       - name: Playwright specs
         id: playwright_specs
         working-directory: ${{ inputs.frontend-path }}
+        env:
+          E2E_SPEC_FILES: ${{ inputs.e2e-spec-files }}
         run: |
           set -euo pipefail
           # The runner resets the database itself before each spec file (operator decision, after the
@@ -673,19 +679,54 @@ jobs:
           # from Playwright's own --list/JSON-reporter output (version-fragile, never observed in
           # --list mode specifically) and never hardcoded to a caller's file names: each file is
           # bucketed by grepping its OWN source for the literal "@quarantine" substring.
-          GATING_FILES=""
+          GATING_FILES=()
           while IFS= read -r f; do
             if ! grep -qE 'test\(.*@quarantine' "$f"; then
-              GATING_FILES="$GATING_FILES $f"
+              GATING_FILES+=("$f")
             fi
           done < <(find tests -name '*.spec.js' | sort)
-          if [ -z "$GATING_FILES" ]; then
+          if [ "${#GATING_FILES[@]}" -eq 0 ]; then
             echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"
             exit 1
           fi
+          REQUESTED_FILES=()
+          # Split only on whitespace, with glob expansion disabled; this is data, never shell syntax.
+          set -f
+          REQUESTED_FILES=( $E2E_SPEC_FILES )
+          set +f
+          for requested in "${REQUESTED_FILES[@]}"; do
+            if [[ ! "$requested" =~ ^tests(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.spec\.js$ ]]; then
+              echo "::error::invalid E2E spec path '$requested' (expected a regular tests/**/*.spec.js path)"
+              exit 1
+            fi
+            found=0
+            for f in "${GATING_FILES[@]}"; do
+              if [ "$f" = "$requested" ]; then
+                found=1
+                break
+              fi
+            done
+            if [ "$found" -ne 1 ]; then
+              echo "::error::unknown or quarantined E2E spec path '$requested'"
+              exit 1
+            fi
+          done
+          SELECTED_FILES=()
+          if [ "${#REQUESTED_FILES[@]}" -eq 0 ]; then
+            SELECTED_FILES=("${GATING_FILES[@]}")
+          else
+            for f in "${GATING_FILES[@]}"; do
+              for requested in "${REQUESTED_FILES[@]}"; do
+                if [ "$f" = "$requested" ]; then
+                  SELECTED_FILES+=("$f")
+                  break
+                fi
+              done
+            done
+          fi
           failed=0
           idx=0
-          for f in $GATING_FILES; do
+          for f in "${SELECTED_FILES[@]}"; do
             idx=$((idx + 1))
             echo "::notice::reseeding before $f"
             docker exec "$E2E_APP_CONTAINER" python manage.py "${{ inputs.e2e-seed-command }}"
