@@ -39,10 +39,27 @@ Tier 3: shared CI, runner host security.
 
 # B. Implementation map — addressed to the implementer
 
-*To be filled by the Orchestrator.*
+## Context package
+
+- **File to change:** `.github/workflows/app-ci.yml`, job `e2e`. Every Playwright container that mounts `-v "${{ github.workspace }}:/workspace"` (steps: Install Playwright dependencies ~l.654, Playwright specs ~l.696, quarantine loop ~l.764, Capture E2E (cell enumeration ~l.838 and capture run ~l.865)). Chosen approach: directly after each such workspace mount add a nested read-only mount `-v "${{ github.workspace }}/.git:/workspace/.git:ro" \`. Docker applies the nested ro mount over the rw bind. Do not touch the `docker run` calls at ~l.296/323 or the DB/Redis/app containers (they do not mount the workspace) - verify with grep which runs mount the workspace.
+- **Provenance:** the capture run already sets `GIT_CONFIG_*` safe.directory=/workspace; `git rev-parse HEAD` only reads, so no change there.
+- **Test file:** `.github/scripts/test_app_ci_e2e_job.py` (unittest, inspects `E2E_JOB` text; helpers `step_body`, `shell_body`). Add one test class/method asserting: every `docker run` in `E2E_JOB` that contains a `github.workspace` mount of `/workspace` also contains the `.git:/workspace/.git:ro` mount, and that no `docker run` mounts a read-write path that contains `.git` without it. Count the runs (expect 5) so a new unprotected run fails. Assert against the text of each docker-run command (split on `docker run`, take until the image / `bash -lc` line).
+- **Do not touch:** other jobs, inputs, other tests, CHANGELOG/README/WORK_ORDERS.md.
+- Run only: `python .github/scripts/test_app_ci_e2e_job.py` (your own new test; full file is fine, it is the file's own suite).
+- Directive: work from this package; open only the named files.
+
+## Target repo working directory (absolute)
+
+`C:/Users/Micha Bigler/Documents/webapps/workflow-templates`
+
+## Preamble
+
+> The text above is the COMPLETE spec - the committed WO file's content, not a plan to refine. Read the nearest `AGENTS.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI beyond what the spec says; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` - the register row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source and test files and for running the tests you wrote - nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state blocks you, stop and report `RESULT: BLOCKED <reason>`. Do NOT `git add`/`commit`/`push` - leave every change uncommitted for the orchestrator's independent review. WRITE the tests the `Required tests` section calls for AND RUN the tests you just wrote - that is the ONLY test run you do (no review, no wider suite). The orchestrator's run is the gate. Use explicit UTF-8 for file I/O.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | ...` line up front, then a single-line `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `... done` on completion), plus exactly one final `RESULT: DONE|BLOCKED <reason>`.
 
 # C. Orchestrator only — not addressed to the implementer
 
-> **If this WO was dispatched to you as an implementer: STOP here.**
+> **If you are the implementer reading this work order as your own specification: STOP READING at this line - Part C is not for you, and Parts A and B ARE your task: do them now.** Everything below describes what the Orchestrator does AFTER you finish. You do none of it - no reviewers, no verification run, no register edit, no commit.
 
 Gate #1 open until recorded in the register row. Shared `app-ci.yml` change: candidate ref in `workflow-templates` plus one app pointing at `app-ci.yml@ci-test/WFT-CI-40` (AGENTS.md exception b).

@@ -655,6 +655,7 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             ${E2E_MAIL_PW_ARGS:-} \
             "${{ inputs.e2e-playwright-image }}" \
@@ -699,6 +700,7 @@ jobs:
               -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
               -e E2E_RESEED=runner \
               -v "${{ github.workspace }}:/workspace" \
+              -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
               -w "/workspace/${{ inputs.frontend-path }}" \
               ${E2E_MAIL_PW_ARGS:-} \
               "${{ inputs.e2e-playwright-image }}" \
@@ -767,6 +769,7 @@ jobs:
               -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
               -e E2E_RESEED=runner \
               -v "${{ github.workspace }}:/workspace" \
+              -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
               -w "/workspace/${{ inputs.frontend-path }}" \
               ${E2E_MAIL_PW_ARGS:-} \
               "${{ inputs.e2e-playwright-image }}" \
@@ -839,6 +842,7 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
             -w "/workspace/${{ inputs.frontend-path }}" \
             ${E2E_MAIL_PW_ARGS:-} \
             "${{ inputs.e2e-playwright-image }}" \
@@ -871,6 +875,7 @@ jobs:
               -e GIT_CONFIG_KEY_0=safe.directory \
               -e GIT_CONFIG_VALUE_0=/workspace \
               -v "${{ github.workspace }}:/workspace" \
+              -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
               -w "/workspace/${{ inputs.frontend-path }}" \
               ${E2E_MAIL_PW_ARGS:-} \
               "${{ inputs.e2e-playwright-image }}" \

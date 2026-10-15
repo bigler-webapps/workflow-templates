@@ -71,6 +71,26 @@ def mail_copy_step_is_guarded(job):
     )
 
 
+class WftCi40GitMountTests(unittest.TestCase):
+    def test_every_playwright_container_mounts_git_read_only(self):
+        runs = re.findall(
+            r'docker run(?P<command>.*?)(?=\n\s+"\$\{\{ inputs\.e2e-playwright-image \}\}")',
+            E2E_JOB,
+            re.DOTALL,
+        )
+        self.assertEqual(len(runs), 5, "expected the five Playwright/capture docker runs")
+        for index, command in enumerate(runs, start=1):
+            with self.subTest(docker_run=index):
+                workspace_mount = re.search(
+                    r'-v "\$\{\{ github\.workspace \}\}:/workspace"', command
+                )
+                self.assertIsNotNone(workspace_mount, command)
+                read_only_git_mount = '-v "${{ github.workspace }}/.git:/workspace/.git:ro"'
+                self.assertIn(read_only_git_mount, command)
+                # the read-only overlay must come AFTER the workspace mount, or it is shadowed
+                self.assertLess(command.index(workspace_mount.group(0)), command.index(read_only_git_mount), command)
+
+
 class WftCi30StructuralTests(unittest.TestCase):
     def test_e2e_inputs_have_required_types_and_defaults(self):
         expected = {
@@ -321,8 +341,8 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_a_step_reverts_to_frontend_only_mount(self):
         mutated = E2E_JOB.replace(
-            '-v "${{ github.workspace }}:/workspace" \\\n            -w "/workspace/${{ inputs.frontend-path }}" \\',
-            '-v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \\\n            -w /workspace/frontend \\',
+            '-v "${{ github.workspace }}:/workspace" \\\n            -v "${{ github.workspace }}/.git:/workspace/.git:ro" \\\n',
+            '-v "${{ github.workspace }}/${{ inputs.frontend-path }}:/workspace/frontend" \\\n',
             1,
         )
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live mount lines")
