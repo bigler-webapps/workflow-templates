@@ -20,6 +20,7 @@
         owner: root
         group: root
         mode: "0640"
+      register: _promtail_config
 
     - name: Render docker-compose.yml
       ansible.builtin.template:
@@ -41,3 +42,17 @@
         chdir: "{{ promtail_base_dir }}"
       register: _promtail_up
       changed_when: _promtail_up.stderr is search('Started|Recreated|Created')
+
+    # The config is a bind mount: `docker compose up -d` does not touch a running
+    # container when only the mounted file changed, so Promtail would keep its old
+    # pipeline (WM-SEC-7: redaction stages would never take effect). Restart it
+    # explicitly when the rendered config changed and `up` did not already
+    # (re)create the container.
+    - name: Restart Promtail to load a changed config
+      ansible.builtin.command:
+        cmd: docker compose restart promtail
+        chdir: "{{ promtail_base_dir }}"
+      when:
+        - _promtail_config is changed
+        - _promtail_up is not changed
+      changed_when: true

@@ -98,3 +98,16 @@ def test_redaction_toggle_can_disable_replace_stages(drop_debug):
     assert not any("replace" in stage for stage in stages)
     # The pre-existing debug drop is independent of the redaction toggle.
     assert any("drop" in stage for stage in stages) is drop_debug
+
+
+def test_changed_config_restarts_a_running_promtail():
+    """The config is a bind mount; `compose up -d` alone leaves a running container on the old pipeline."""
+    tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))[0]["block"]
+    by_name = {task["name"]: task for task in tasks}
+    render = by_name["Render Promtail config"]
+    assert render["register"] == "_promtail_config"
+    restart = by_name["Restart Promtail to load a changed config"]
+    assert restart["ansible.builtin.command"]["cmd"] == "docker compose restart promtail"
+    assert restart["when"] == ["_promtail_config is changed", "_promtail_up is not changed"]
+    names = [task["name"] for task in tasks]
+    assert names.index("Restart Promtail to load a changed config") > names.index("Start / update Promtail stack")
