@@ -17,6 +17,20 @@ tag, not `@main`. The current stable tag is documented below.
 Promtail redacts reset and invite tokens, gallery `k` query values, and Kuma
 webhook secrets from Docker logs before shipping them to Loki.
 
+## [2.13.1] - 2026-10-17
+
+### Security
+
+**`deploy-app` and `deploy-traefik` no longer leave the generated runtime
+`.env` in the runner workspace** (WFT-CI-42; closes S269 and the deploy part
+of S435). The file is generated in a private `mktemp -d` directory under
+`RUNNER_TEMP` (`generate-env --output`), excluded from the workspace rsync,
+written on the server to a temporary file and moved into place atomically
+with mode 0600, and the local copy is removed in an `always()` step even when
+the deploy fails. No input changes; consumers pick it up by bumping their
+pin to `v2.13.1`. The tag points at `2e4b8e7` and does not contain the
+Unreleased promtail change above.
+
 ## [2.13.0] - 2026-09-20
 
 ### Added
