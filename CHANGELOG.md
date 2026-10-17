@@ -12,7 +12,19 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Fixed
+
+The Loki role bounds WAL replay and per-stream ingestion memory, makes the container memory limit configurable, and supports a guarded one-time WAL discard for recovery.
+
+### Changed
+
+Loki retention and Go memory limits can be tuned per host; monitoring can retain logs for 14 days.
+
+The `deploy-traefik` action builds the host `.env` from an explicit allowlist (`secrets_allowlist` input, default the six keys the infrastructure stack uses) instead of a denylist; runner GitHub App credentials and the management auth key can never be admitted, whatever a caller passes.
+
 ### Added
+
+The `ufw` role can opt in to a persistent `DOCKER-USER` filter that limits Docker-published web ports to Cloudflare's maintained IP ranges and the tailnet IPv4 range.
 
 The `runner_tailnet_binding` Ansible role binds SSH and rsync traffic to tailnet hosts to the per-job `tailscale0` interface and routes that traffic through a dedicated policy table.
 

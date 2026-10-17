@@ -1,0 +1,15 @@
+[Unit]
+Description=Restrict Docker-published web ports to Cloudflare and tailnet
+After=docker.service ufw.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# No ExecStop: a restart (Docker restart, role re-run) must never open an unfiltered window. Rollback is the
+# explicit `remove` task of the role when ufw_docker_user_web_restrict is switched off.
+ExecStart=/usr/local/sbin/ufw-docker-user-web.sh
+
+[Install]
+WantedBy=multi-user.target

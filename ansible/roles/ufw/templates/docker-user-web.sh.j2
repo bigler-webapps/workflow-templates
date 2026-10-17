@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Dedicated DOCKER-USER filter for internet-facing published web ports (TCP only: add a UDP
+# rule set if a host ever publishes QUIC on these ports).
+#
+# The rule set is built in a NEW chain and swapped in, so there is never a moment without a
+# filter once one has been installed: the new chain is jumped to first, the old jump and chain
+# are removed, then the new chain takes the old name (jumps follow a chain rename).
+set -euo pipefail
+
+EXT="{{ ufw_docker_user_external_interface }}"
+CHAIN="{{ ufw_docker_user_chain }}"
+NEW_CHAIN="{{ ufw_docker_user_chain }}-NEW"
+MODE="${1:-apply}"
+PORTS=( {% for port in ufw_docker_user_web_ports %}{{ port }} {% endfor %} )
+CF4=( {% for cidr in ufw_docker_user_cloudflare_ipv4 %}"{{ cidr }}" {% endfor %} )
+CF6=( {% for cidr in ufw_docker_user_cloudflare_ipv6 %}"{{ cidr }}" {% endfor %} )
+TAILNET4="{{ ufw_docker_user_tailnet_ipv4 }}"
+
+if [ "$MODE" != "remove" ] && [ -z "$EXT" ]; then
+    echo "ufw-docker-user-web: external interface is empty; refusing to install rules" >&2
+    exit 1
+fi
+
+wait_for_v4_docker_user() {
+    for _ in $(seq 1 30); do
+        if iptables -L DOCKER-USER >/dev/null 2>&1; then return 0; fi
+        sleep 2
+    done
+    echo "ufw-docker-user-web: DOCKER-USER did not appear after 60s" >&2
+    return 1
+}
+
+drop_jumps() {
+    local tool="$1" chain="$2"
+    while "$tool" -C DOCKER-USER -j "$chain" >/dev/null 2>&1; do
+        "$tool" -D DOCKER-USER -j "$chain"
+    done
+}
+
+drop_chain() {
+    local tool="$1" chain="$2"
+    drop_jumps "$tool" "$chain"
+    if "$tool" -L "$chain" >/dev/null 2>&1; then
+        "$tool" -F "$chain"
+        "$tool" -X "$chain"
+    fi
+}
+
+remove_family() {
+    local tool="$1"
+    if ! "$tool" -L DOCKER-USER >/dev/null 2>&1; then return 0; fi
+    drop_chain "$tool" "$CHAIN"
+    drop_chain "$tool" "$NEW_CHAIN"
+}
+
+# apply_family <tool> <tailnet range or empty> <cloudflare ranges...>
+apply_family() {
+    local tool="$1" tailnet="$2"
+    shift 2
+    local cidrs=("$@")
+    # An interrupted earlier swap (old chain already gone, new chain still unnamed) leaves the NEW chain as the
+    # only active filter: finish that rename first, so cleaning leftovers never removes the live filter.
+    if "$tool" -L "$NEW_CHAIN" >/dev/null 2>&1 && ! "$tool" -L "$CHAIN" >/dev/null 2>&1; then
+        "$tool" -E "$NEW_CHAIN" "$CHAIN"
+    fi
+    drop_chain "$tool" "$NEW_CHAIN"   # any other leftover of an interrupted run
+    "$tool" -N "$NEW_CHAIN"
+    for port in "${PORTS[@]}"; do
+        for cidr in "${cidrs[@]}"; do
+            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN
+        done
+        if [ -n "$tailnet" ]; then
+            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$tailnet" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN
+        fi
+        "$tool" -A "$NEW_CHAIN" -i "$EXT" -p tcp -m conntrack --ctorigdstport "$port" -j DROP
+    done
+    "$tool" -I DOCKER-USER 1 -j "$NEW_CHAIN"
+    drop_chain "$tool" "$CHAIN"
+    "$tool" -E "$NEW_CHAIN" "$CHAIN"
+}
+
+if [ "$MODE" = "remove" ]; then
+    remove_family iptables
+    remove_family ip6tables
+    exit 0
+fi
+
+wait_for_v4_docker_user
+apply_family iptables "$TAILNET4" "${CF4[@]}"
+
+if ip6tables -L DOCKER-USER >/dev/null 2>&1; then
+    apply_family ip6tables "" "${CF6[@]}"
+else
+    echo "ufw-docker-user-web: IPv6 DOCKER-USER unavailable; skipping IPv6 filter" >&2
+fi

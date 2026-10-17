@@ -1,0 +1,7 @@
+---
+- name: Docker web-filter unit changed
+  become: true
+  ansible.builtin.systemd:
+    name: ufw-docker-user-web.service
+    daemon_reload: true
+    state: restarted

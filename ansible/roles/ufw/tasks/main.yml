@@ -85,3 +85,61 @@
       changed_when: false
       failed_when: "'Status: active' not in _ufw_verify.stdout"
       when: ufw_enabled | bool
+
+- name: Restrict Docker-published web ports to Cloudflare and tailnet
+  become: true
+  when: ufw_docker_user_web_restrict | bool
+  block:
+    - name: Deploy Docker web-filter script
+      ansible.builtin.template:
+        src: docker-user-web.sh.j2
+        dest: /usr/local/sbin/ufw-docker-user-web.sh
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Docker web-filter unit changed
+
+    - name: Deploy Docker web-filter systemd unit
+      ansible.builtin.template:
+        src: docker-user-web.service.j2
+        dest: /etc/systemd/system/ufw-docker-user-web.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Docker web-filter unit changed
+
+    - name: Flush Docker web-filter handlers before reasserting rules
+      ansible.builtin.meta: flush_handlers
+
+    - name: Reassert Docker web-filter rules
+      become: true
+      ansible.builtin.systemd:
+        name: ufw-docker-user-web.service
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+# Rollback: switching the filter off must actually remove it, not just stop managing it.
+- name: Check whether the Docker web-filter is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ufw-docker-user-web.service
+  register: _ufw_docker_web_unit
+  when: not (ufw_docker_user_web_restrict | bool)
+
+- name: Remove the Docker web-filter when it is switched off
+  become: true
+  when:
+    - not (ufw_docker_user_web_restrict | bool)
+    - _ufw_docker_web_unit.stat.exists
+  block:
+    - name: Remove the filter's iptables rules
+      ansible.builtin.command:
+        cmd: /usr/local/sbin/ufw-docker-user-web.sh remove
+      changed_when: true
+
+    - name: Stop and disable the Docker web-filter unit
+      ansible.builtin.systemd:
+        name: ufw-docker-user-web.service
+        state: stopped
+        enabled: false
+        daemon_reload: true
