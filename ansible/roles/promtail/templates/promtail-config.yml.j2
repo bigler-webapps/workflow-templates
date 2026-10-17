@@ -34,12 +34,31 @@ scrape_configs:
       # can filter by host in Grafana.
       - replacement: "{{ inventory_hostname }}"
         target_label: host
-{% if promtail_drop_debug %}
     pipeline_stages:
+{% if promtail_redact_secrets or promtail_drop_debug %}
+{% if promtail_redact_secrets %}
+      # Redact credentials from every Docker log line before labels or shipping.
+      - replace:
+          expression: '(?:/(?:reset|invite|password-reset)/)([^/?\s"\\]+)'
+          replace: '<redacted>'
+      - replace:
+          expression: '(?:/(?:reset|invite|password-reset)/[^/?\s"\\]+/)([^/?\s"\\]+)'
+          replace: '<redacted>'
+      - replace:
+          expression: '(?:[?&]|\\u0026)k=([^\\&\s"]+)'
+          replace: '<redacted>'
+      - replace:
+          expression: '(?:/webhooks/kuma/)([^/?\s"\\]+)'
+          replace: '<redacted>'
+{% endif %}
+{% if promtail_drop_debug %}
       # Drop DEBUG lines to reduce ingest volume. Disable via promtail_drop_debug=false.
       - drop:
           expression: "(?i)level=debug|\\blevel\\s*:\\s*debug\\b"
           drop_counter_reason: debug_dropped
+{% endif %}
+{% else %}
+      []
 {% endif %}
 
   # Scrape OS-level auth events from /var/log/auth.log (login, sudo, sshd, PAM).

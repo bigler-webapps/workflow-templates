@@ -10,6 +10,13 @@ tag, not `@main`. The current stable tag is documented below.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+Promtail redacts reset and invite tokens, gallery `k` query values, and Kuma
+webhook secrets from Docker logs before shipping them to Loki.
+
 ## [2.13.0] - 2026-09-20
 
 ### Added

@@ -9,6 +9,10 @@ promtail_config_dir: /srv/promtail/config
 promtail_loki_port: 3100
 promtail_loki_url: "http://{{ promtail_loki_host }}:{{ promtail_loki_port }}/loki/api/v1/push"
 
+# Pipeline stage: redact reset/invite tokens, gallery keys, and Kuma webhook secrets.
+# Set to false only when troubleshooting requires the original log values.
+promtail_redact_secrets: true
+
 # Pipeline stage: drop log lines at DEBUG level to reduce ingest volume.
 # Set to false to ingest DEBUG lines (e.g. temporary deeper investigation).
 promtail_drop_debug: true
