@@ -100,14 +100,43 @@ def test_redaction_toggle_can_disable_replace_stages(drop_debug):
     assert any("drop" in stage for stage in stages) is drop_debug
 
 
-def test_changed_config_restarts_a_running_promtail():
-    """The config is a bind mount; `compose up -d` alone leaves a running container on the old pipeline."""
-    tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))[0]["block"]
-    by_name = {task["name"]: task for task in tasks}
-    render = by_name["Render Promtail config"]
-    assert render["register"] == "_promtail_config"
-    restart = by_name["Restart Promtail to load a changed config"]
-    assert restart["ansible.builtin.command"]["cmd"] == "docker compose restart promtail"
-    assert restart["when"] == ["_promtail_config is changed", "_promtail_up is not changed"]
-    names = [task["name"] for task in tasks]
-    assert names.index("Restart Promtail to load a changed config") > names.index("Start / update Promtail stack")
+_VARS = dict(
+    promtail_loki_url="http://127.0.0.1:3100/loki/api/v1/push",
+    inventory_hostname="staging",
+    promtail_drop_debug=True,
+    promtail_redact_secrets=True,
+    promtail_config_dir="/srv/promtail/config",
+    promtail_version="3.3.2",
+)
+
+
+def _render_compose(**overrides):
+    """Render docker-compose.yml.j2 with `lookup('template', ...)` and `hash` emulated as Ansible provides them."""
+    import hashlib
+
+    from jinja2 import FileSystemLoader
+
+    variables = {**_VARS, **overrides}
+    env = Environment(loader=FileSystemLoader(str(ROLE / "templates")))
+    env.globals["lookup"] = lambda _plugin, name: env.get_template(name).render(**variables)
+    env.filters["hash"] = lambda value, algo: hashlib.new(algo, value.encode("utf-8")).hexdigest()
+    return yaml.safe_load(env.get_template("docker-compose.yml.j2").render(**variables))
+
+
+def test_config_change_changes_the_compose_so_up_recreates_the_container():
+    """The config is an atomically replaced bind mount; only a compose change recreates a running Promtail."""
+    labels = _render_compose()["services"]["promtail"]["labels"]
+    sha_on = labels["com.biglerconsult.promtail.config-sha256"]
+    assert len(sha_on) == 64
+    sha_off = _render_compose(promtail_redact_secrets=False)["services"]["promtail"]["labels"][
+        "com.biglerconsult.promtail.config-sha256"]
+    assert sha_on != sha_off
+    assert sha_on == _render_compose()["services"]["promtail"]["labels"]["com.biglerconsult.promtail.config-sha256"]
+    # The label is the sha256 of the REAL rendered config, so any config value change moves it.
+    import hashlib
+
+    rendered = Environment().from_string(TEMPLATE.read_text(encoding="utf-8")).render(**_VARS)
+    assert sha_on == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    other_host = _render_compose(inventory_hostname="other")["services"]["promtail"]["labels"][
+        "com.biglerconsult.promtail.config-sha256"]
+    assert other_host != sha_on

@@ -14,6 +14,12 @@ services:
     restart: unless-stopped
     mem_limit: 128m
     command: -config.file=/etc/promtail/promtail.yml
+    # The config file is a bind mount that the template module replaces atomically (new inode), and
+    # `compose up -d` leaves a running container alone when only the mounted file changed: the container
+    # would keep the old pipeline. A checksum label of the rendered config makes any config change a
+    # compose change, so `up -d` recreates the container declaratively (WM-SEC-7).
+    labels:
+      com.biglerconsult.promtail.config-sha256: "{{ lookup('ansible.builtin.template', 'promtail-config.yml.j2') | hash('sha256') }}"
     volumes:
       - {{ promtail_config_dir }}/promtail.yml:/etc/promtail/promtail.yml:ro
       # Read-only docker socket: docker_sd needs it for container discovery + log tailing.
