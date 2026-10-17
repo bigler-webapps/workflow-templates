@@ -1,0 +1,29 @@
+# Runner per-job tailnet binding.
+#
+# OpenSSH's `BindInterface` binds the SOURCE ADDRESS of the named interface. SSH and rsync
+# (which runs ssh) to tailnet hosts therefore leave with the per-job node's address
+# (the ephemeral tailscale0 node a deploy job joined) or fail when no job joined, instead of
+# whatever the shared table 52 currently routes (both tailscaled instances write the same
+# per-peer routes there, last writer wins). Two source-address policy rules (see
+# templates/tailnet-binding-route.sh.j2) make the per-job source reach tailscale0 while the
+# management address and all unbound traffic behave exactly as before.
+#
+# Rollback: remove /etc/ssh/ssh_config.d/50-tailnet-per-job-binding.conf (binding gone at once),
+# then stop/disable tailnet-binding-route.service and delete rules at the two priorities below.
+# The role-level switch below deliberately neither renders nor removes files.
+tailnet_binding_enabled: true
+tailnet_binding_interface: tailscale0
+tailnet_binding_host_patterns:
+  - "*.tail990d7f.ts.net"
+  - "100.*"
+tailnet_binding_tailnet_cidr: "100.64.0.0/10"
+# This host's permanent management-daemon address (interface tsmgmt0). Fact-derived so a
+# re-registered node needs no variable change; an empty value makes the script refuse to run.
+tailnet_binding_mgmt_address: "{{ ansible_tsmgmt0.ipv4.address | default('', true) }}"
+tailnet_binding_route_table: 53
+# Tailscale hardcodes table 52 for its routes (both daemons).
+tailnet_binding_shared_table: 52
+# Priorities sit below the Tailscale fwmark rules (5210/5230/5250), above the shared-table
+# rule (5270), and differ from the retired mgmt pin (5260).
+tailnet_binding_mgmt_rule_priority: 5254
+tailnet_binding_rule_priority: 5255

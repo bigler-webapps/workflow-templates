@@ -1,0 +1,7 @@
+---
+- name: tailnet binding unit changed
+  become: true
+  ansible.builtin.systemd:
+    name: tailnet-binding-route.service
+    daemon_reload: true
+    state: restarted

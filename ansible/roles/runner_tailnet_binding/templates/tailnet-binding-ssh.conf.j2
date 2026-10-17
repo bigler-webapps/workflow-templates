@@ -1,0 +1,4 @@
+# Purpose: SSH and rsync to tailnet hosts must select the address of the
+# per-job tailscale0 node. Rollback: remove this managed file.
+Host {{ tailnet_binding_host_patterns | join(' ') }}
+    BindInterface {{ tailnet_binding_interface }}

@@ -1,0 +1,60 @@
+---
+- name: Deploy per-job tailnet SSH client binding
+  become: true
+  ansible.builtin.template:
+    src: tailnet-binding-ssh.conf.j2
+    dest: /etc/ssh/ssh_config.d/50-tailnet-per-job-binding.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: tailnet_binding_enabled | bool
+
+- name: Deploy per-job tailnet route script
+  become: true
+  ansible.builtin.template:
+    src: tailnet-binding-route.sh.j2
+    dest: /usr/local/sbin/tailnet-binding-route.sh
+    owner: root
+    group: root
+    mode: "0755"
+  notify: tailnet binding unit changed
+  when: tailnet_binding_enabled | bool
+
+- name: Deploy per-job tailnet route systemd unit
+  become: true
+  ansible.builtin.template:
+    src: tailnet-binding-route.service.j2
+    dest: /etc/systemd/system/tailnet-binding-route.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: tailnet binding unit changed
+  when: tailnet_binding_enabled | bool
+
+- name: Flush handlers before reasserting per-job tailnet route
+  ansible.builtin.meta: flush_handlers
+
+- name: Reassert per-job tailnet route
+  become: true
+  ansible.builtin.systemd:
+    name: tailnet-binding-route.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  when: tailnet_binding_enabled | bool
+
+- name: Verify OpenSSH applies per-job tailnet interface binding
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -G
+      - "{{ tailnet_binding_host_patterns[0] | regex_replace('^\\*', 'binding-check') }}"
+  register: _tailnet_binding_ssh_config
+  changed_when: false
+  when:
+    - tailnet_binding_enabled | bool
+    - not ansible_check_mode
+  failed_when: >-
+    _tailnet_binding_ssh_config.rc != 0 or
+    ('bindinterface ' ~ tailnet_binding_interface) not in
+    (_tailnet_binding_ssh_config.stdout | lower)

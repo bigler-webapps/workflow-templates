@@ -150,7 +150,9 @@
     group: root
     mode: "0755"
   notify: tsmgmt-route-pin unit changed
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - tailscale_mgmt_authkey | string | length > 0
+    - tailscale_mgmt_route_pin | bool
 
 - name: Deploy tsmgmt-route-pin systemd unit
   become: true
@@ -161,7 +163,9 @@
     group: root
     mode: "0644"
   notify: tsmgmt-route-pin unit changed
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - tailscale_mgmt_authkey | string | length > 0
+    - tailscale_mgmt_route_pin | bool
 
 - name: Flush handlers so daemon-reload/restart complete before enabling
   ansible.builtin.meta: flush_handlers
@@ -181,4 +185,6 @@
     daemon_reload: true
     enabled: true
     state: restarted
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - tailscale_mgmt_authkey | string | length > 0
+    - tailscale_mgmt_route_pin | bool

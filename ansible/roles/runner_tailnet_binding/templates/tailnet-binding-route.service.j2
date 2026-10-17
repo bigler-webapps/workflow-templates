@@ -1,0 +1,13 @@
+[Unit]
+Description=Route tailnet traffic bound to the per-job interface
+After=tailscaled.service
+Requires=tailscaled.service
+PartOf=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tailnet-binding-route.sh
+
+[Install]
+WantedBy=multi-user.target

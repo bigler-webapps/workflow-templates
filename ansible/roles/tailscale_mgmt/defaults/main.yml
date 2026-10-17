@@ -74,3 +74,8 @@ tailscale_mgmt_route_table: 51
 # rules below it (observed at 5210/5230/5250) — verify with `ip rule show`
 # before changing.
 tailscale_mgmt_route_priority: 5260
+
+# Set false to NOT install the route pin on hosts where per-job interface binding owns
+# tailnet egress instead. It does not remove a pin that an earlier run already installed
+# (stop/disable tsmgmt-route-pin.service and delete the rule at tailscale_mgmt_route_priority).
+tailscale_mgmt_route_pin: true

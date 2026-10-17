@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# OpenSSH's `BindInterface` binds the SOURCE ADDRESS of the named interface (it does not
+# bind the device), so the per-job tailscale0 node's traffic is recognised by its source
+# address, not by an output interface. Two policy rules, both ahead of the shared table 52
+# that both tailscaled instances write per-peer routes into (last writer wins):
+#   1. traffic sourced from this host's permanent management address keeps using the shared
+#      table (inbound operator/CI sessions, health probes - unchanged behaviour);
+#   2. traffic sourced from any other tailnet address (the ephemeral per-job node) is
+#      routed through a dedicated table whose only route sends the tailnet range out of
+#      {{ tailnet_binding_interface }}.
+# Unbound traffic (no tailnet source) is untouched and still follows table 52.
+set -euo pipefail
+
+TUN="{{ tailnet_binding_interface }}"
+CIDR="{{ tailnet_binding_tailnet_cidr }}"
+TABLE="{{ tailnet_binding_route_table }}"
+SHARED_TABLE="{{ tailnet_binding_shared_table }}"
+MGMT_ADDR="{{ tailnet_binding_mgmt_address }}"
+MGMT_PRIORITY="{{ tailnet_binding_mgmt_rule_priority }}"
+JOB_PRIORITY="{{ tailnet_binding_rule_priority }}"
+
+if [ -z "$MGMT_ADDR" ]; then
+    echo "tailnet-binding-route: management address is empty, refusing to install rules" >&2
+    exit 1
+fi
+
+ready=0
+for _ in $(seq 1 30); do
+    if ip link show dev "$TUN" >/dev/null 2>&1; then
+        ready=1
+        break
+    fi
+    sleep 2
+done
+
+if [ "$ready" -ne 1 ]; then
+    echo "tailnet-binding-route: link $TUN did not appear after 60s" >&2
+    exit 1
+fi
+
+ip route replace "$CIDR" dev "$TUN" table "$TABLE"
+
+# The two priorities are reserved for this role: replace (not add) so a changed management
+# address or a re-run never leaves a stale or duplicate rule behind.
+while ip rule del priority "$MGMT_PRIORITY" 2>/dev/null; do :; done
+while ip rule del priority "$JOB_PRIORITY" 2>/dev/null; do :; done
+ip rule add from "$MGMT_ADDR/32" lookup "$SHARED_TABLE" priority "$MGMT_PRIORITY"
+ip rule add from "$CIDR" lookup "$TABLE" priority "$JOB_PRIORITY"

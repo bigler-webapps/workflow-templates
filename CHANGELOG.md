@@ -12,7 +12,13 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Added
+
+The `runner_tailnet_binding` Ansible role binds SSH and rsync traffic to tailnet hosts to the per-job `tailscale0` interface and routes that traffic through a dedicated policy table.
+
 ### Changed
+
+The `tailscale_mgmt_route_pin` variable can disable the management daemon route pin on hosts using per-job tailnet interface binding; it defaults to enabled.
 
 Promtail redacts reset and invite tokens, gallery `k` query values, and Kuma
 webhook secrets from Docker logs before shipping them to Loki.
