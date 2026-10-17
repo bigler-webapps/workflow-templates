@@ -111,6 +111,58 @@
         group: root
         mode: "0640"
 
+    # ── Optional one-time WAL recovery ───────────────────────────────────────
+    - name: Check whether the WAL has already been discarded
+      ansible.builtin.stat:
+        path: "{{ loki_base_dir }}/.wal-discarded"
+      register: _loki_wal_discard_marker
+      when: loki_wal_discard | bool
+
+    - name: Discard Loki WAL once when explicitly requested
+      when:
+        - loki_wal_discard | bool
+        - not _loki_wal_discard_marker.stat.exists
+      block:
+        - name: Stop Loki before discarding its WAL
+          ansible.builtin.command:
+            cmd: docker compose stop loki
+            chdir: "{{ loki_base_dir }}"
+          register: _loki_stop_for_wal_discard
+          failed_when: false
+          changed_when: _loki_stop_for_wal_discard.rc == 0
+
+        # A failed stop must never be followed by deleting a live WAL: verify that no loki container
+        # is running before anything is removed (no container at all is fine).
+        - name: Assert Loki is not running before the WAL is touched
+          ansible.builtin.command:
+            cmd: docker ps --quiet --filter name=^/loki$ --filter status=running
+          register: _loki_running_check
+          changed_when: false
+          failed_when: _loki_running_check.rc != 0 or (_loki_running_check.stdout | trim | length) > 0
+
+        # `removes:` skips the command when the directory does not exist (fresh host, already gone).
+        - name: Remove contents of Loki WAL directory only
+          ansible.builtin.command:
+            cmd: find "{{ loki_data_dir }}/wal" -mindepth 1 -delete
+            removes: "{{ loki_data_dir }}/wal"
+          changed_when: true
+
+        - name: Recreate Loki WAL directory with container ownership
+          ansible.builtin.file:
+            path: "{{ loki_data_dir }}/wal"
+            state: directory
+            owner: "{{ loki_uid }}"
+            group: "{{ loki_uid }}"
+            mode: "0755"
+
+        - name: Record one-time WAL discard marker
+          ansible.builtin.copy:
+            dest: "{{ loki_base_dir }}/.wal-discarded"
+            content: "{{ ansible_date_time.iso8601 }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+
     # ── Deploy ───────────────────────────────────────────────────────────────
     - name: Pull Loki + Grafana images
       ansible.builtin.command:

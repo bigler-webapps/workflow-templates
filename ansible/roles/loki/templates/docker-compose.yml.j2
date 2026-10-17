@@ -14,7 +14,9 @@ services:
     image: grafana/loki:{{ loki_version }}
     container_name: loki
     restart: unless-stopped
-    mem_limit: 512m
+    mem_limit: {{ loki_mem_limit }}
+    environment:
+      GOMEMLIMIT: "{{ loki_gomemlimit }}"
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - {{ loki_config_dir }}/loki.yml:/etc/loki/loki.yml:ro

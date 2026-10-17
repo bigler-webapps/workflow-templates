@@ -28,10 +28,19 @@ schema_config:
         prefix: index_
         period: 24h
 
+ingester:
+  wal:
+    enabled: true
+    dir: /loki/wal
+    replay_memory_ceiling: {{ loki_wal_replay_memory_ceiling }}
+    flush_on_shutdown: true
+
 limits_config:
   retention_period: {{ loki_retention_days }}d
   ingestion_rate_mb: {{ loki_ingestion_rate_mb }}
   ingestion_burst_size_mb: {{ loki_ingestion_burst_size_mb }}
+  per_stream_rate_limit: {{ loki_per_stream_rate_limit }}
+  per_stream_rate_limit_burst: {{ loki_per_stream_rate_limit_burst }}
 
 compactor:
   working_directory: /loki/compactor

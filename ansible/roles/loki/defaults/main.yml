@@ -12,8 +12,17 @@ loki_port: 3100
 # Port on which Grafana is published (bound to Tailscale IP only).
 grafana_port: 3000
 
-# Retention period in days. Override in group_vars/stage.yml.
+# Retention period in days. Override per consumer (monitoring uses 14 days).
 loki_retention_days: 30
+
+# Loki container memory limit. Raise loki_gomemlimit whenever this is raised.
+loki_mem_limit: "512m"
+# Go soft memory target: keep below the cgroup limit so GC runs before OOM.
+loki_gomemlimit: "400MiB"
+# WAL replay flush threshold; keep near one third of loki_mem_limit or less.
+loki_wal_replay_memory_ceiling: "256MB"
+# One-shot WAL discard. A marker prevents repeats if this remains true.
+loki_wal_discard: false
 
 # Grafana admin username. Password comes from /srv/loki/.env (Variante 2).
 grafana_admin_user: admin
@@ -21,6 +30,9 @@ grafana_admin_user: admin
 # Ingest limits — lower than Loki defaults to protect staging from log storms.
 loki_ingestion_rate_mb: 4
 loki_ingestion_burst_size_mb: 8
+# Per-stream limits bound bursts from a single host/stream during recovery.
+loki_per_stream_rate_limit: "2MB"
+loki_per_stream_rate_limit_burst: "6MB"
 
 # Container UIDs for ownership of mounted paths.
 # Must match the UID the process runs as inside the container image.
