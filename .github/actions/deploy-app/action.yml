@@ -399,10 +399,15 @@ runs:
         fi
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
+        umask 077
+        DEPLOY_ENV_DIR="$(mktemp -d "${RUNNER_TEMP}/deploy-env.XXXXXX")"
+        printf 'DEPLOY_ENV_DIR=%s\n' "$DEPLOY_ENV_DIR" >> "$GITHUB_ENV"
+        ENV_FILE="${DEPLOY_ENV_DIR}/.env"
         echo "Generating .env for env: ${TARGET_ENV}"
-        generate-env --env "${TARGET_ENV}"
-        test -f .env || { echo "❌ generate-env did not create .env."; exit 1; }
-        printf '\nIMAGE_TAG=%s\n' "$IMAGE_TAG" >> .env
+        generate-env --env "${TARGET_ENV}" --output "$ENV_FILE"
+        test -f "$ENV_FILE" || { echo "❌ generate-env did not create .env."; exit 1; }
+        chmod 600 "$ENV_FILE"
+        printf '\nIMAGE_TAG=%s\n' "$IMAGE_TAG" >> "$ENV_FILE"
 
     - name: 🚀 Rsync project to server (via plain ssh over Tailnet)
       shell: bash
@@ -421,6 +426,7 @@ runs:
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync"
           -e "ssh -o StrictHostKeyChecking=accept-new"
+          --exclude=/.env
           --exclude=certbot/letsencrypt
           --exclude=docker-compose.override.yml
           --exclude=.git
@@ -440,6 +446,22 @@ runs:
           rsync_args+=(--exclude="$dir")
         done
         rsync "${rsync_args[@]}" ./ "${SSH_USER}@${TAILNET_HOST}:${REMOTE_PATH}"
+
+    - name: 🔐 Transfer runtime .env to server
+      shell: bash
+      env:
+        TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_PATH: ${{ env.REMOTE_PATH }}
+        DEPLOY_ENV_DIR: ${{ env.DEPLOY_ENV_DIR }}
+      run: |
+        set -euo pipefail
+        ENV_FILE="${DEPLOY_ENV_DIR}/.env"
+        # Unique, exclusively created temp file on the server (no shared name, no symlink
+        # following, removed on any failure), then an atomic replace of .env at mode 0600.
+        QUOTED_REMOTE_PATH="$(printf '%q' "$REMOTE_PATH")"
+        REMOTE_CMD="umask 077; P=${QUOTED_REMOTE_PATH}; T=\"\$(mktemp \"\$P/.env.XXXXXX\")\" || exit 1; trap 'rm -f \"\$T\"' EXIT; cat > \"\$T\" && chmod 600 \"\$T\" && mv -f \"\$T\" \"\$P/.env\""
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TAILNET_HOST}" "$REMOTE_CMD" < "$ENV_FILE"
 
     - name: 🔐 Provision optional file secrets (via plain ssh over Tailnet)
       if: ${{ inputs.provision_file_secrets == 'true' && ((inputs.file_secret_1_content != '' && inputs.file_secret_1_name != '') || (inputs.file_secret_2_content != '' && inputs.file_secret_2_name != '')) }}
@@ -715,3 +737,19 @@ runs:
 
         echo "✅ Deployment finished successfully!"
         EOF
+
+    - name: 🧹 Remove runner runtime .env
+      if: ${{ always() }}
+      shell: bash
+      env:
+        DEPLOY_ENV_DIR: ${{ env.DEPLOY_ENV_DIR }}
+      run: |
+        set -euo pipefail
+        DEPLOY_ENV_DIR="${DEPLOY_ENV_DIR:-}"
+        if [ -z "$DEPLOY_ENV_DIR" ]; then
+          exit 0
+        fi
+        case "$DEPLOY_ENV_DIR" in
+          "$RUNNER_TEMP"/*) rm -rf -- "$DEPLOY_ENV_DIR" || true ;;
+          *) echo "⚠️ Refusing to remove runtime env path outside RUNNER_TEMP." ;;
+        esac

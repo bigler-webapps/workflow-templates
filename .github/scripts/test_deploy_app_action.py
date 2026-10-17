@@ -63,7 +63,7 @@ class CI9StructuralTests(unittest.TestCase):
         self.assertIn("image_tag:", DEPLOY_ACTION)
         self.assertIn("required: true", DEPLOY_ACTION.split("image_tag:", 1)[1].split("environment:", 1)[0])
         self.assertEqual(DEPLOY_ACTION.count("IMAGE_TAG: ${{ inputs.image_tag }}"), 2)
-        self.assertIn("printf '\\nIMAGE_TAG=%s\\n' \"$IMAGE_TAG\" >> .env", DEPLOY_ACTION)
+        self.assertIn("printf '\\nIMAGE_TAG=%s\\n' \"$IMAGE_TAG\" >> \"$ENV_FILE\"", DEPLOY_ACTION)
         self.assertIn('docker push "$PUBLISHED_IMAGE:$IMAGE_TAG"', PUBLISH_ACTION)
         self.assertNotIn('docker push "$PUBLISHED_IMAGE:latest"', PUBLISH_ACTION)
 
@@ -140,6 +140,261 @@ class CI9StructuralTests(unittest.TestCase):
         self.assertIn('sudo -n --preserve-env=DOCKER_CONFIG docker', DEPLOY_ACTION)
 
 
+# --- WFT-CI-42: keep generated runtime env files off the runner workspace -----
+
+
+import os
+import shutil
+import stat
+import subprocess
+import tempfile
+
+
+WFT_CI42_ACTIONS = {
+    "deploy-app": ROOT / ".github/actions/deploy-app/action.yml",
+    "deploy-traefik": ROOT / ".github/actions/deploy-traefik/action.yml",
+}
+WFT_CI42_BASH = shutil.which("bash")
+WFT_CI42_GENERATE_STUB = r"""#!/usr/bin/env bash
+set -euo pipefail
+output=.env
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; else shift; fi
+done
+printf 'SECRET=value\n' > "$output"
+"""
+WFT_CI42_JQ_STUB = r"""#!/usr/bin/env bash
+cat
+"""
+WFT_CI42_RSYNC_STUB = r"""#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RSYNC_LOG"
+"""
+WFT_CI42_SSH_STUB = r"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$SSH_COMMAND_LOG"
+cat > "$SSH_STDIN_LOG"
+[ "${SSH_FAIL:-0}" != 1 ]
+"""
+
+
+def _wft_ci42_step(action_text, step_name):
+    """Return a real composite step's run body and full YAML section."""
+    match = re.search(
+        r"(?ms)^    - name: " + re.escape(step_name) + r"\n(?P<section>.*?)(?=^    - name: |\Z)",
+        action_text,
+    )
+    if not match:
+        raise AssertionError(f"step not found: {step_name}")
+    section = match.group("section")
+    run = re.search(r"(?ms)^      run: \|\n(?P<body>(?:^        .*\n|^\s*\n)*)", section)
+    if not run:
+        raise AssertionError(f"run body not found for: {step_name}")
+    body = "\n".join(line[8:] if line.startswith("        ") else "" for line in run.group("body").splitlines())
+    return body, match.group(0)
+
+
+class WftCi42RuntimeEnvTests(unittest.TestCase):
+    """Run the actual generate, rsync, transfer, and cleanup step scripts."""
+
+    def setUp(self):
+        if not WFT_CI42_BASH:
+            self.skipTest("no bash available on PATH")
+        self.tmp = Path(tempfile.mkdtemp(prefix="wft-ci42-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _action(self, action_key):
+        return WFT_CI42_ACTIONS[action_key].read_text(encoding="utf-8")
+
+    def _write_stub(self, bin_dir, name, content):
+        path = bin_dir / name
+        path.write_text(content, encoding="utf-8", newline="\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return path
+
+    def _prepare(self, action_key):
+        action_text = self._action(action_key)
+        workspace = self.tmp / f"{action_key}-workspace"
+        runner_temp = self.tmp / f"{action_key}-runner-temp"
+        bin_dir = self.tmp / f"{action_key}-bin"
+        workspace.mkdir()
+        runner_temp.mkdir()
+        bin_dir.mkdir()
+        self._write_stub(bin_dir, "generate-env", WFT_CI42_GENERATE_STUB)
+        self._write_stub(bin_dir, "jq", WFT_CI42_JQ_STUB)
+        self._write_stub(bin_dir, "rsync", WFT_CI42_RSYNC_STUB)
+        self._write_stub(bin_dir, "ssh", WFT_CI42_SSH_STUB)
+        github_env = self.tmp / f"{action_key}-github-env"
+        github_env.write_text("", encoding="utf-8")
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(bin_dir) + os.pathsep + env.get("PATH", ""),
+            "RUNNER_TEMP": runner_temp.as_posix(),
+            "GITHUB_ENV": str(github_env),
+            "TARGET_ENV": "staging",
+            "TARGET_ENVIRONMENT": "staging",
+            "IMAGE_TAG": "test-tag",
+            "USE_BUILD_FALLBACK": "false",
+            "SECRETS_CONTEXT_RAW": "{}",
+            "SSH_USER": "deploy",
+            "TAILNET_HOST": "server.test",
+            "SSH_HOST": "server.test",
+            "REMOTE_PATH": "/srv/apps/example",
+            "PERSISTENT_DIRS": "media uploads",
+            "RSYNC_LOG": str(self.tmp / f"{action_key}-rsync.log"),
+            "SSH_COMMAND_LOG": str(self.tmp / f"{action_key}-ssh-command.log"),
+            "SSH_STDIN_LOG": str(self.tmp / f"{action_key}-ssh-stdin.log"),
+        })
+        if action_key == "deploy-app":
+            generate_name = "🔐 Generate .env file"
+            rsync_name = "🚀 Rsync project to server (via plain ssh over Tailnet)"
+        else:
+            generate_name = "🔐 Generate .env"
+            rsync_name = "📂 Rsync project to server"
+        generate_body, _ = _wft_ci42_step(action_text, generate_name)
+        proc = subprocess.run(
+            [WFT_CI42_BASH, "-c", generate_body], cwd=workspace, env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse((workspace / ".env").exists())
+        variables = dict(
+            line.split("=", 1) for line in github_env.read_text(encoding="utf-8").splitlines() if "=" in line
+        )
+        env_dir = Path(variables["DEPLOY_ENV_DIR"])
+        env_file = env_dir / ".env"
+        self.assertTrue(env_file.is_file())
+        # The content comes from the (stubbed) generate-env CLI plus the appended tag where the action appends one.
+        self.assertIn("SECRET=value", env_file.read_text(encoding="utf-8"))
+        if action_key == "deploy-app":
+            self.assertIn("IMAGE_TAG=test-tag", env_file.read_text(encoding="utf-8"))
+        # POSIX runners expose file mode bits. Windows chmod/stat emulation
+        # reports 0666 for ordinary files regardless of the bash umask.
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(env_dir.stat().st_mode), 0o700)
+        env["DEPLOY_ENV_DIR"] = env_dir.as_posix()
+        return action_text, workspace, runner_temp, env_file, env, rsync_name
+
+    def _run_step(self, action_text, step_name, workspace, env):
+        body, _ = _wft_ci42_step(action_text, step_name)
+        return subprocess.run(
+            [WFT_CI42_BASH, "-c", body], cwd=workspace, env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+
+    def test_deploy_app_generation_exclusion_transfer_and_cleanup(self):
+        self._exercise_action("deploy-app")
+
+    def test_deploy_traefik_generation_exclusion_transfer_and_cleanup(self):
+        self._exercise_action("deploy-traefik")
+
+    def test_deploy_app_remote_command_is_atomic_unique_and_cleans_up(self):
+        self._exercise_remote_command("deploy-app")
+
+    def test_deploy_traefik_remote_command_is_atomic_unique_and_cleans_up(self):
+        self._exercise_remote_command("deploy-traefik")
+
+    def _exercise_remote_command(self, action_key):
+        """Execute the real remote command string locally (an ssh stub that runs it under bash)
+        against a temporary 'server' directory."""
+        action_text, workspace, _runner_temp, env_file, env, _rsync_name = self._prepare(action_key)
+        bin_dir = self.tmp / f"{action_key}-bin"
+        self._write_stub(bin_dir, "ssh", '#!/usr/bin/env bash\ncmd="${@: -1}"\nexec bash -c "$cmd"\n')
+        self._write_stub(
+            bin_dir, "chmod",
+            '#!/usr/bin/env bash\n[ "${CHMOD_FAIL:-0}" = 1 ] && exit 1\n'
+            'exec "$(PATH=/usr/bin:/bin command -v chmod)" "$@"\n',
+        )
+        server = self.tmp / f"{action_key}-server dir"  # a space: the path must survive quoting
+        server.mkdir()
+        (server / ".env").write_text("PREVIOUS=preserved\n", encoding="utf-8")
+        env["REMOTE_PATH"] = server.as_posix()
+        name = "🔐 Transfer runtime .env to server"
+
+        failed_env = dict(env, CHMOD_FAIL="1")
+        failed = self._run_step(action_text, name, workspace, failed_env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual((server / ".env").read_text(encoding="utf-8"), "PREVIOUS=preserved\n")
+        self.assertEqual(sorted(p.name for p in server.iterdir()), [".env"], "a failed transfer must leave no temp file")
+
+        ok = self._run_step(action_text, name, workspace, env)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertEqual((server / ".env").read_bytes(), env_file.read_bytes())
+        self.assertEqual(sorted(p.name for p in server.iterdir()), [".env"], "no shared or leftover temp name")
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE((server / ".env").stat().st_mode), 0o600)
+
+    def _exercise_action(self, action_key):
+        action_text, workspace, runner_temp, env_file, env, rsync_name = self._prepare(action_key)
+        rsync = self._run_step(action_text, rsync_name, workspace, env)
+        self.assertEqual(rsync.returncode, 0, rsync.stdout + rsync.stderr)
+        rsync_args = Path(env["RSYNC_LOG"]).read_text(encoding="utf-8").splitlines()
+        self.assertTrue("--exclude=/.env" in rsync_args or "/.env" in rsync_args, rsync_args)
+
+        transfer_name = "🔐 Transfer runtime .env to server"
+        cleanup_name = "🧹 Remove runner runtime .env"
+        remote_existing = self.tmp / f"{action_key}-remote-env"
+        remote_existing.write_text("PREVIOUS=preserved\n", encoding="utf-8")
+
+        # Success sends the exact generated file, then the cleanup step removes it.
+        succeeded = self._run_step(action_text, transfer_name, workspace, env)
+        self.assertEqual(succeeded.returncode, 0, succeeded.stdout + succeeded.stderr)
+        self.assertEqual(Path(env["SSH_STDIN_LOG"]).read_bytes(), env_file.read_bytes())
+        cleanup, cleanup_section = _wft_ci42_step(action_text, cleanup_name)
+        self.assertIn("if: ${{ always() }}", cleanup_section)
+        self.assertEqual(cleanup_section.rstrip("\n"), action_text[action_text.rfind("    - name: "):].rstrip("\n"))
+        successful_cleanup = self._run_step(action_text, cleanup_name, workspace, env)
+        self.assertEqual(successful_cleanup.returncode, 0, successful_cleanup.stdout + successful_cleanup.stderr)
+        self.assertFalse(env_file.parent.exists())
+
+        # A later transfer failure is propagated; its previous remote file remains
+        # untouched, and the always cleanup still removes the new runner copy.
+        failed_dir = Path(tempfile.mkdtemp(prefix="deploy-env.", dir=runner_temp))
+        failed_file = failed_dir / ".env"
+        failed_file.write_text("SECRET=forced-failure\n", encoding="utf-8")
+        failed_file.chmod(0o600)
+        env["DEPLOY_ENV_DIR"] = failed_dir.as_posix()
+        env["SSH_FAIL"] = "1"
+        failed = self._run_step(action_text, transfer_name, workspace, env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(remote_existing.read_text(encoding="utf-8"), "PREVIOUS=preserved\n")
+        self.assertEqual(Path(env["SSH_STDIN_LOG"]).read_bytes(), failed_file.read_bytes())
+        command = Path(env["SSH_COMMAND_LOG"]).read_text(encoding="utf-8")
+        self.assertIn("umask 077", command)
+        self.assertIn("chmod 600", command)
+        self.assertIn("mv -f", command)
+        failed_cleanup = self._run_step(action_text, cleanup_name, workspace, env)
+        self.assertEqual(failed_cleanup.returncode, 0, failed_cleanup.stdout + failed_cleanup.stderr)
+        self.assertFalse(failed_dir.exists())
+
+        # Unset paths are harmless; paths outside RUNNER_TEMP are preserved.
+        unset_env = env.copy()
+        unset_env.pop("DEPLOY_ENV_DIR", None)
+        unset_cleanup = subprocess.run(
+            [WFT_CI42_BASH, "-c", cleanup], cwd=workspace, env=unset_env,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        self.assertEqual(unset_cleanup.returncode, 0, unset_cleanup.stdout + unset_cleanup.stderr)
+        outside = self.tmp / f"{action_key}-outside"
+        outside.mkdir()
+        outside_env = env.copy()
+        outside_env["DEPLOY_ENV_DIR"] = outside.as_posix()
+        outside_cleanup = subprocess.run(
+            [WFT_CI42_BASH, "-c", cleanup], cwd=workspace, env=outside_env,
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        self.assertEqual(outside_cleanup.returncode, 0, outside_cleanup.stdout + outside_cleanup.stderr)
+        self.assertTrue(outside.exists())
+
+    def test_cleanup_is_the_last_step_and_runs_always_for_both_actions(self):
+        for action_key in WFT_CI42_ACTIONS:
+            with self.subTest(action=action_key):
+                text = self._action(action_key)
+                _, section = _wft_ci42_step(text, "🧹 Remove runner runtime .env")
+                self.assertIn("if: ${{ always() }}", section)
+                self.assertEqual(section.rstrip("\n"), text[text.rfind("    - name: "):].rstrip("\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -189,13 +444,13 @@ def _extract_cleanup_block() -> str:
 
     Deliberately NOT a copy of the logic: a test that re-implements what it
     checks proves nothing. The block lives inside an ssh heredoc where every
-    runtime `$` is written `\\$`, so undoing that escaping is all that stands
+    runtime `$` is written `\$`, so undoing that escaping is all that stands
     between the committed text and something bash can run.
     """
     start = DEPLOY_ACTION.index('echo "Removing the image this deploy replaced')
     end = DEPLOY_ACTION.index("} || true", start) + len("} || true")
     block = DEPLOY_ACTION[start:end]
-    return block.replace("\\$", "$")
+    return block.replace("\$", "$")
 
 
 def _run_cleanup(prev_refs, new_ids, all_ids, refs, image_tag="NEWSHA"):
@@ -390,7 +645,7 @@ def _extract_health_check_block() -> str:
     end = DEPLOY_ACTION.index("no container is restart-looping.\"", start)
     end = DEPLOY_ACTION.index("\n", end) + 1
     block = DEPLOY_ACTION[start:end]
-    return block.replace("\\$", "$")
+    return block.replace("\$", "$")
 
 
 def _run_health_check(ids, states):

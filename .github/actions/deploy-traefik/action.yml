@@ -161,7 +161,13 @@ runs:
         )
         unset SECRETS_CONTEXT_RAW
         export SECRETS_CONTEXT
-        generate-env --env "${TARGET_ENVIRONMENT}" --config project.yaml
+        umask 077
+        DEPLOY_ENV_DIR="$(mktemp -d "${RUNNER_TEMP}/deploy-env.XXXXXX")"
+        printf 'DEPLOY_ENV_DIR=%s\n' "$DEPLOY_ENV_DIR" >> "$GITHUB_ENV"
+        ENV_FILE="${DEPLOY_ENV_DIR}/.env"
+        generate-env --env "${TARGET_ENVIRONMENT}" --config project.yaml --output "$ENV_FILE"
+        test -f "$ENV_FILE" || { echo "❌ generate-env did not create .env."; exit 1; }
+        chmod 600 "$ENV_FILE"
 
     - name: 🔌 Pre-flight Tailscale-SSH connectivity check
       shell: bash
@@ -210,6 +216,7 @@ runs:
           --chmod=Du=rwx,Dg=rwx,Do=rx,Fu=rw,Fg=rw,Fo=r \
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync" \
           -e "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15" \
+          --exclude '/.env' \
           --exclude '.git' \
           --exclude '.github' \
           --exclude 'acme.json' \
@@ -218,6 +225,22 @@ runs:
           --exclude 'backup' \
           --exclude 'wireguard/config' \
           ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_PATH}"
+
+    - name: 🔐 Transfer runtime .env to server
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        REMOTE_PATH: ${{ inputs.remote_path }}
+        DEPLOY_ENV_DIR: ${{ env.DEPLOY_ENV_DIR }}
+      run: |
+        set -euo pipefail
+        ENV_FILE="${DEPLOY_ENV_DIR}/.env"
+        # Unique, exclusively created temp file on the server (no shared name, no symlink
+        # following, removed on any failure), then an atomic replace of .env at mode 0600.
+        QUOTED_REMOTE_PATH="$(printf '%q' "$REMOTE_PATH")"
+        REMOTE_CMD="umask 077; P=${QUOTED_REMOTE_PATH}; T=\"\$(mktemp \"\$P/.env.XXXXXX\")\" || exit 1; trap 'rm -f \"\$T\"' EXIT; cat > \"\$T\" && chmod 600 \"\$T\" && mv -f \"\$T\" \"\$P/.env\""
+        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" "$REMOTE_CMD" < "$ENV_FILE"
 
     - name: 🚀 Start containers
       shell: bash
@@ -268,3 +291,19 @@ runs:
         echo "🚀 Starting stack with COMPOSE_PROFILES=\${COMPOSE_PROFILES}..."
         \$DOCKER compose --env-file .env up -d --remove-orphans
         EOF
+
+    - name: 🧹 Remove runner runtime .env
+      if: ${{ always() }}
+      shell: bash
+      env:
+        DEPLOY_ENV_DIR: ${{ env.DEPLOY_ENV_DIR }}
+      run: |
+        set -euo pipefail
+        DEPLOY_ENV_DIR="${DEPLOY_ENV_DIR:-}"
+        if [ -z "$DEPLOY_ENV_DIR" ]; then
+          exit 0
+        fi
+        case "$DEPLOY_ENV_DIR" in
+          "$RUNNER_TEMP"/*) rm -rf -- "$DEPLOY_ENV_DIR" || true ;;
+          *) echo "⚠️ Refusing to remove runtime env path outside RUNNER_TEMP." ;;
+        esac
