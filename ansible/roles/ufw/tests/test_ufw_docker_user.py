@@ -37,6 +37,7 @@ def test_rendered_rules_cover_cloudflare_tailnet_and_both_web_ports():
     code = [line.strip() for line in rendered.splitlines() if line.strip() and not line.strip().startswith("#")]
     rules = [line for line in code if line.startswith('"$tool" -A "$NEW_CHAIN"')]
     assert rules and all('-i "$EXT"' in line and "--ctorigdstport" in line and "--dport" not in line for line in rules)
+    assert all("--ctdir ORIGINAL" in line for line in rules)  # never match reply packets of outbound connections
     assert any('-s "$cidr"' in line and line.endswith("-j RETURN") for line in rules)
     assert any('-s "$tailnet"' in line and line.endswith("-j RETURN") for line in rules)
     assert any(line.endswith("-j DROP") and "-s " not in line for line in rules)
@@ -241,3 +242,83 @@ def test_applied_rules_use_the_configured_ranges_and_an_interrupted_swap_is_comp
     first_rename = log.index("-E DOCKER-USER-WEB-NEW DOCKER-USER-WEB")
     first_flush_new = log.index("-F DOCKER-USER-WEB-NEW") if "-F DOCKER-USER-WEB-NEW" in log else len(log)
     assert first_rename < first_flush_new
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Packet-level semantics (WM-SEC-9 defect found on staging 2026-10-18): replies to a container's OUTBOUND
+# connections arrive on the external interface too, and the conntrack entry's ORIGINAL destination port is the
+# remote's 443. Matching `--ctorigdstport` alone dropped every reply from a non-Cloudflare API. The rules must match
+# only packets flowing in the ORIGINAL direction (`--ctdir ORIGINAL`). This is a model of the iptables match semantics
+# for the small subset the chain uses, evaluated over the rules the real script emits.
+# ---------------------------------------------------------------------------------------------------------------
+import ipaddress
+
+
+def _parse_rule(line):
+    """`RULE|<chain>|<chain> -i eth0 -s X -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport 443 -j DROP`"""
+    args = line.split("|", 2)[2].split()
+    rule = {"target": args[args.index("-j") + 1]}
+    for flag, key in (("-i", "iif"), ("-s", "src"), ("-p", "proto"), ("--ctdir", "ctdir"), ("--ctorigdstport", "port")):
+        if flag in args:
+            rule[key] = args[args.index(flag) + 1]
+    return rule
+
+
+def _verdict(rules, *, iif, src, ctdir, ctorigdstport, proto="tcp"):
+    """First matching rule wins; no match is FALLTHROUGH: this chain does not touch the packet and the later FORWARD
+    rules decide (other chains can still drop it; this model only covers DOCKER-USER-WEB)."""
+    for rule in rules:
+        if "iif" in rule and rule["iif"] != iif:
+            continue
+        if "src" in rule and ipaddress.ip_address(src) not in ipaddress.ip_network(rule["src"]):
+            continue
+        if "proto" in rule and rule["proto"] != proto:
+            continue
+        if "ctdir" in rule and rule["ctdir"] != ctdir:
+            continue
+        if "port" in rule and int(rule["port"]) != ctorigdstport:
+            continue
+        return rule["target"]
+    return "FALLTHROUGH"
+
+
+def _emitted_rules(tmp_path, firewall_harness):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "iptables.state").write_text("CHAIN|DOCKER-USER\n", encoding="utf-8")
+    (state / "ip6tables.state").write_text("", encoding="utf-8")
+    script = tmp_path / "rendered.sh"
+    script.write_bytes(_render("docker-user-web.sh.j2", ufw_docker_user_external_interface="eth0").encode("utf-8"))
+    env = dict(os.environ, PATH=f"{firewall_harness}{os.pathsep}{os.environ.get('PATH', '')}",
+               HARNESS_STATE=str(state), NO_IPV6="1")
+    result = subprocess.run([shutil.which("bash"), "-s"], input=script.read_bytes(), env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    lines = (state / "iptables.state").read_text(encoding="utf-8").splitlines()
+    return [_parse_rule(line) for line in lines if line.startswith("RULE|DOCKER-USER-WEB|")]
+
+
+def test_replies_to_outbound_connections_are_never_dropped_but_inbound_new_connections_are(tmp_path, firewall_harness):
+    rules = _emitted_rules(tmp_path, firewall_harness)
+    assert rules and all(rule.get("ctdir") == "ORIGINAL" for rule in rules)
+    # A container calls api.stripe.com:443 (a non-Cloudflare address): the REPLY arrives on eth0, original dst port 443.
+    for port in (80, 443):
+        assert _verdict(rules, iif="eth0", src="54.187.174.169", ctdir="REPLY", ctorigdstport=port) == "FALLTHROUGH"
+    # Same reply from a Cloudflare address (api.openai.com): unaffected either way.
+    assert _verdict(rules, iif="eth0", src="104.18.7.192", ctdir="REPLY", ctorigdstport=443) == "FALLTHROUGH"
+    # A NEW connection from the internet to the published port is dropped unless it comes from Cloudflare or the tailnet.
+    assert _verdict(rules, iif="eth0", src="198.51.100.7", ctdir="ORIGINAL", ctorigdstport=443) == "DROP"
+    assert _verdict(rules, iif="eth0", src="198.51.100.7", ctdir="ORIGINAL", ctorigdstport=80) == "DROP"
+    assert _verdict(rules, iif="eth0", src="104.16.1.1", ctdir="ORIGINAL", ctorigdstport=443) == "RETURN"
+    assert _verdict(rules, iif="eth0", src="100.100.1.1", ctdir="ORIGINAL", ctorigdstport=443) == "RETURN"
+    # Other ports and the other interfaces are untouched.
+    assert _verdict(rules, iif="eth0", src="198.51.100.7", ctdir="ORIGINAL", ctorigdstport=8080) == "FALLTHROUGH"
+    assert _verdict(rules, iif="br-abc", src="172.19.0.5", ctdir="ORIGINAL", ctorigdstport=443) == "FALLTHROUGH"
+
+
+def test_the_model_would_have_caught_the_defect():
+    """Guard for the test itself: rules WITHOUT the direction match drop the reply of an outbound call."""
+    old = [
+        {"iif": "eth0", "src": "104.16.0.0/13", "proto": "tcp", "port": "443", "target": "RETURN"},
+        {"iif": "eth0", "proto": "tcp", "port": "443", "target": "DROP"},
+    ]
+    assert _verdict(old, iif="eth0", src="54.187.174.169", ctdir="REPLY", ctorigdstport=443) == "DROP"

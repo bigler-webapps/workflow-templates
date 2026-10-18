@@ -3,6 +3,11 @@
 # Dedicated DOCKER-USER filter for internet-facing published web ports (TCP only: add a UDP
 # rule set if a host ever publishes QUIC on these ports).
 #
+# Rules match ONLY packets flowing in the ORIGINAL direction of a connection (`--ctdir ORIGINAL`): a connection
+# opened from outside to a published port. `--ctorigdstport` alone also matches the REPLY packets of a container's own
+# OUTBOUND connection (the conntrack entry's original destination port is the remote's 443), which would drop every reply
+# from a non-Cloudflare API on the external interface (WM-SEC-9 defect found on staging 2026-10-18).
+#
 # The rule set is built in a NEW chain and swapped in, so there is never a moment without a
 # filter once one has been installed: the new chain is jumped to first, the old jump and chain
 # are removed, then the new chain takes the old name (jumps follow a chain rename).
@@ -68,12 +73,12 @@ apply_family() {
     "$tool" -N "$NEW_CHAIN"
     for port in "${PORTS[@]}"; do
         for cidr in "${cidrs[@]}"; do
-            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$cidr" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN
+            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$cidr" -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport "$port" -j RETURN
         done
         if [ -n "$tailnet" ]; then
-            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$tailnet" -p tcp -m conntrack --ctorigdstport "$port" -j RETURN
+            "$tool" -A "$NEW_CHAIN" -i "$EXT" -s "$tailnet" -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport "$port" -j RETURN
         fi
-        "$tool" -A "$NEW_CHAIN" -i "$EXT" -p tcp -m conntrack --ctorigdstport "$port" -j DROP
+        "$tool" -A "$NEW_CHAIN" -i "$EXT" -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport "$port" -j DROP
     done
     "$tool" -I DOCKER-USER 1 -j "$NEW_CHAIN"
     drop_chain "$tool" "$CHAIN"
