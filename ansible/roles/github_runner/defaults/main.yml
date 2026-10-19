@@ -30,6 +30,30 @@
 
 github_runner_org: bigler-webapps
 
+# Select the existing CI profile unless an inventory explicitly opts into the
+# isolated operations profile. This scaffolding never enables its service.
+github_runner_profile: ci
+github_runner_operations_repository: bigler-webapps/webapp-operations
+github_runner_operations_slots: 1
+github_runner_operations_active: false
+github_runner_operations_runner_version: "2.338.0"
+github_runner_operations_runner_sha256: "sha256:af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32"
+github_runner_operations_user: gh-operations
+github_runner_operations_base_dir: /opt/gh-operations
+github_runner_operations_runtime_dir: /var/lib/gh-operations
+github_runner_operations_issuer_user: gh-runner-issuer
+github_runner_operations_poller_user: gh-operations-poller
+github_runner_operations_issuer_client: /usr/local/libexec/wm-sec18/issue-runner-jit
+github_runner_operations_issuer_client_sha256: ""
+github_runner_operations_max_job_seconds: 3600
+# All writable job/configuration/diagnostic/temp data shares this capped,
+# service-private tmpfs; it disappears on stop, including after SIGKILL.
+github_runner_operations_state_size_bytes: 268435456
+github_runner_operations_package_manifest_verified: false
+# Exact distro package pins are intentionally unset until the target OS and
+# package versions are verified. Inventory must supply a name:version mapping.
+github_runner_operations_package_pins: {}
+
 # GitHub App credentials — REQUIRED, set via host_vars / sync-secrets
 github_runner_app_id: ""
 github_runner_app_private_key: ""

@@ -8,7 +8,7 @@ from jinja2 import Environment, StrictUndefined
 
 ROLE = Path(__file__).resolve().parents[1]
 DEFAULTS = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text(encoding="utf-8"))
-TASKS = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))
+TASKS = yaml.safe_load((ROLE / "tasks" / "ci.yml").read_text(encoding="utf-8"))
 
 
 def named_task(name):

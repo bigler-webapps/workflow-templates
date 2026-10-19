@@ -1,0 +1,46 @@
+[Unit]
+Description=Isolated one-slot GitHub operations runner
+After=network-online.target
+Wants=network-online.target
+# Successful ephemeral job completions must not exhaust a startup quota.
+# Retry frequency is bounded by RestartSec and the issuer's separate policy.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{ github_runner_operations_user }}
+Group={{ github_runner_operations_user }}
+UMask=0077
+Environment=HOME={{ github_runner_operations_runtime_dir }}/slot/home
+Environment=TMPDIR={{ github_runner_operations_runtime_dir }}/slot/temp
+ExecStart={{ github_runner_operations_base_dir }}/bin/launch.sh
+Restart=always
+RestartSec=30
+RuntimeMaxSec={{ github_runner_operations_max_job_seconds }}
+TimeoutStopSec=30
+KillMode=control-group
+NoNewPrivileges=true
+PrivateDevices=true
+MemoryAccounting=true
+MemoryMax=1073741824
+MemorySwapMax=0
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths={{ github_runner_operations_base_dir }}
+TemporaryFileSystem={{ github_runner_operations_runtime_dir }}/slot:rw,nosuid,nodev,size={{ github_runner_operations_state_size_bytes }},nr_inodes=32768,mode=0700,uid={{ getent_passwd[github_runner_operations_user][1] }},gid={{ getent_passwd[github_runner_operations_user][2] }} /tmp:rw,nosuid,nodev,size=16777216,nr_inodes=4096,mode=1777 /var/tmp:rw,nosuid,nodev,size=16777216,nr_inodes=4096,mode=1777 /dev/shm:rw,nosuid,nodev,noexec,size=16777216,nr_inodes=4096,mode=1777
+BindReadOnlyPaths={{ github_runner_operations_base_dir }}/runner/bin:{{ github_runner_operations_runtime_dir }}/slot/bin {{ github_runner_operations_base_dir }}/runner/externals:{{ github_runner_operations_runtime_dir }}/slot/externals
+ReadWritePaths={{ github_runner_operations_runtime_dir }}/slot
+StandardOutput=null
+StandardError=null
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

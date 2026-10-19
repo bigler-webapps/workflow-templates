@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+set +x
+
+readonly INSTALL="{{ github_runner_operations_base_dir }}/runner"
+readonly STATE="{{ github_runner_operations_runtime_dir }}/slot"
+readonly ISSUER="{{ github_runner_operations_issuer_client }}"
+readonly REPOSITORY="{{ github_runner_operations_repository }}"
+readonly RUNNER="ops-slot-1"
+
+fail() { printf '%s\n' "operations runner: $1" >&2; exit 1; }
+[[ "$(id -u)" != 0 ]] || fail "must run as the dedicated unprivileged account"
+[[ "$(id -un)" == "{{ github_runner_operations_user }}" ]] || fail "unexpected service identity"
+if id -nG | tr ' ' '\n' | grep -qx docker; then
+    fail "docker group access is forbidden"
+fi
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    fail "passwordless sudo is forbidden"
+fi
+[[ -x "$ISSUER" && -f "$ISSUER" ]] || fail "trusted issuer client is unavailable"
+parent="${ISSUER%/*}"
+while :; do
+    [[ ! -L "$parent" ]] || fail "issuer ancestor is a symlink"
+    metadata="$(stat -c '%u:%a' "$parent")" || fail "issuer ancestor is unavailable"
+    owner="${metadata%%:*}"
+    mode="${metadata#*:}"
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || fail "issuer ancestor is not root-owned"
+    (( (8#$mode & 022) == 0 )) || fail "issuer ancestor is writable by another account"
+    [[ "$parent" == / ]] && break
+    parent="${parent%/*}"
+    [[ -n "$parent" ]] || parent=/
+done
+[[ ! -L "$ISSUER" && "$(stat -c '%U:%G:%a' "$ISSUER")" == "root:{{ github_runner_operations_user }}:750" ]] || fail "issuer client ownership or mode changed"
+[[ "$(sha256sum "$ISSUER" | cut -d' ' -f1)" == "{{ github_runner_operations_issuer_client_sha256 }}" ]] || fail "issuer client digest changed"
+[[ -d "$INSTALL" && ! -w "$INSTALL" ]] || fail "immutable runner installation is unavailable"
+[[ -d "$STATE/bin" && ! -w "$STATE/bin" && -x "$STATE/bin/Runner.Listener" ]] || fail "immutable runtime binaries are unavailable"
+[[ -d "$STATE/externals" && ! -w "$STATE/externals" ]] || fail "immutable action runtimes are unavailable"
+# systemd mounts a new size-capped tmpfs for every invocation and read-only
+# binds the installed bin/externals into it. JIT configuration, work and _diag
+# must be writable, but executable trees must never be copied to job ownership.
+mkdir -m 0700 "$STATE/home" "$STATE/temp" "$STATE/work"
+export HOME="$STATE/home" TMPDIR="$STATE/temp"
+unset RUNNER_ALLOW_RUNASROOT
+cd "$STATE"
+
+# The WM-SEC-18 client is a separately installed, root-owned fixed executable.
+# It must enforce repository/group/label policy server-side and emit exactly
+# one short-lived, repository-scoped JIT config on stdout; diagnostics go to
+# stderr and must be credential-free. Never enable shell tracing here.
+jit_config="$("$ISSUER" --repository "$REPOSITORY" --runner-name "$RUNNER")" || fail "issuer client failed"
+{% raw %}
+[[ -n "$jit_config" && "${#jit_config}" -le 65536 ]] || fail "issuer returned an empty or oversized JIT config"
+{% endraw %}
+# Materialize only the runner's known JIT files over stdin. Never put the
+# credential-bearing payload into the listener's process arguments. The
+# service-private tmpfs is mode 0700 and every file is created exclusively.
+printf '%s' "$jit_config" | /usr/bin/python3 -c '
+import base64, json, os, sys
+try:
+    payload = json.loads(base64.b64decode(sys.stdin.buffer.read(65537), validate=True))
+    allowed = {".runner", ".credentials", ".credentials_rsaparams"}
+    if not isinstance(payload, dict) or not {".runner", ".credentials"} <= payload.keys() or not payload.keys() <= allowed:
+        raise ValueError()
+    decoded = {name: base64.b64decode(value, validate=True) for name, value in payload.items()}
+    original = json.loads(decoded[".runner"])
+    settings = {name.lower(): value for name, value in original.items()}
+    if len(settings) != len(original):
+        raise ValueError()
+    if (settings.get("ephemeral") is not True or settings.get("disableupdate") is not True
+        or settings.get("workfolder") != "work" or settings.get("agentname") != "ops-slot-1"
+        or settings.get("githuburl") not in (None, "", "https://github.com/bigler-webapps/webapp-operations")):
+        raise ValueError()
+    for name, content in decoded.items():
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(content)
+except Exception:
+    sys.exit(1)
+' || fail "invalid JIT configuration"
+unset jit_config
+exec "$STATE/bin/Runner.Listener" run

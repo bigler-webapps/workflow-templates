@@ -11,7 +11,7 @@ ROLE = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROLE / "templates" / "jit-config.sh.j2"
 TEMPLATE = TEMPLATE_PATH.read_text(encoding="utf-8")
 DEFAULTS = (ROLE / "defaults" / "main.yml").read_text(encoding="utf-8")
-TASKS = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))
+TASKS = yaml.safe_load((ROLE / "tasks" / "ci.yml").read_text(encoding="utf-8"))
 
 
 def render(source, extra_labels):

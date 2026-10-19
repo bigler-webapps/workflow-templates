@@ -1,0 +1,210 @@
+---
+# Dedicated low-privilege operations runner profile. The caller validates all
+# inventory values before including this file; no CI profile task is included.
+- name: Assert operations profile is isolated and explicitly eligible
+  ansible.builtin.assert:
+    that:
+      - github_runner_profile == 'operations'
+      - inventory_hostname == 'ops'
+      - "'operations' in group_names and 'runners' not in group_names"
+      - github_runner_operations_repository == 'bigler-webapps/webapp-operations'
+      - github_runner_operations_slots is integer and github_runner_operations_slots == 1
+      - github_runner_user not in [github_runner_operations_user, github_runner_operations_issuer_user, github_runner_operations_poller_user]
+      - github_runner_base_dir != github_runner_operations_base_dir
+      - github_runner_operations_user == 'gh-operations'
+      - github_runner_operations_issuer_user == 'gh-runner-issuer'
+      - github_runner_operations_poller_user == 'gh-operations-poller'
+      - github_runner_operations_base_dir == '/opt/gh-operations'
+      - github_runner_operations_runtime_dir == '/var/lib/gh-operations'
+      - github_runner_operations_issuer_client == '/usr/local/libexec/wm-sec18/issue-runner-jit'
+      - github_runner_operations_active is sameas false
+      - github_runner_operations_runner_sha256 is match('^sha256:[0-9a-f]{64}$')
+      - github_runner_operations_runner_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - github_runner_operations_package_manifest_verified | bool
+      - github_runner_operations_package_pins is mapping
+      - github_runner_operations_package_pins | length > 0
+      - github_runner_operations_package_pins.values() | select('match', '^[A-Za-z0-9.+:-]+=[0-9][A-Za-z0-9.+:~_-]*$') | list | length == github_runner_operations_package_pins | length
+      - "['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq'] | difference(github_runner_operations_package_pins.keys() | list) | length == 0"
+      - github_runner_operations_package_pins.keys() | reject('match', '^(git|openssh-client|rsync|python3|curl|jq|ca-certificates|tzdata|libc6|libgcc-s1|libstdc\+\+6|zlib1g|libicu[0-9]+|libssl[0-9]+(t64)?|libkrb5-3|libgssapi-krb5-2|liblttng-ust[0-9]+(t64)?|libunwind[0-9]+|libcurl[34](t64)?)$') | list | length == 0
+      - not (github_runner_app_id | string | length > 0)
+      - not (github_runner_app_private_key | string | length > 0)
+      - not (github_runner_app_installation_id | string | length > 0)
+      - github_runner_group_id | string == '1'
+      - github_runner_slots is integer and github_runner_slots == 1
+      - github_runner_operations_max_job_seconds is integer and 0 < github_runner_operations_max_job_seconds <= 3600
+      - github_runner_operations_state_size_bytes is integer and 0 < github_runner_operations_state_size_bytes <= 536870912
+    fail_msg: >-
+      Operations profile requires a separate one-slot ops identity, the exact
+      private repository, exact package pins, no CI App credentials, and an
+      inactive scaffolding. This batch cannot activate a runner, regardless
+      of inventory flags; WM-SEC-18 owns the separately gated activation.
+
+- name: Assert operations package manifest keys match pinned package names
+  ansible.builtin.assert:
+    that:
+      - item.value.split('=')[0] == item.key
+  loop: "{{ github_runner_operations_package_pins | dict2items }}"
+
+- name: Inspect operations service state before provisioning
+  ansible.builtin.service_facts:
+
+- name: Refuse changes to an active operations slot
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services.get('gh-operations.service', {}).get('state', 'stopped') != 'running'
+    fail_msg: Drain and verify the operations slot through its separately approved lifecycle before provisioning.
+
+- name: Inspect existing operations account memberships
+  become: true
+  ansible.builtin.getent:
+    database: group
+
+- name: Reject pre-existing privileged operations accounts
+  ansible.builtin.assert:
+    that:
+      - item not in (getent_group.get('docker', ['','','',''])[2] | default('') | split(','))
+      - item not in (getent_group.get('sudo', ['','','',''])[2] | default('') | split(','))
+      - item not in (getent_group.get('wheel', ['','','',''])[2] | default('') | split(','))
+    fail_msg: Never repurpose an existing privileged CI identity as operations.
+  loop:
+    - "{{ github_runner_operations_user }}"
+    - "{{ github_runner_operations_issuer_user }}"
+    - "{{ github_runner_operations_poller_user }}"
+
+- name: Inspect existing numeric service identities
+  ansible.builtin.getent:
+    database: passwd
+
+- name: Reject aliased or privileged pre-existing service groups
+  ansible.builtin.assert:
+    that:
+      - item not in getent_group or getent_group[item][1] | int > 0
+      - item not in getent_group or getent_group[item][1] not in _operations_other_gids
+    fail_msg: Service groups must have distinct non-root GIDs unrelated to other local groups.
+  vars:
+    _operations_other_gids: "{{ getent_group | dict2items | rejectattr('key', 'equalto', item) | map(attribute='value') | map(attribute=1) | list }}"
+  loop:
+    - "{{ github_runner_operations_user }}"
+    - "{{ github_runner_operations_issuer_user }}"
+    - "{{ github_runner_operations_poller_user }}"
+
+- name: Reject root or shared pre-existing service identities
+  ansible.builtin.assert:
+    that:
+      - item not in getent_passwd or getent_passwd[item][1] | int > 0
+      - item not in getent_passwd or getent_passwd[item][1] not in _operations_other_uids
+      - item not in getent_passwd or getent_passwd[item][2] not in _operations_privileged_gids
+    fail_msg: Operations, issuer and poller must have distinct non-root UIDs unrelated to CI.
+  vars:
+    _operations_other_uids: "{{ getent_passwd | dict2items | rejectattr('key', 'equalto', item) | map(attribute='value') | map(attribute=1) | list }}"
+    _operations_privileged_gids: "{{ ['docker', 'sudo', 'wheel'] | intersect(getent_group.keys() | list) | map('extract', getent_group) | map(attribute=1) | list }}"
+  loop:
+    - "{{ github_runner_operations_user }}"
+    - "{{ github_runner_operations_issuer_user }}"
+    - "{{ github_runner_operations_poller_user }}"
+
+- name: Ensure separate operations service groups exist
+  become: true
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - "{{ github_runner_operations_user }}"
+    - "{{ github_runner_operations_issuer_user }}"
+    - "{{ github_runner_operations_poller_user }}"
+
+- name: Ensure operations service identities exist without privileged groups
+  become: true
+  ansible.builtin.user:
+    name: "{{ item }}"
+    group: "{{ item }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ github_runner_operations_runtime_dir }}/{{ item }}"
+    create_home: false
+    groups: []
+    append: false
+    state: present
+  loop:
+    - "{{ github_runner_operations_user }}"
+    - "{{ github_runner_operations_issuer_user }}"
+    - "{{ github_runner_operations_poller_user }}"
+
+- name: Read operations numeric service identity for private state mount
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_operations_user }}"
+
+- name: Create protected operations directories
+  become: true
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ github_runner_operations_base_dir }}", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_base_dir }}/runner", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_base_dir }}/bin", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_base_dir }}/cache", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_runtime_dir }}", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_runtime_dir }}/slot", owner: root, group: root, mode: "0755" }
+    - { path: "{{ github_runner_operations_runtime_dir }}/issuer", owner: "{{ github_runner_operations_issuer_user }}", group: "{{ github_runner_operations_issuer_user }}", mode: "0700" }
+    - { path: "{{ github_runner_operations_runtime_dir }}/poller", owner: "{{ github_runner_operations_poller_user }}", group: "{{ github_runner_operations_poller_user }}", mode: "0700" }
+
+- name: Install exact operations runtime package versions
+  become: true
+  ansible.builtin.apt:
+    name: "{{ github_runner_operations_package_pins | dict2items | map(attribute='value') | list }}"
+    state: present
+    update_cache: true
+
+- name: Download pinned operations runner archive
+  become: true
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ github_runner_operations_runner_version }}/actions-runner-linux-x64-{{ github_runner_operations_runner_version }}.tar.gz"
+    dest: "{{ github_runner_operations_base_dir }}/cache/runner.tar.gz"
+    checksum: "{{ github_runner_operations_runner_sha256 }}"
+    mode: "0644"
+
+- name: Extract immutable operations runner installation
+  become: true
+  ansible.builtin.unarchive:
+    src: "{{ github_runner_operations_base_dir }}/cache/runner.tar.gz"
+    dest: "{{ github_runner_operations_base_dir }}/runner"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy fixed operations runner launcher
+  become: true
+  ansible.builtin.template:
+    src: operations-launcher.sh.j2
+    dest: "{{ github_runner_operations_base_dir }}/bin/launch.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy inactive operations systemd service
+  become: true
+  ansible.builtin.template:
+    src: gh-operations.service.j2
+    dest: /etc/systemd/system/gh-operations.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: systemd daemon-reload
+
+- name: Flush operations service unit handler
+  ansible.builtin.meta: flush_handlers
+
+- name: Keep operations runner disabled by default
+  become: true
+  ansible.builtin.systemd:
+    name: gh-operations.service
+    enabled: false
+    state: stopped
+
