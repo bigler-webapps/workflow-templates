@@ -98,23 +98,71 @@ source repository, exact head SHA, branch ref, workflow path, and successful
 run status before using these bytes. Registry namespace comes from the trusted
 allowlist. These functions cannot fetch or establish any of that provenance.
 
-For images, the publish action still needs to push, then read the pushed
-reference's registry digest and produce this manifest. For static releases, a
-trusted artifact upload and retrieval path must bind the fixed artifact name
-and ID to the selected run. WM-SEC-17 independently authorizes successful
-allowlisted runs and checks source state; the manifest is evidence, not
-authority. It cannot certify an honest build on a compromised root-equivalent
-CI host.
+For images, the composite `publish-backend-image` action exposes an explicit
+`release_contract: v1` opt-in. Its `release_image_namespace` must be an
+externally selected `ghcr.io/<source-owner>/<name>-backend` namespace, and
+`release_workflow_ref` must exactly match the triggering
+`GITHUB_WORKFLOW_REF`. It accepts the established Dockerfile/context and Vite
+build inputs plus the per-run GHCR token and optional BuildKit private-engine
+token. It rejects `existing_image`, and it does not read `project.yaml`,
+`.env`, runtime-secret bundles, or caller-local scripts. With no release
+contract selected, the legacy action inputs, tag behavior, survey build args,
+and `image` output remain on the original path.
+
+The v1 action calls `.github/scripts/release_build.py` from its installed
+`github.action_path`. The script checks `GITHUB_REPOSITORY`, `GITHUB_SHA`,
+`GITHUB_REF`, `GITHUB_WORKFLOW_REF`, run ID/attempt, and the actual `git
+rev-parse HEAD` before login or build. Only `refs/heads/develop` and
+`refs/heads/main` are accepted. A manual checkout whose HEAD does not match
+the triggering SHA fails closed; callers must select a release whose source
+matches the checked-out release. The output tag is derived as
+`release-<run id>-<attempt>-<full source SHA>`; Docker receives fixed argv,
+`--pull`, the validated repository-relative build paths, and existing named Vite
+arguments passed from build-only environment (values are not placed in argv). The GHCR login token is supplied only on login stdin, never in a child environment. Git receives only basic OS/tool-discovery environment; Docker login/push/inspect receive no job credentials. Only the build receives the optional private-engine token environment for the named BuildKit secret. Unrelated job credentials are not forwarded. Docker writes its
+credential state into a private per-run config directory that is removed on
+success and failure. Build and command error text is suppressed from action
+logs.
+
+After push, the producer runs the equivalent of
+`docker buildx imagetools inspect <namespace>:<derived-tag>` with a fixed JSON template selecting `.Name` and `.Manifest.Digest`. Both the observed reference name and digest are checked; the [Docker CLI reference](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/) documents the registry operation and JSON template fields.
+It obtains the digest from the registry response and passes repository, tag,
+and digest to `produce_image_manifest`; neither the local image ID nor a
+caller-supplied digest is used. The canonical `release.json` is written with
+mode 0600 into a private directory below `RUNNER_TEMP`, then uploaded by the
+existing pinned `actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08`
+action as `release-manifest-<run id>-<attempt>` with a seven-day retention and
+missing-file failure. An always-running cleanup step removes the private
+directory after upload, including upload failure. The composite action output
+`image` is the immutable digest reference; `manifest_path` and `artifact_name`
+are safe outputs for the in-job upload step. `artifact_id` is the upload action result and must be independently checked against the originating repository/run/attempt by the consumer. The local path is removed after upload, so later jobs retrieve the artifact rather than reuse that path. Private directories are allocated randomly and cleanup selects only the directory created by this action invocation; pre-existing similarly named files are not removed. Unknown modes fail closed. Login has a30-second deadline; build1800 seconds; push600 seconds; inspect30 seconds and128KiB maximum captured metadata. Raw child stdout/stderr are suppressed except the bounded registry-read response parsed internally. Credential cleanup failure fails the producer and suppresses output publication; it requires investigation rather than claiming cleanup succeeded.
+
+These are source-level producer mechanics and offline stub coverage. The
+supported Docker/buildx/Python versions, real GHCR login/push/inspect behavior,
+artifact provenance and retrieval binding, and WM-SEC-17's authoritative
+successful-run/source authorization still require their own acceptance
+evidence. Static releases still need their producer. WM-SEC-17 independently
+authorizes successful runs and checks source state; the manifest is evidence,
+not authority. It cannot certify an honest build on a compromised
+root-equivalent CI host.
+
+## Static asset preparation
+
+`prebuilt_deploy.prepare_static_assets(raw_manifest, expected_identity=..., selected_artifact=..., bundle=..., allowed_asset_roots=("report",), destination_parent=...)` consumes original manifest bytes, externally selected source/artifact identity and actual bounded bundle bytes. It reuses the published manifest validator and byte verifier; there is no prevalidated-dictionary bypass. Roots and a trusted temporary parent come from reviewed caller policy. Source archive data cannot select routing or overwrite deployment configuration. The return value is a newly allocated private directory for later transfer, never evidence of deployment success or authorization.
+
+The accepted bundle format is uncompressed USTAR only. Producers must normalize uid/gid and device numbers to zero, leave user/group/link fields empty and use USTAR00 headers without GNU/PAX/sparse extensions. Bounds:64MiB bundle,512 members,16MiB per file and48MiB total extracted content. Every header/checksum/path/type/mode/extent is checked before destination creation. The archive must have a complete two-block terminator and only zero trailing padding. Gzip and other compressed formats are rejected. Real regular file content is copied in at most64KiB writes; no extractall, executable evaluation, subprocess or target access is used.
+
+Paths are relative under exact trusted roots. Traversal, absolute/drive/backslash paths, links/devices/FIFOs/sparse entries, executable file modes, duplicates and parent-child conflicts fail closed. Casefolded collisions are rejected for portability. Control files including .git/.github, .env variants, compose/project/secrets configuration, Dockerfile, Caddyfile and shell/Python/PowerShell/Windows command files are excluded even under an allowed root. Ordinary browser JavaScript is asset data. Caddy/compose configuration remains separately reviewed, never taken from this bundle. Directories are0700 and files0600 on the Linux controller; this API does not promise restrictive Windows ACLs or authorize use there as a privileged executor.
+
+The parent directory must already exist, be absolute and have no symlink ancestor. The preparer creates its own unique private directory, never reuses an existing destination. Validation failures write nothing; write failures attempt removal of all paths created by the call and preserve pre-existing content. An OS cleanup failure raises `asset_cleanup_failed` and may leave a private staging directory requiring caller cleanup/investigation; it is never reported as success. The trusted integration owns successful-directory cleanup after transfer/cancellation and must not publish assets until preparation succeeds. Hash equality alone does not imply safe extraction or trusted content; this preparer applies those additional path/type/size rules.
 
 ## Remaining integration and acceptance gates
 
-This file is only the offline producer/validator slice. It does not modify or
-prove the publishing action's fresh `--pull` behavior, a real registry push or
-digest lookup, artifact upload/retrieval binding, deployment action validation,
-strict no-build fallback, static archive extraction safety, pinned operations
-tooling, credential isolation, or consumer migration. The next producer batch
-must wire fresh-base builds using that exact run/attempt/SHA tag, registry digest resolution, and artifact
-publication into trusted workflow context. The later prebuilt-deployment batch
+This file records the offline manifest plus image-producer source slice; it
+does not prove a real registry push or digest lookup, artifact
+upload/retrieval binding, deployment action validation, strict no-build
+fallback, real static deployment and remote atomic publication, pinned operations tooling,
+credential isolation on live runners, or consumer migration. The later
+prebuilt-deployment batch
 must validate before secret acquisition or target contact, preserve exact
 image digests through the target compose command, safely extract static content
 with traversal/link/control-file protections, and keep legacy pinned consumers
@@ -122,3 +170,7 @@ working during rollout. Toolchain pinning, hosted recovery parity, candidate
 staging proofs for image and static apps, and operator-approved activation
 remain separate gates. No live registry, workflow, runner, target, or
 deployment evidence is established by the tests in this batch.
+
+## Build-context hygiene in v1
+
+The source Dockerfile and effective Dockerfile-specific or context ignore file are read as bounded control data (at most128KiB each). The producer never opens an environment/key file. A private copy of the identical Dockerfile receives a generated adjacent ignore file containing the effective source rules followed by final exclusions for .env variants, .ssh/.secrets directories, PEM/key/SSH key files and Git state at any depth. Source ignore negations cannot undo the appended exclusions. The checkout and its ignore files are unchanged. [Docker documents specific-ignore precedence and last-match rules](https://docs.docker.com/build/concepts/context/); supported builder versions and an actual candidate build must still prove this integration. Missing/unsafe Dockerfile/ignore controls fail before login. Unknown runtime secrets under arbitrary filenames cannot be discovered by filename filtering: release jobs must receive no runtime secret and the CI-host compromise residual remains open. This guard neither certifies honest builds nor replaces containment. [Named build arguments use the build environment](https://docs.docker.com/reference/cli/docker/buildx/build/#build-arg); browser license/build values may still appear in intended application build output/image and are not promised to be private runtime secrets.

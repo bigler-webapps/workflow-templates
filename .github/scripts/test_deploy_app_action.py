@@ -33,7 +33,7 @@ class CI9StructuralTests(unittest.TestCase):
     def test_published_images_have_an_oci_source_label(self):
         """Both the normal build and CI-6 full-image rebuild are linked to the repo."""
         source_label = "--label org.opencontainers.image.source=https://github.com/${{ github.repository }}"
-        self.assertEqual(CI_WORKFLOW.count(source_label), 1)
+        self.assertEqual(CI_WORKFLOW.count(source_label), 2)
         self.assertEqual(PUBLISH_ACTION.count(source_label), 1)
 
     def test_deploy_action_keeps_registry_and_build_secrets_out_of_env(self):

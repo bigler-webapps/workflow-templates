@@ -2,6 +2,18 @@ name: 'Publish Backend Image'
 description: 'Builds or tags the backend image and publishes its immutable tag to GHCR.'
 
 inputs:
+  release_contract:
+    description: 'Opt in to the release-contract-v1 producer. Empty preserves the legacy contract.'
+    required: false
+    default: ''
+  release_image_namespace:
+    description: 'Validated GHCR backend namespace owned by the source repository owner.'
+    required: false
+    default: ''
+  release_workflow_ref:
+    description: 'GitHub workflow_ref from the trusted caller context.'
+    required: false
+    default: ''
   image_tag:
     description: 'Immutable image tag resolved from the checked-out working tree.'
     required: true
@@ -44,13 +56,70 @@ inputs:
 outputs:
   image:
     description: 'Full immutable GHCR image reference that was pushed.'
-    value: ${{ steps.publish.outputs.image }}
+    value: ${{ steps.release.outputs.image || steps.publish.outputs.image }}
+  manifest_path:
+    description: 'Path to release.json for release-contract-v1 artifact publication.'
+    value: ${{ steps.release.outputs.manifest_path }}
+  artifact_name:
+    description: 'Run-bound artifact name for release-contract-v1.'
+    value: ${{ steps.release.outputs.artifact_name }}
+  artifact_id:
+    description: 'GitHub artifact ID; consumers must independently bind it to this run and attempt.'
+    value: ${{ steps.manifest_upload.outputs.artifact-id }}
 
 runs:
   using: 'composite'
   steps:
+    - name: Produce release-contract-v1 image and manifest
+      id: release
+      if: ${{ inputs.release_contract != '' }}
+      shell: bash
+      env:
+        RELEASE_CONTRACT: ${{ inputs.release_contract }}
+        RELEASE_IMAGE_NAMESPACE: ${{ inputs.release_image_namespace }}
+        RELEASE_WORKFLOW_REF: ${{ inputs.release_workflow_ref }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        BACKEND_DOCKERFILE: ${{ inputs.backend_dockerfile }}
+        BACKEND_BUILD_CONTEXT: ${{ inputs.backend_build_context }}
+        HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_read_token }}
+        VITE_APP_MUI_LICENSE_KEY: ${{ inputs.vite_app_mui_license_key }}
+        VITE_SURVEY_APP_API_BASE_URL: ${{ inputs.vite_survey_app_api_base_url }}
+        VITE_SURVEY_APP_SITE_SLUG: ${{ inputs.vite_survey_app_site_slug }}
+        EXISTING_IMAGE: ${{ inputs.existing_image }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        [ "$RELEASE_CONTRACT" = "v1" ] || { echo "Unsupported release contract."; exit 1; }
+        PRIVATE_DIR="$(mktemp -d "$RUNNER_TEMP/release-build.XXXXXXXX")"
+        printf 'private_dir=%s\n' "$PRIVATE_DIR" >> "$GITHUB_OUTPUT"
+        OUTPUT_DIR="$PRIVATE_DIR/output"
+        python3 "$ACTION_PATH/../../scripts/release_build.py" --output-dir "$OUTPUT_DIR"
+        printf 'manifest_path=%s/release.json\n' "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+        printf 'artifact_name=release-manifest-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+        printf 'image=%s\n' "$(cat "$OUTPUT_DIR/image.txt")" >> "$GITHUB_OUTPUT"
+    - name: Upload release manifest
+      id: manifest_upload
+      if: ${{ inputs.release_contract == 'v1' }}
+      uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+      with:
+        name: ${{ steps.release.outputs.artifact_name }}
+        path: ${{ steps.release.outputs.manifest_path }}
+        if-no-files-found: error
+        overwrite: false
+        retention-days: 7
+    - name: Remove private release output directory
+      if: ${{ always() && inputs.release_contract == 'v1' }}
+      shell: bash
+      env:
+        PRIVATE_DIR: ${{ steps.release.outputs.private_dir }}
+      run: |
+        set -euo pipefail
+        [ -n "$PRIVATE_DIR" ] || exit 0
+        [ ! -L "$PRIVATE_DIR" ] || { echo "Invalid private output path."; exit 1; }
+        case "$PRIVATE_DIR" in "$RUNNER_TEMP"/release-build.????????) rm -rf -- "$PRIVATE_DIR" ;; *) echo "Invalid private output path."; exit 1 ;; esac
     - name: Publish backend image to GHCR
       id: publish
+      if: ${{ inputs.release_contract == '' }}
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
