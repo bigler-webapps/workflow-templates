@@ -374,3 +374,5 @@ All5round4reports/exit0 inspected; envelope/regression/duplication/security No f
 
 Cumulative12deduplicated raised/8accepted/worstdefect; four concrete rejected reports (initial worker metadata ownership, map-entry versus auth-value Docker semantics, approved parent canonical live-gate scope, and blanket-negative-stub suite claim) remain documented. No waiver/fallback or unresolved accepted finding. Final corrected all-lens review and authoritative affected gate remain pending. No actual Docker/host/credential/live/recovery/consumer/finding activation or closure.
 
+
+Source commit:a6a67f2c2bbddb18be5452054bde005d7167cce0. Canonical WM evidence commit:cfa4059a00f0a14e4ccb22cfb8c34987e1426bdf. SHA metadata precedes a single main push per repo.
