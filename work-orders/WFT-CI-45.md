@@ -245,3 +245,5 @@ Final reviewer session IDs:
 - security: 01a16354-f1b0-7f10-a020-b3680f7be012.
 
 Final authoritative local Linux Python3.12.3 controller affected run: 101PASS/no skips, exit0. Target37/manifest22/staticpreparer13/private-deploy29. Reviewed source/dependency hashes and unchanged approved Part A verified; explicit own-path staging only. No whole-WO, whole-programme or finding closure.
+
+Strict image target source landing: 1a42bfbb8757ec8a082cdf7ebd5298434f4e42df. No action release or live activation.
