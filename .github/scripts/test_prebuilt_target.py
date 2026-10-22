@@ -396,7 +396,11 @@ class PrebuiltTargetTests(TargetFixture):
     def test_pinned_yaml_parser_and_bounded_node_subset_have_positive_control(self):
         import yaml
         path = SCRIPT_DIR.parents[1]/"toolchains/compose-parser-requirements.txt"
-        self.assertIn("PyYAML==6.0.3",path.read_text(encoding="utf-8").splitlines())
+        contract = json.loads((path.parent/"deploy-python.json").read_text(encoding="utf-8"))
+        pin = next(item for item in contract["distributions"] if item["name"] == "PyYAML")
+        requirements = [line for line in path.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
+        self.assertEqual(pin["version"], pt.COMPOSE_PARSER_VERSION)
+        self.assertEqual(requirements, [f"PyYAML=={pt.COMPOSE_PARSER_VERSION} --hash=sha256:{pin['sha256']}"])
         self.assertEqual(yaml.__version__,"6.0.3")
         pt._validate_compose_control(b'services:\n  web:\n    environment:\n      NOTE: "include: data, not a directive"\n    volumes: ["app-data:/data"]\nvolumes:\n  app-data: {}\n')
         with patch.object(yaml,"__version__","0.0.0"):

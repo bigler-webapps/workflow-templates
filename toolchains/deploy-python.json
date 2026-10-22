@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "contract_id": "prebuilt-deployment-python-v1",
+  "runtime": {
+    "implementation": "CPython",
+    "python": "3.12",
+    "system": "Linux",
+    "machine": "x86_64"
+  },
+  "distributions": [
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "wheel": "pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc"
+    },
+    {
+      "name": "django-core-micha",
+      "version": "3.17.0",
+      "wheel": "django_core_micha-3.17.0-py3-none-any.whl",
+      "sha256": "022c14dae17bef1fcbe76506606398c4699cb8458760b056c1165bf47f7e6dae"
+    }
+  ],
+  "profiles": {
+    "controller": {
+      "distributions": [
+        "PyYAML",
+        "django-core-micha"
+      ],
+      "requirements": "deploy-python-requirements.txt",
+      "entrypoints": {
+        "generate-env": {
+          "distribution": "django-core-micha",
+          "value": "django_core_micha.scripts.generate_env:main"
+        }
+      }
+    },
+    "target-parser": {
+      "distributions": [
+        "PyYAML"
+      ],
+      "requirements": "compose-parser-requirements.txt",
+      "entrypoints": {}
+    }
+  }
+}
