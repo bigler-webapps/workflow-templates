@@ -146,6 +146,16 @@ class TargetFixture(unittest.TestCase):
 
 
 class PrebuiltTargetTests(TargetFixture):
+    def test_falsey_explicit_executor_does_not_select_real_default(self):
+        class Falsey(FakeExecutor):
+            def __bool__(self): return False
+        executor = Falsey()
+        with patch.object(pt, '_SubprocessExecutor', side_effect=AssertionError('unexpected default')):
+            result = self.execute(executor=executor)
+        self.assertEqual(result.image, IMAGE)
+        self.assertTrue(any('up' in call[0] for call in executor.calls))
+        self.assert_private_temp_empty()
+
     def test_success_uses_validated_digest_and_observed_services(self):
         executor = FakeExecutor()
         result = self.execute(executor=executor)

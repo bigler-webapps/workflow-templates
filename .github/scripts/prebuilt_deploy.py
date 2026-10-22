@@ -296,7 +296,7 @@ def _create_private_directory(parent: Path) -> Path:
         path = Path(tempfile.mkdtemp(prefix="static-assets-", dir=parent))
         os.chmod(path, 0o700)
         return path
-    except Exception:
+    except BaseException:
         if path is not None:
             _remove_created_directory(path)
         _fail("asset_directory_create_failed")
@@ -346,7 +346,7 @@ def _remove_created_directory(path: Path) -> None:
             path.unlink()
         else:
             shutil.rmtree(path)
-    except Exception:
+    except BaseException:
         _fail("asset_cleanup_failed")
 
 
@@ -404,7 +404,7 @@ def prepare_static_assets(
         if prepared is not None:
             _remove_created_directory(prepared)
         raise
-    except Exception:
+    except BaseException:
         if prepared is not None:
             _remove_created_directory(prepared)
         _fail("asset_write_failed")

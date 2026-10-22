@@ -126,6 +126,14 @@ def _plain_text(value: object, pattern: re.Pattern[str]) -> bool:
     return type(value) is str and pattern.fullmatch(value) is not None
 
 
+def _valid_pinned_image(value: object) -> bool:
+    """Shared canonical image/namespace/port boundary for target policy."""
+    if not _plain_text(value, _IMAGE) or len(value.partition('@')[0]) > 255:
+        return False
+    registry = value.partition('/')[0]
+    return ':' not in registry or int(registry.rsplit(':', 1)[1]) <= 65535
+
+
 def _absolute_path(value: object) -> Path:
     if type(value) is not str or not value or len(value) > 4096:
         _fail("target_path_invalid")
@@ -189,11 +197,7 @@ def _validate_target(target: object, expected: object) -> tuple[Path, Path, Path
         if type(item) is not tuple or len(item) != 2:
             _fail("sidecar_services_invalid")
         service, image = item
-        if (not _plain_text(service, _SERVICE) or not _plain_text(image, _IMAGE)
-                or len(image.partition("@")[0]) > 255):
-            _fail("sidecar_image_invalid")
-        registry = image.partition("/")[0]
-        if ":" in registry and int(registry.rsplit(":", 1)[1]) > 65535:
+        if not _plain_text(service, _SERVICE) or not _valid_pinned_image(image):
             _fail("sidecar_image_invalid")
         sidecars.append((service, image))
     sidecar_names = [service for service, _ in sidecars]
@@ -695,7 +699,7 @@ def execute_image_deployment(
         command_prefix = tuple(compose_prefix)
         child_env = {"PATH": os.defpath, "HOME": str(Path.home()), "LANG": "C.UTF-8",
                      "LC_ALL": "C.UTF-8", "DOCKER_CONFIG": str(docker_config)}
-        selected_executor = executor or _SubprocessExecutor()
+        selected_executor = executor if executor is not None else _SubprocessExecutor()
         run = lambda args, capture=False: _run(
             selected_executor, args, cwd=str(app), env=child_env,
             timeout=whole_deadline - _now(clock), capture=capture,

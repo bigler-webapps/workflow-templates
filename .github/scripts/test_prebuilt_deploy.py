@@ -318,6 +318,34 @@ class PrebuiltDeployTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_SECRET, str(caught.exception))
         self.assertEqual(len(list(self.parent.iterdir())), 1)
 
+    def test_keyboard_interrupt_during_write_cleans_partial_tree(self):
+        bundle = make_tar([('report/one.txt', 'file', b'ok', 0o644)])
+        original = pd._write_file
+        def interrupted(root, archive, member):
+            original(root, archive, member)
+            raise KeyboardInterrupt('synthetic interruption')
+        with patch.object(pd, '_write_file', side_effect=interrupted):
+            with self.assertRaisesRegex(pd.PreparationError, 'asset_write_failed'):
+                self.prepare(bundle)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_keyboard_interrupt_during_initial_private_mode_cleans_empty_tree(self):
+        bundle = make_tar([('report/one.txt', 'file', b'ok', 0o644)])
+        with patch.object(pd.os, 'chmod', side_effect=KeyboardInterrupt('synthetic interruption')):
+            with self.assertRaisesRegex(pd.PreparationError, 'asset_directory_create_failed'):
+                self.prepare(bundle)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_keyboard_interrupt_inside_cleanup_is_fixed_explicit_failure(self):
+        bundle = make_tar([('report/one.txt', 'file', b'ok', 0o644)])
+        with patch.object(pd, '_write_file', side_effect=OSError('synthetic write failure')), \
+                patch.object(pd.shutil, 'rmtree', side_effect=KeyboardInterrupt('synthetic cleanup interruption')) as cleanup:
+            with self.assertRaisesRegex(pd.PreparationError, 'asset_cleanup_failed') as caught:
+                self.prepare(bundle)
+        cleanup.assert_called_once()
+        self.assertEqual(str(caught.exception), 'asset_cleanup_failed')
+        self.assertEqual(len(list(self.parent.iterdir())), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
