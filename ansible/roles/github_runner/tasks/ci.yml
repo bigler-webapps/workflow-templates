@@ -37,7 +37,10 @@
       - github_runner_routine_cli_contract.node_major is integer and github_runner_routine_cli_contract.node_major >= 22
       - github_runner_routine_cli_contract.node_major is not boolean
       - github_runner_claude_code_version == github_runner_routine_cli_contract.version
-      - github_runner_node_major is integer and github_runner_node_major == github_runner_routine_cli_contract.node_major
+      # Retained Ansible2.16/2.17 renders this scalar template as text;2.20
+      # preserves its integer type. Exact canonical decimal equality supports
+      # both without accepting floats, booleans, leading zeros or range drift.
+      - (github_runner_node_major | string) == (github_runner_routine_cli_contract.node_major | string)
       - github_runner_app_id | string | length > 0
       - github_runner_app_private_key | string | length > 0
       - github_runner_app_installation_id | string | length > 0

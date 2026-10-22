@@ -32,7 +32,7 @@ def test_role_defaults_derive_selected_values_from_one_role_manifest():
     first = TASKS[0]
     assert first["name"] == "Assert required variables are set"
     assert "github_runner_claude_code_version == github_runner_routine_cli_contract.version" in first["ansible.builtin.assert"]["that"]
-    assert "github_runner_node_major is integer and github_runner_node_major == github_runner_routine_cli_contract.node_major" in first["ansible.builtin.assert"]["that"]
+    assert "(github_runner_node_major | string) == (github_runner_routine_cli_contract.node_major | string)" in first["ansible.builtin.assert"]["that"]
 
 
 def test_node_22_install_precedes_claude_inspection_and_exact_install():
@@ -104,8 +104,31 @@ def test_effective_override_refuses_before_first_mutating_task(version):
     assert not all(env.compile_expression(c)(**values) for c in conditions)
     values['github_runner_claude_code_version'] = CONTRACT['version']
     assert all(env.compile_expression(c)(**values) for c in conditions)
+    # Legacy hosted Ansible renders the same manifest scalar as text.
+    values['github_runner_node_major'] = str(CONTRACT['node_major'])
+    assert all(env.compile_expression(c)(**values) for c in conditions)
     values['github_runner_node_major'] = 20
     assert not all(env.compile_expression(c)(**values) for c in conditions)
+
+
+@pytest.mark.parametrize('major',[True,False,22.0,'22.0','022',' 22','22 ','22\n','>=22','22; echo unsafe'])
+def test_node_scalar_compatibility_does_not_accept_noncanonical_or_unsafe_values(major):
+    condition=next(c for c in TASKS[0]['ansible.builtin.assert']['that']
+                   if '(github_runner_node_major | string)' in c)
+    evaluate=Environment(undefined=StrictUndefined).compile_expression(condition)
+    assert evaluate(github_runner_node_major=major,github_runner_routine_cli_contract=CONTRACT) is False
+
+
+@pytest.mark.parametrize('selected_major',[24,26])
+def test_node_scalar_compatibility_tracks_the_selected_manifest_major(selected_major):
+    condition=next(c for c in TASKS[0]['ansible.builtin.assert']['that']
+                   if '(github_runner_node_major | string)' in c)
+    evaluate=Environment(undefined=StrictUndefined).compile_expression(condition)
+    selected={**CONTRACT,'node_major':selected_major}
+    for observed in (selected_major,str(selected_major)):
+        assert evaluate(github_runner_node_major=observed,github_runner_routine_cli_contract=selected) is True
+    for stale in (CONTRACT['node_major'],str(CONTRACT['node_major'])):
+        assert evaluate(github_runner_node_major=stale,github_runner_routine_cli_contract=selected) is False
 
 
 @pytest.mark.parametrize(('output','stderr','rc','failed'),[
