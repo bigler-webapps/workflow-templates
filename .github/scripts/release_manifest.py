@@ -274,15 +274,14 @@ def _parse_manifest(raw: bytes | bytearray) -> dict:
     return value
 
 
-def validate_manifest(
+def validate_manifest_structure(
     raw: bytes | bytearray,
     *,
     expected: ReleaseIdentity,
     expected_image_namespace: str | None = None,
     expected_static_artifact: StaticArtifactSelection | None = None,
-    resolve_pushed_image: Callable[[str, str], Mapping[str, object]] | None = None,
 ) -> dict:
-    """Validate schema and compare every identity field to trusted expectations."""
+    """Pure preflight only; image digests are NOT verified against a registry."""
     _validate_identity(expected)
     if (expected_image_namespace is None) == (expected_static_artifact is None):
         _fail("exactly_one_output_expectation_required")
@@ -306,10 +305,6 @@ def validate_manifest(
         prefix = expected_image_namespace + "@"
         if not image.startswith(prefix):
             _fail("image_namespace_mismatch")
-        observed = _resolved_image(expected, expected_image_namespace,
-                                   release_image_tag(expected), resolve_pushed_image)
-        if image != observed:
-            _fail("image_digest_mismatch")
     else:
         if set(output) != {"artifact_name", "artifact_id", "byte_length", "sha256"}:
             _fail("static_output_fields_invalid")
@@ -328,6 +323,25 @@ def validate_manifest(
             _fail("static_bundle_metadata_invalid")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}\Z", digest):
             _fail("static_bundle_metadata_invalid")
+    return manifest
+
+
+def validate_manifest(
+    raw: bytes | bytearray,
+    *,
+    expected: ReleaseIdentity,
+    expected_image_namespace: str | None = None,
+    expected_static_artifact: StaticArtifactSelection | None = None,
+    resolve_pushed_image: Callable[[str, str], Mapping[str, object]] | None = None,
+) -> dict:
+    """Validate identity and bind image output to an independent registry read."""
+    manifest = validate_manifest_structure(raw, expected=expected,
+        expected_image_namespace=expected_image_namespace, expected_static_artifact=expected_static_artifact)
+    if manifest["kind"] == "image":
+        observed = _resolved_image(expected, expected_image_namespace,
+                                   release_image_tag(expected), resolve_pushed_image)
+        if manifest["output"]["image"] != observed:
+            _fail("image_digest_mismatch")
     return manifest
 
 

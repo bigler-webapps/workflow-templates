@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,6 +67,29 @@ def expected_static_manifest():
 
 
 class ReleaseManifestTests(unittest.TestCase):
+    def test_pure_image_preflight_has_no_registry_effect_and_preserves_binding_requirement(self):
+        raw = wire(expected_image_manifest())
+        with patch.object(rm,"_resolved_image",side_effect=AssertionError("pure preflight must not read registry")):
+            self.assertEqual(rm.validate_manifest_structure(raw,expected=IDENTITY,
+                expected_image_namespace=NAMESPACE),expected_image_manifest())
+            with self.assertRaises(rm.ManifestError):
+                rm.validate_manifest_structure(raw,expected=replace(IDENTITY,sha="f"*40),expected_image_namespace=NAMESPACE)
+        calls=[]
+        def mismatch(namespace,tag):
+            calls.append((namespace,tag));return {"repository":namespace,"tag":tag,"digest":"sha256:"+"b"*64}
+        with self.assertRaises(rm.ManifestError):
+            rm.validate_manifest(raw,expected=IDENTITY,expected_image_namespace=NAMESPACE,resolve_pushed_image=mismatch)
+        self.assertEqual(calls,[(NAMESPACE,TAG)])
+
+    def test_pure_static_preflight_retains_selected_artifact_contract(self):
+        raw=wire(expected_static_manifest())
+        selected=rm.StaticArtifactSelection("release-static-123456-2",998877)
+        self.assertEqual(rm.validate_manifest_structure(raw,expected=IDENTITY,
+            expected_static_artifact=selected),expected_static_manifest())
+        with self.assertRaises(rm.ManifestError):
+            rm.validate_manifest_structure(raw,expected=IDENTITY,
+                expected_static_artifact=rm.StaticArtifactSelection(selected.name,998878))
+
     def make_image(self, result=DEFAULT_RESOLUTION):
         calls = []
 

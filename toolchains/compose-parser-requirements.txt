@@ -1,0 +1,3 @@
+# Target-side strict Compose-control parser; pre-provision through reviewed IaC.
+# This fragment is not the complete deployment toolchain or an install action.
+PyYAML==6.0.3
