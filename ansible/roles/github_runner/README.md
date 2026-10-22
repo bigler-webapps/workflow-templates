@@ -1,8 +1,8 @@
 # GitHub runner role profiles
 
-`github_runner_profile: ci` remains the default. `tasks/ci.yml` is the complete
-pre-profile task file, including its comments; the existing CI service and JIT
-templates are unchanged. No WFT-CI-43 hardening is implemented: the operator
+`github_runner_profile: ci` remains the default. WM-RT-30 adds exact routine CLI
+selection and verification to that CI profile and disables Claude auto-update
+in its service. The JIT template remains unchanged. No WFT-CI-43 hardening is implemented: the operator
 dropped that WO on 2026-10-19. Base-image freshness remains WFT-CI-45 work.
 
 `operations` is an opt-in profile for the isolated `ops` inventory host in the
@@ -86,3 +86,19 @@ WM provisioning play, verified host access and OS manifest, issuer/client,
 GitHub group exclusion, trusted-source protections, deployments, monitoring and
 recovery remain separate work and gates. No host, registration or credential
 is activated by publishing this role.
+
+The CI profile reads the exact Claude Code package/version and Node.js major
+from `files/routine-cli.json`. It rejects inventory drift before provisioning,
+installs the pinned package when the exact installed version differs, and
+checks the executable's reported version. Node.js 22 is installed before the
+package; the CI service sets `DISABLE_AUTOUPDATER=1`. Codex selection and its
+optional pinned installation remain independent.
+
+The reusable routine CLI preflight is available at
+`.github/actions/check-routine-cli`. Consumers must reference a released,
+versioned workflow-templates revision and adopt the action only after the
+runner has been provisioned with the same role manifest. The action reads the
+manifest and helper from its own checkout, runs `claude --version`, and sets
+`DISABLE_AUTOUPDATER=1` for later job steps. It does not install tools or
+authenticate. Existing routine callers remain unchanged until that staged
+adoption is authorized.

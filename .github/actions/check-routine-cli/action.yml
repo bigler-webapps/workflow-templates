@@ -1,0 +1,11 @@
+name: Check pinned routine Claude CLI
+description: Verify the installed Claude CLI against this checkout's shared runner contract.
+runs:
+  using: composite
+  steps:
+    - name: Disable Claude automatic updates for later job steps
+      shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+      run: printf '%s\n' 'DISABLE_AUTOUPDATER=1' >> "$GITHUB_ENV"
+    - name: Verify exact routine CLI version
+      shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+      run: /usr/bin/python3 -I "${{ github.action_path }}/../../scripts/routine_cli.py" --manifest "${{ github.action_path }}/../../../ansible/roles/github_runner/files/routine-cli.json"

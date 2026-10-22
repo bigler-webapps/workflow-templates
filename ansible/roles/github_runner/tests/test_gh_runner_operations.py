@@ -41,10 +41,8 @@ def render(name, overrides=None):
             values(**(overrides or {})))
 
 
-def test_ci_source_and_templates_are_exact_pre_profile_baseline():
+def test_unchanged_jit_template_remains_exact_baseline():
     expected = {
-        'tasks/ci.yml': '30e0d808e50e22097455d7e0772f8f6f7ab220f7f2d36fee95b7284c1c960e40',
-        'templates/gh-runner@.service.j2': 'd76f9378335475c7b1004bda5743401e7f1505f6c86e7f3c8bd5aed1ebe33fbd',
         'templates/jit-config.sh.j2': '95658badd360333c594a402a65338cccfb9b57b7456e28cafa943ef6fc066b65',
     }
     for name, digest in expected.items():

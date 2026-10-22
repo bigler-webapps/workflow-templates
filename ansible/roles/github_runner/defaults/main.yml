@@ -71,13 +71,11 @@ github_runner_sha256: ""
 # records the last known version and should be reviewed when this role changes.
 github_runner_gh_version: "2.63.0"
 
-# Node.js major version for the NodeSource setup repository (Claude Code CLI
-# runtime requirement). Change this deliberately so the role updates the apt source.
-github_runner_node_major: "20"
-
-# @anthropic-ai/claude-code npm package version — 'latest' by default; pin to a
-# concrete version for a reproducible runner fleet and update together with tests.
-github_runner_claude_code_version: "latest"
+# Exact routine CLI authority is shipped inside this collection role.
+# Override drift is refused by the CI profile before provisioning.
+github_runner_routine_cli_contract: "{{ lookup('ansible.builtin.file', role_path + '/files/routine-cli.json') | from_json }}"
+github_runner_node_major: "{{ github_runner_routine_cli_contract.node_major }}"
+github_runner_claude_code_version: "{{ github_runner_routine_cli_contract.version }}"
 
 # @openai/codex npm package version - empty leaves the runner unchanged;
 # set to a concrete version (for example "0.161.0") to install Codex CLI.
