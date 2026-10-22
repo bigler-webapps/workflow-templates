@@ -481,3 +481,5 @@ TestsR1/P3 REJECTED as a concrete coverage defect: the named structural assertio
 
 All5round5reports/exit0 inspected. Envelope/regression/duplication/security No findings. TestsR1/P2 accepted: process/socket/shell/entrypoint-load and file/directory-write guards now wrap the actual default discovery->bounded metadata->parser->checker->CLI positive/negative test, not only the injected-distribution cases. Every actual mocked os.open path rejects writable/create/truncate flags and sensitive config names; fdopen is read-only. Existing selected-metadata, wrong-entrypoint and target-parser-only assertions preserved; no production source change. Focused1PASS/29deselected/no skips/exit0. Cumulative10deduplicated raised/8accepted/worstdefect; two prior concrete rejections remain documented. Final corrected review/affected gate pending; no live/finding closure.
 
+
+Pinned Python source:aed7421b3da2055b2a41277d31132519980772ce. Canonical WM evidence:b269efa6d882ad9c174ec4664f39ced52b3a4406. SHA metadata precedes a single main push per repo.
