@@ -1,0 +1,87 @@
+name: 'Publish Static Release'
+description: 'Packages already-built static assets and publishes a run-bound release-contract-v1 manifest.'
+
+inputs:
+  release_contract:
+    description: 'Must be v1 to publish a static release.'
+    required: true
+  release_workflow_ref:
+    description: 'GitHub workflow_ref from the trusted caller context.'
+    required: true
+  asset_path:
+    description: 'Validated repository-relative path to already-built static data.'
+    required: true
+  asset_root:
+    description: 'Approved archive root for the assets; defaults to report/report.'
+    required: false
+    default: report/report
+
+outputs:
+  artifact_name:
+    description: 'Run-bound static bundle artifact name.'
+    value: ${{ steps.prepare.outputs.bundle_name }}
+  artifact_id:
+    description: 'Immutable uploaded bundle artifact ID.'
+    value: ${{ steps.bundle_upload.outputs.artifact-id }}
+  manifest_name:
+    description: 'Run-bound static manifest artifact name.'
+    value: ${{ steps.finalize.outputs.manifest_name }}
+  manifest_artifact_id:
+    description: 'Immutable uploaded manifest artifact ID.'
+    value: ${{ steps.manifest_upload.outputs.artifact-id }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare bounded static release bundle
+      id: prepare
+      shell: bash
+      env:
+        RELEASE_CONTRACT: ${{ inputs.release_contract }}
+        RELEASE_WORKFLOW_REF: ${{ inputs.release_workflow_ref }}
+        STATIC_ASSET_PATH: ${{ inputs.asset_path }}
+        STATIC_ASSET_ROOT: ${{ inputs.asset_root }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        python3 -I "$ACTION_PATH/../../scripts/static_release.py" prepare --asset-path "$STATIC_ASSET_PATH" --asset-root "$STATIC_ASSET_ROOT"
+    - name: Upload static release bundle
+      id: bundle_upload
+      uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+      with:
+        name: ${{ steps.prepare.outputs.bundle_name }}
+        path: ${{ steps.prepare.outputs.bundle_path }}
+        if-no-files-found: error
+        overwrite: false
+        retention-days: 7
+    - name: Finalize static release manifest
+      id: finalize
+      shell: bash
+      env:
+        RELEASE_CONTRACT: ${{ inputs.release_contract }}
+        RELEASE_WORKFLOW_REF: ${{ inputs.release_workflow_ref }}
+        STATIC_PRIVATE_DIR: ${{ steps.prepare.outputs.private_dir }}
+        STATIC_BUNDLE_ARTIFACT_ID: ${{ steps.bundle_upload.outputs.artifact-id }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        python3 -I "$ACTION_PATH/../../scripts/static_release.py" finalize --private-dir "$STATIC_PRIVATE_DIR" --artifact-id "$STATIC_BUNDLE_ARTIFACT_ID"
+    - name: Upload static release manifest
+      id: manifest_upload
+      uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+      with:
+        name: ${{ steps.finalize.outputs.manifest_name }}
+        path: ${{ steps.finalize.outputs.manifest_path }}
+        if-no-files-found: error
+        overwrite: false
+        retention-days: 7
+    - name: Remove private static release output
+      if: ${{ always() }}
+      shell: bash
+      env:
+        STATIC_PRIVATE_DIR: ${{ steps.prepare.outputs.private_dir }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        [ -n "$STATIC_PRIVATE_DIR" ] || exit 0
+        python3 -I "$ACTION_PATH/../../scripts/static_release.py" cleanup --private-dir "$STATIC_PRIVATE_DIR"
