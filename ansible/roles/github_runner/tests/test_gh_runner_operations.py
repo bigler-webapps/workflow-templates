@@ -194,11 +194,39 @@ def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_p
 def test_real_selector_routes_default_ci_without_entering_operations(tmp_path):
     # Probe only the changed routing seam; the complete CI body and its old
     # templates are independently hash-pinned and retain their existing tests.
-    code, output = run_role(tmp_path, {'github_runner_profile': DEFAULTS['github_runner_profile']},
+    code, output = run_role(tmp_path, {
+        'github_runner_profile': DEFAULTS['github_runner_profile'],
+        'github_runner_slots': 5,
+        'github_runner_app_id': '12345',
+        'github_runner_app_private_key': 'synthetic-not-a-key',
+        'github_runner_app_installation_id': '67890',
+    },
         hostname='ci-host', groups=['runners'], ci_probe=True)
     assert code == 0, output
     assert 'PROFILE_CI_SELECTED' in output
     assert 'Assert operations profile is isolated' not in output
+
+
+@pytest.mark.parametrize('hostname,groups,expected', [
+    ('ops', ['operations'], "inventory_hostname != 'ops'"),
+    ('ops', ['runners'], "inventory_hostname != 'ops'"),
+    ('ci-host', ['operations'], "'operations' not in group_names"),
+    ('ci-host', ['operations', 'runners'], "'operations' not in group_names"),
+])
+@pytest.mark.parametrize('with_ci_credentials', [False, True])
+def test_selector_rejects_ci_on_operations_target(tmp_path, hostname, groups, expected, with_ci_credentials):
+    changes = {'github_runner_profile': 'ci', 'github_runner_slots': 5}
+    if with_ci_credentials:
+        changes.update({
+            'github_runner_app_id': '12345',
+            'github_runner_app_private_key': 'synthetic-not-a-key',
+            'github_runner_app_installation_id': '67890',
+        })
+    code, output = run_role(tmp_path, changes, hostname=hostname, groups=groups, ci_probe=True)
+    assert code != 0, output
+    assert expected in output, output
+    assert 'PROFILE_CI_SELECTED' not in output, output
+    assert 'mock_module' not in output, output
 
 
 @pytest.mark.parametrize('package', ['nodejs', 'docker.io', 'unapproved-tool'])

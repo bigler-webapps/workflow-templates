@@ -85,7 +85,11 @@ This is inactive shared-role source only. Its collection release/consumer pin,
 WM provisioning play, verified host access and OS manifest, issuer/client,
 GitHub group exclusion, trusted-source protections, deployments, monitoring and
 recovery remain separate work and gates. No host, registration or credential
-is activated by publishing this role.
+is activated by publishing this role. The selector rejects the CI profile before
+either profile task runs when the target is `ops` or belongs to the `operations`
+inventory group; the default CI profile remains available to ordinary CI hosts.
+This source correction remains unadopted until the exact published source pin is
+tested separately, and it does not satisfy any activation gate.
 
 The CI profile reads the exact Claude Code package/version and Node.js major
 from `files/routine-cli.json`. It rejects inventory drift before provisioning,

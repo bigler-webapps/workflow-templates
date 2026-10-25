@@ -3,6 +3,8 @@
 - name: Assert runner profile selection is supported
   ansible.builtin.assert:
     that:
+      - github_runner_profile != 'ci' or inventory_hostname != 'ops'
+      - github_runner_profile != 'ci' or 'operations' not in group_names
       - github_runner_profile in ['ci', 'operations']
       - github_runner_profile != 'operations' or (github_runner_operations_repository == 'bigler-webapps/webapp-operations')
       - github_runner_profile != 'operations' or (github_runner_operations_slots is integer and github_runner_operations_slots == 1)
@@ -17,6 +19,7 @@
       Unsupported runner profile or unsafe operations profile combination.
       Operations requires the dedicated one-slot repository identity and no
       CI App credentials; use the CI profile for existing runner hosts.
+      The CI profile cannot target the ops host or operations inventory group.
 
 - name: Apply existing CI runner profile
   ansible.builtin.include_tasks: ci.yml
