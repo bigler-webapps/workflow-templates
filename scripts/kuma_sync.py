@@ -51,12 +51,16 @@ Monitors (e.g. monitoring/monitor.yml):
 """
 
 import argparse
+import ipaddress
+import math
 import os
 import re
 import sys
 import time
+import unicodedata
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -125,6 +129,162 @@ def _expand_env(value):
     if isinstance(value, list):
         return [_expand_env(v) for v in value]
     return value
+
+
+_MONITOR_ENV_REFERENCE = re.compile(r"\$(?:[A-Za-z0-9_]+|\{)")
+_MONITOR_HOST_LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?\Z")
+_MONITOR_DATA_ERROR = "Invalid monitor configuration."
+_MONITOR_DATA_MAX_DEPTH = 32
+_MONITOR_DATA_MAX_NODES = 20000
+_MONITOR_DATA_MAX_TEXT_BYTES = 1024 * 1024
+
+
+class _InvalidMonitorData(ValueError):
+    pass
+
+
+def _monitor_data_error():
+    return _InvalidMonitorData(_MONITOR_DATA_ERROR)
+
+
+def _monitor_text_is_safe(value, budget):
+    try:
+        budget[0] += len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise _monitor_data_error() from None
+    if budget[0] > _MONITOR_DATA_MAX_TEXT_BYTES:
+        raise _monitor_data_error()
+    if _MONITOR_ENV_REFERENCE.search(value):
+        raise _monitor_data_error()
+
+
+def _detach_monitor_value(value, *, depth, budget, active):
+    """Copy bounded YAML-native data without consulting process state."""
+    budget[1] += 1
+    if budget[1] > _MONITOR_DATA_MAX_NODES or depth > _MONITOR_DATA_MAX_DEPTH:
+        raise _monitor_data_error()
+
+    if type(value) is str:
+        _monitor_text_is_safe(value, budget)
+        return value
+    if value is None or type(value) in (bool, int):
+        if type(value) is int and value.bit_length() > 1024:
+            raise _monitor_data_error()
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise _monitor_data_error()
+        return value
+    if type(value) not in (dict, list):
+        raise _monitor_data_error()
+
+    identity = id(value)
+    if identity in active:
+        raise _monitor_data_error()
+    active.add(identity)
+    try:
+        if type(value) is list:
+            return [
+                _detach_monitor_value(item, depth=depth + 1, budget=budget, active=active)
+                for item in value
+            ]
+
+        detached = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise _monitor_data_error()
+            _monitor_text_is_safe(key, budget)
+            detached[key] = _detach_monitor_value(
+                item, depth=depth + 1, budget=budget, active=active
+            )
+        return detached
+    finally:
+        active.remove(identity)
+
+
+def _validate_monitor_url(value):
+    if type(value) is not str or not value or value != value.strip():
+        raise _monitor_data_error()
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise _monitor_data_error()
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise _monitor_data_error() from None
+    if (
+        parsed.scheme.lower() not in ("http", "https")
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+    ):
+        raise _monitor_data_error()
+    if port is not None and not 1 <= port <= 65535:
+        raise _monitor_data_error()
+    _validate_monitor_hostname(hostname)
+
+
+def _validate_monitor_hostname(value):
+    if type(value) is not str or not value or value != value.strip() or len(value) > 253:
+        raise _monitor_data_error()
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise _monitor_data_error()
+    if any(char in value for char in "/\\@?#"):
+        raise _monitor_data_error()
+    try:
+        ipaddress.ip_address(value)
+        return
+    except ValueError:
+        pass
+
+    try:
+        dns_value = value.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise _monitor_data_error() from None
+    # Internal service names may use underscores; this is a literal destination
+    # syntax check, not a public-DNS registration policy.
+    dns_name = dns_value[:-1] if dns_value.endswith(".") else dns_value
+    if not dns_name or len(dns_name) > 253 or any(
+        not _MONITOR_HOST_LABEL.fullmatch(label) or len(label) > 63
+        for label in dns_name.split(".")
+    ):
+        raise _monitor_data_error()
+
+
+def _validate_monitor_spec(spec):
+    if type(spec) is not dict or type(spec.get("name")) is not str:
+        raise _monitor_data_error()
+    if "url" in spec:
+        _validate_monitor_url(spec["url"])
+    if "hostname" in spec:
+        _validate_monitor_hostname(spec["hostname"])
+    if "port" in spec:
+        port = spec["port"]
+        if type(port) is int:
+            numeric_port = port
+        elif type(port) is str and re.fullmatch(r"[0-9]+", port):
+            significant_digits = port.lstrip("0") or "0"
+            if len(significant_digits) > 5:
+                raise _monitor_data_error()
+            numeric_port = int(significant_digits)
+        else:
+            raise _monitor_data_error()
+        if not 1 <= numeric_port <= 65535:
+            raise _monitor_data_error()
+        spec["port"] = numeric_port
+
+
+def _prepare_monitor_specs(specs):
+    """Return detached, validated monitor declarations or one fixed error."""
+    detached = _detach_monitor_value(specs, depth=0, budget=[0, 0], active=set())
+    if type(detached) is not list:
+        raise _monitor_data_error()
+    for spec in detached:
+        _validate_monitor_spec(spec)
+    return detached
 
 
 def _login():
@@ -790,6 +950,12 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False,
         print("ℹ️  No monitors declared in config; nothing to do.")
         return
 
+    try:
+        specs = _prepare_monitor_specs(specs)
+    except _InvalidMonitorData as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
     session = api if isinstance(api, Session) else Session(api)
 
     existing = {m["name"]: m for m in session.call("get_monitors", "get_monitors")}
@@ -814,8 +980,7 @@ def sync_monitors(api, config_path=None, project_yaml_path=None, prune=False,
                 file=sys.stderr,
             )
 
-    for raw_spec in specs:
-        spec = _expand_env(raw_spec)
+    for spec in specs:
         name = spec["name"]
         declared_names.add(name)
 
@@ -926,6 +1091,11 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
             # propagate into the prune block with an incomplete declared-name set.
             try:
                 specs = monitors_from_project_yaml(path)
+                specs = _prepare_monitor_specs(specs)
+            except _InvalidMonitorData as exc:
+                print(str(exc), file=sys.stderr)
+                failed_apps.append(app_name)
+                continue
             except Exception as exc:  # noqa: BLE001
                 print(f"❌ Failed to parse {path}: {exc}", file=sys.stderr)
                 failed_apps.append(app_name)
@@ -947,8 +1117,7 @@ def sync_monitors_multi(project_yaml_paths, prune=False, notifications_config_pa
                 continue
 
             app_failed = False
-            for raw_spec in specs:
-                spec = _expand_env(raw_spec)
+            for spec in specs:
                 name = spec["name"]
                 all_declared_names.add(name)
 
