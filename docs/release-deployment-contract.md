@@ -176,3 +176,34 @@ deployment evidence is established by the tests in this batch.
 The source Dockerfile and effective Dockerfile-specific or context ignore file are read as bounded control data (at most128KiB each). The producer never opens an environment/key file. A private copy of the identical Dockerfile receives a generated adjacent ignore file containing the effective source rules followed by final exclusions for .env variants, .ssh/.secrets directories, PEM/key/SSH key files and Git state at any depth. Source ignore negations cannot undo the appended exclusions. The checkout and its ignore files are unchanged. [Docker documents specific-ignore precedence and last-match rules](https://docs.docker.com/build/concepts/context/); supported builder versions and an actual candidate build must still prove this integration. Missing/unsafe Dockerfile/ignore controls fail before login. Unknown runtime secrets under arbitrary filenames cannot be discovered by filename filtering: release jobs must receive no runtime secret and the CI-host compromise residual remains open. This guard neither certifies honest builds nor replaces containment. [Named build arguments use the build environment](https://docs.docker.com/reference/cli/docker/buildx/build/#build-arg); browser license/build values may still appear in intended application build output/image and are not promised to be private runtime secrets.
 
 The dedicated CI-side static producer is documented in [Static release producer](static-release-producer.md). Its additive source passed the WFT-CI-45 scoped source gate; real uploaded-artifact compatibility, strict deployment, versioned release and consumer acceptance remain separate gates. Existing callers keep their pinned paths.
+
+## Bounded connection diagnostics
+
+The legacy `deploy-app` action emits fixed phase/result codes in its three
+controlled connection blocks. The warm probe privately reads at most 65,537
+bytes per status attempt and accepts at most 65,536 bytes, counting trailing
+newlines before command substitution can strip them. Only
+a successful status read with `Running` and the requested tag yields
+`connected=true`; unavailable, malformed, oversized or failed reads select the
+existing join path. Failed direct reads are discarded before the scoped
+`sudo -n` read fallback. Neither status JSON nor raw backend state, tags,
+targets, usernames, peer topology or provider stderr is printed by these blocks.
+
+`runner_connection` reports `reused` or `join_required`.
+`runner_diagnostics=bounded_summary` is informational and executes no full
+status/netcheck dump. `target_datapath` reports `observed` or `failed` after
+direct ping and its existing scoped sudo fallback. Ping failure remains
+nonfatal; the existing SSH `true` probe decides success through
+`target_ssh=success` or `target_ssh=failed`, with the latter failing the step.
+All status, ping and SSH invocations use a 25-second GNU timeout with TERM
+and a five-second kill grace. The two attempts are sequential and each has
+its own cap; this is not a 25-second bound on the whole step. Underlying
+probe stdout/stderr is suppressed, apart from the private bounded JSON read.
+
+The join action, warm-daemon reuse, existing legacy OAuth inputs, read-only
+sudo fallback and SSH host-key policy are retained. This change does not
+establish an operations mode, CI exclusion, protected credentials or host
+custody. It does not redact third-party join logs or other deployment steps.
+Local Bash tests execute the actual YAML blocks with private synthetic CLI
+stubs; representative connectivity, cancellation and live log acceptance,
+strict prebuilt integration and independent recovery remain open.

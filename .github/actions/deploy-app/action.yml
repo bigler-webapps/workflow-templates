@@ -124,24 +124,42 @@ runs:
         # so `--accept-routes` is irrelevant. A future SUBNET-ROUTED target would
         # need accept-routes re-established and this assumption revisited.
         ts_status_json() {
-          tailscale status --json 2>/dev/null || sudo -n tailscale status --json 2>/dev/null
+          local candidate probe_status LC_ALL=C
+          # A final marker preserves trailing newlines until the BYTE cap is
+          # checked. Retain the pipeline status separately from that marker.
+          if candidate="$(timeout --signal=TERM --kill-after=5s 25s tailscale status --json 2>/dev/null | head -c 65537; probe_status=$?; printf '.'; exit "$probe_status")"; then
+            probe_status=0
+          else
+            probe_status=$?
+          fi
+          candidate="${candidate%.}"
+          [ "${#candidate}" -le 65536 ] || return 1
+          if [ "$probe_status" -ne 0 ]; then
+            candidate="$(timeout --signal=TERM --kill-after=5s 25s sudo -n tailscale status --json 2>/dev/null | head -c 65537; probe_status=$?; printf '.'; exit "$probe_status")" || return 1
+            candidate="${candidate%.}"
+            [ "${#candidate}" -le 65536 ] || return 1
+          fi
+          printf '%s' "$candidate"
         }
         connected=false
         if command -v tailscale >/dev/null 2>&1; then
-          # No `set -e`, so a failed substitution simply yields empty json and
-          # falls through to a clean join; `|| true` makes that intent explicit.
-          json="$(ts_status_json)" || true
-          state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || echo unknown)"
-          tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || echo false)"
-          echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"
-          if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
-            connected=true
+          # Keep status private and cap captured output. An oversized or
+          # malformed response safely falls through to the existing join.
+          json="$(ts_status_json 2>/dev/null)" || json=
+          if [ "${#json}" -le 65536 ] && [ -n "$json" ]; then
+            state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || true)"
+            tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || true)"
+            if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
+              connected=true
+            fi
           fi
-        else
-          echo "tailscale CLI not present yet"
         fi
         echo "connected=${connected}" >> "$GITHUB_OUTPUT"
-        echo "→ reuse existing tailnet connection: ${connected}"
+        if [ "$connected" = true ]; then
+          echo "phase=runner_connection result=reused"
+        else
+          echo "phase=runner_connection result=join_required"
+        fi
 
     - name: 🔗 Join Tailnet
       if: steps.ts_probe.outputs.connected != 'true'
@@ -156,17 +174,9 @@ runs:
       shell: bash
       run: |
         set -uo pipefail
-        # Read-only — NO `up`, `set`, or `reset`. Captures the runner-side truth
-        # (warm vs cold node, DNS, NAT/DERP datapath) so a connectivity failure is
-        # diagnosable from this log instead of guessed at. Never fails the step.
-        # `timeout` bounds netcheck, which can hang on a congested DERP mesh.
-        ts() { timeout 20 tailscale "$@" 2>/dev/null || timeout 20 sudo -n tailscale "$@" 2>/dev/null || true; }
-        echo "::group::tailscale status"
-        ts status
-        echo "::endgroup::"
-        echo "::group::tailscale netcheck"
-        ts netcheck
-        echo "::endgroup::"
+        # The private status probe above and target pre-flight below provide
+        # bounded phase outcomes; never dump tailnet-wide status or netcheck.
+        echo "phase=runner_diagnostics result=bounded_summary"
 
     - name: 🔎 Validate inputs
       shell: bash
@@ -357,20 +367,17 @@ runs:
         # at a broken tailnet path or a network-ACL drop (tag:ci-deploy not
         # permitted to the target); ping succeeding while SSH fails points at
         # the SSH layer (sshd / Tailscale-SSH ACL).
-        echo "→ tailscale ping ${TAILNET_HOST}"
-        timeout 25 tailscale ping --c 3 "${TAILNET_HOST}" \
-          || timeout 25 sudo -n tailscale ping --c 3 "${TAILNET_HOST}" \
-          || echo "⚠️ tailscale ping failed (datapath or network-ACL?) — continuing to SSH probe"
-        echo "→ ssh ${SSH_USER}@${TAILNET_HOST} true"
-        if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${SSH_USER}@${TAILNET_HOST}" true; then
-          echo "❌ Tailscale-SSH pre-flight failed."
-          echo "   Common causes:"
-          echo "   - Tailnet ACL ssh:-section missing rule for tag:ci-deploy → tag:server-* as ${SSH_USER}"
-          echo "   - tailscaled on target host not started with --ssh"
-          echo "   - target host not joined to tailnet (check ${TAILNET_HOST} resolves)"
+        ping_result=failed
+        if timeout --signal=TERM --kill-after=5s 25s tailscale ping --c 3 "${TAILNET_HOST}" >/dev/null 2>&1 \
+          || timeout --signal=TERM --kill-after=5s 25s sudo -n tailscale ping --c 3 "${TAILNET_HOST}" >/dev/null 2>&1; then
+          ping_result=observed
+        fi
+        echo "phase=target_datapath result=${ping_result}"
+        if ! timeout --signal=TERM --kill-after=5s 25s ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${SSH_USER}@${TAILNET_HOST}" true >/dev/null 2>&1; then
+          echo "phase=target_ssh result=failed"
           exit 1
         fi
-        echo "✅ Tailscale-SSH reachable as ${SSH_USER}@${TAILNET_HOST}"
+        echo "phase=target_ssh result=success"
 
     - name: 🔐 Generate .env file
       shell: bash
