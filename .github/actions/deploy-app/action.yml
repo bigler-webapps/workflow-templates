@@ -208,29 +208,49 @@ runs:
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
       run: |
         set -euo pipefail
-        printf '%s' "$INPUT_ENV" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid environment"; exit 1; }
-        printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid ssh_user"; exit 1; }
+        invalid() { printf '%s\n' "$1" >&2; exit 1; }
+        [[ "$INPUT_ENV" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || invalid 'Invalid environment'
+        [[ "$INPUT_SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || invalid 'Invalid ssh_user'
         # ssh_host is optional (derived from project.yaml when empty);
-        # only validate format when explicitly provided.
+        # reject unsafe scalar syntax using builtins before Python setup.
+        # The configuration step validates full IP semantics before any output.
         if [ -n "$INPUT_SSH_HOST" ]; then
-          printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid ssh_host"; exit 1; }
+          [ "${#INPUT_SSH_HOST}" -le 253 ] || invalid 'Invalid ssh_host'
+          [[ "$INPUT_SSH_HOST" =~ ^[A-Za-z0-9.:-]+$ ]] || invalid 'Invalid ssh_host'
+          if [[ "$INPUT_SSH_HOST" == *:* ]]; then
+            [[ "$INPUT_SSH_HOST" =~ ^[A-Fa-f0-9:.]+$ ]] || invalid 'Invalid ssh_host'
+          else
+            [[ "$INPUT_SSH_HOST" != .* && "$INPUT_SSH_HOST" != *. && "$INPUT_SSH_HOST" != *..* ]] || invalid 'Invalid ssh_host'
+            IFS='.' read -r -a host_labels <<< "$INPUT_SSH_HOST"
+            for label in "${host_labels[@]}"; do
+              [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || invalid 'Invalid ssh_host'
+            done
+          fi
         fi
-        # SUBDIR may contain '/' (relative path like .ssh/app); check only for dangerous patterns.
+        # SUBDIR may contain '/' (relative path like .ssh/app).
         value="${INPUT_SUBDIR:-}"
-        if [ -n "$value" ] && printf '%s' "$value" | grep -qE '\.\.|[[:space:]]|[;&|`$\\]'; then
-          echo "❌ Invalid INPUT_SUBDIR (no traversal or shell metas)"
-          exit 1
+        if [ -n "$value" ]; then
+          [[ "$value" =~ ^[A-Za-z0-9._/-]{1,255}$ ]] || invalid 'Invalid INPUT_SUBDIR'
+          [[ "$value" != /* && "$value" != */ && "$value" != *//* ]] || invalid 'Invalid INPUT_SUBDIR'
+          IFS='/' read -r -a segments <<< "$value"
+          for segment in "${segments[@]}"; do
+            [[ "$segment" != . && "$segment" != .. && "$segment" != -* ]] || invalid 'Invalid INPUT_SUBDIR'
+          done
         fi
         # Names must be safe basenames — positive allowlist (enforced server-side too, S58).
         for var_name in INPUT_F1_NAME INPUT_F2_NAME; do
           value="${!var_name:-}"
           [ -z "$value" ] && continue
-          printf '%s' "$value" | grep -qE '^[A-Za-z0-9._-]+$' || { echo "❌ Invalid $var_name (unsafe basename)"; exit 1; }
+          [[ "$value" =~ ^[A-Za-z0-9._-]{1,128}$ && "$value" != . && "$value" != .. && "$value" != -* ]] || invalid "Invalid $var_name"
         done
         for var_name in INPUT_F1_MODE INPUT_F2_MODE; do
           value="${!var_name:-}"
+          name_var="${var_name%_MODE}_NAME"
+          if [ -n "${!name_var:-}" ] && [ -z "$value" ]; then
+            invalid "Invalid $var_name"
+          fi
           [ -z "$value" ] && continue
-          printf '%s' "$value" | grep -qE '^[0-7]{3,4}$' || { echo "❌ Invalid $var_name (octal file mode)"; exit 1; }
+          [[ "$value" =~ ^[0-7]{3,4}$ ]] || invalid "Invalid $var_name"
         done
         echo "✅ Inputs validated."
 
@@ -260,94 +280,147 @@ runs:
         TAILNET_SUFFIX: ${{ inputs.tailnet_suffix }}
       run: |
         python3 - <<'PYCODE'
+        import ipaddress
         import os
         import re
         import sys
         import yaml
 
         target_env = os.environ["TARGET_ENV"]
-        ssh_host_input = os.environ.get("SSH_HOST_INPUT", "").strip()
-        # Backward-compat default lives on the input declaration in
-        # action.yml; the .strip() + fallback here is defensive against an
-        # empty-string override (a caller setting `tailnet_suffix: ''` would
-        # otherwise produce `<server>.` which is invalid).
-        tailnet_suffix = os.environ.get("TAILNET_SUFFIX", "").strip() or "tail990d7f.ts.net"
+        ssh_host_input = os.environ.get("SSH_HOST_INPUT", "")
+        suffix_input = os.environ.get("TAILNET_SUFFIX", "")
+        failure = "deployment_configuration_invalid"
+
+        def fail():
+            print(failure, file=sys.stderr)
+            raise SystemExit(1)
+
+        def dns_name(value):
+            return (
+                type(value) is str
+                and len(value) <= 253
+                and all(
+                    0 < len(label) <= 63
+                    and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label, re.ASCII)
+                    for label in value.split(".")
+                )
+            )
+
+        def host_name(value):
+            if type(value) is not str or not value or len(value) > 253:
+                return False
+            try:
+                address = ipaddress.ip_address(value)
+                return getattr(address, "scope_id", None) is None
+            except ValueError:
+                return dns_name(value)
+
+        def relative_path(value, max_length=255):
+            if (
+                type(value) is not str
+                or not 1 <= len(value) <= max_length
+                or not re.fullmatch(r"[A-Za-z0-9._/-]+", value, re.ASCII)
+                or value.startswith("/")
+            ):
+                return False
+            parts = value.split("/")
+            return all(part not in ("", ".", "..") and not part.startswith("-") for part in parts)
+
+        class UniqueLoader(yaml.SafeLoader):
+            # Check each original mapping once, before merge expansion. This
+            # rejects explicit ambiguity while preserving YAML anchor overrides.
+            merge_key = object()
+
+            def __init__(self, stream):
+                self.checked_mappings = set()
+                super().__init__(stream)
+
+            def flatten_mapping(self, node):
+                if id(node) not in self.checked_mappings:
+                    self.checked_mappings.add(id(node))
+                    seen = set()
+                    for key_node, _ in node.value:
+                        key = self.merge_key if key_node.tag == "tag:yaml.org,2002:merge" else self.construct_object(key_node)
+                        try:
+                            if key in seen:
+                                raise yaml.YAMLError("duplicate_mapping_key")
+                            seen.add(key)
+                        except TypeError:
+                            raise yaml.YAMLError("mapping_key_invalid") from None
+                super().flatten_mapping(node)
 
         try:
-            with open("project.yaml") as f:
-                config = yaml.safe_load(f)
-            project_name = config["project_name"]
-        except FileNotFoundError:
-            print("❌ Error: project.yaml not found!")
-            raise SystemExit(1)
+            with open("project.yaml", encoding="utf-8") as f:
+                config = yaml.load(f, Loader=UniqueLoader)
+        except (OSError, UnicodeError, yaml.YAMLError, RecursionError):
+            fail()
+        if type(config) is not dict:
+            fail()
 
-        infra = config.get("infra") or {}
-        if not isinstance(infra, dict):
-            print("❌ Error: infra must be a mapping when declared.")
-            raise SystemExit(1)
+        project_name = config.get("project_name")
+        if type(project_name) is not str or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project_name, re.ASCII):
+            fail()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", target_env, re.ASCII):
+            fail()
+
+        infra = config.get("infra")
+        if infra is None:
+            infra = {}
+        if type(infra) is not dict:
+            fail()
         persistent_dirs = infra.get("persistent_dirs", [])
-        if not isinstance(persistent_dirs, list):
-            print("❌ Error: infra.persistent_dirs must be a list of relative paths.")
-            raise SystemExit(1)
-
-        safe_persistent_dir = re.compile(
-            r"^[A-Za-z0-9._/-]+$"
-        )
-        for persistent_dir in persistent_dirs:
-            segments = persistent_dir.split("/") if isinstance(persistent_dir, str) else []
-            if (
-                not isinstance(persistent_dir, str)
-                or not safe_persistent_dir.fullmatch(persistent_dir)
-                or persistent_dir.startswith("/")
-                or ".." in segments
-                or "." in segments
-                or any(segment.startswith("-") for segment in segments)
-            ):
-                print(
-                    "❌ Error: invalid infra.persistent_dirs entry. Entries must be safe "
-                    "relative paths: no '..' or '.' segments, no leading '/', no segment "
-                    "starting with '-' (would be misread as an option by remote commands)."
-                )
-                raise SystemExit(1)
+        if type(persistent_dirs) is not list or any(not relative_path(path) for path in persistent_dirs):
+            fail()
         persistent_dirs_value = " ".join(persistent_dirs)
 
         suffix = "_stage" if target_env == "staging" else ""
         remote_path = f"/srv/apps/{project_name}{suffix}"
 
-        # Derive Tailnet hostname from project.yaml when ssh_host input is
-        # empty. environments[env].server is the physical host name (e.g.
-        # 'main-prod', 'staging'); we add the MagicDNS suffix to get the
-        # Tailnet FQDN. The suffix is parameterised (inputs.tailnet_suffix)
-        # so non-bigler tenants can use the same per-app project.yaml shape
-        # without hard-coding their FQDN into every caller workflow.
-        # When caller explicitly sets ssh_host, that value wins (lets
-        # callers override for ad-hoc targets).
+        tailnet_suffix = suffix_input or "tail990d7f.ts.net"
+        if not dns_name(tailnet_suffix) or (ssh_host_input and not host_name(ssh_host_input)):
+            fail()
+        environments = config.get("environments", {})
+        if type(environments) is not dict:
+            fail()
+        env_cfg = environments.get(target_env, {})
+        if type(env_cfg) is not dict:
+            fail()
+        server = env_cfg.get("server", "")
+        if type(server) is not str or (server and not dns_name(server)):
+            fail()
+
         if ssh_host_input:
             resolved_host = ssh_host_input
             host_source = "input.ssh_host"
         else:
-            env_cfg = (config.get("environments") or {}).get(target_env) or {}
-            server = (env_cfg.get("server") or "").strip()
             if not server:
-                print(
-                    f"❌ Error: project.yaml has no environments[{target_env}].server "
-                    f"and inputs.ssh_host is empty. Provide one or the other."
-                )
-                raise SystemExit(1)
+                fail()
             resolved_host = f"{server}.{tailnet_suffix}"
             host_source = f"project.yaml environments[{target_env}].server + inputs.tailnet_suffix"
+            if not host_name(resolved_host):
+                fail()
+
+        output = os.environ.get("GITHUB_ENV")
+        if not output:
+            fail()
+        content = (
+            f"TARGET_ENV={target_env}\n"
+            f"REMOTE_PATH={remote_path}\n"
+            f"PROJECT_NAME={project_name}\n"
+            f"RESOLVED_SSH_HOST={resolved_host}\n"
+            f"PERSISTENT_DIRS={persistent_dirs_value}\n"
+        )
+        try:
+            with open(output, "a", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+        except OSError:
+            fail()
 
         print(f"✅ Environment:        {target_env}")
         print(f"✅ Project:            {project_name}")
         print(f"✅ Remote Path:        {remote_path}")
         print(f"✅ Resolved SSH host:  {resolved_host}  (source: {host_source})")
 
-        with open(os.environ["GITHUB_ENV"], "a") as f:
-            f.write(f"TARGET_ENV={target_env}\n")
-            f.write(f"REMOTE_PATH={remote_path}\n")
-            f.write(f"PROJECT_NAME={project_name}\n")
-            f.write(f"RESOLVED_SSH_HOST={resolved_host}\n")
-            f.write(f"PERSISTENT_DIRS={persistent_dirs_value}\n")
         PYCODE
 
     - name: 🔌 Pre-flight Tailscale-SSH connectivity check

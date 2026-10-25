@@ -207,3 +207,36 @@ custody. It does not redact third-party join logs or other deployment steps.
 Local Bash tests execute the actual YAML blocks with private synthetic CLI
 stubs; representative connectivity, cancellation and live log acceptance,
 strict prebuilt integration and independent recovery remain open.
+
+## Whole-scalar validation in the legacy deploy action
+
+The legacy `deploy-app` caller-input validation checks each complete scalar
+before later environment generation, transfer or remote-shell steps. Project
+and environment names, SSH users, optional host overrides, file-secret names
+and modes, and file-secret target subdirectories reject multiline suffixes,
+control characters, shell syntax and values outside their bounded grammars.
+The optional file-secret subdirectory still accepts safe relative paths such as
+`.ssh` and `.ssh/app`; filenames remain safe basenames, and empty optional
+values retain their existing meaning.
+The initial caller guard uses Bash builtins and requires no Python before the
+existing setup step. IPv6 lexical checks there are followed by full IP parsing
+in the configuration step before `GITHUB_ENV` is written.
+
+Configuration parsing validates the top-level mapping and the selected
+deployment fields' mapping shapes and scalar types before appending any
+generated entries to `GITHUB_ENV`. Unrelated configuration fields are not
+recursively type-validated. Explicit duplicate mapping keys are rejected;
+ordinary YAML anchors and merge overrides remain supported. The project name uses
+the existing lowercase project grammar; environment mappings, server names,
+tailnet suffixes, persistent-directory lists and each relative path are
+validated without trimming invalid input or coercing non-string YAML values.
+Declared environment mappings cannot be null. A named file secret must have
+a valid octal mode before any remote-shell step; unnamed optional entries may
+retain empty modes.
+An empty tailnet suffix retains the existing default, explicit valid host
+overrides retain precedence, and the derived remote path remains
+`/srv/apps/<project>` with `_stage` only for staging. Rejections use fixed
+diagnostics and do not echo rejected values. These checks cover only the
+legacy source-level action blocks. They do not establish strict prebuilt mode,
+private routing/custody, credential handling, caller migration, live host
+behavior, or closure of the broader release-deployment contract.
