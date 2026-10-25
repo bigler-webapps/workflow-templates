@@ -156,6 +156,8 @@ def _canonical_host(value: object) -> bool:
 def _absolute_provider_path(value: object) -> Path:
     if type(value) is not str or not value or len(value) > 4096:
         raise TransportError("provider_path_invalid") from None
+    if "$" in value:
+        raise TransportError("provider_path_invalid") from None
     path = PurePosixPath(value)
     if (not path.is_absolute() or ".." in path.parts or str(path) != value
             or any(ord(char) < 0x21 or ord(char) > 0x7e or char in '%\\"\'' for char in value)):

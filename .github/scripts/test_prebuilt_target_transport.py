@@ -292,6 +292,39 @@ class PrebuiltTargetTransportTests(TransportFixture):
         with mock.patch.object(Path, "open", guarded_open):
             self.positive()
 
+    def test_provider_paths_reject_dollar_expansion_before_metadata_or_process(self):
+        for field in ("identity_file", "known_hosts_file"):
+            for token in ("${HOME}", "${UNSET}", "$"):
+                with self.subTest(field=field, token=token):
+                    directory = self.root / f"literal-{field}-{token}"
+                    directory.mkdir(mode=0o700)
+                    candidate = directory / f"{field}-input.txt"
+                    candidate.write_text("nonsecret metadata placeholder\n", encoding="utf-8")
+                    if os.name != "nt":
+                        directory.chmod(0o700)
+                        candidate.chmod(0o600 if field == "identity_file" else 0o644)
+                    self.assertTrue(candidate.is_file())
+                    config = self.image_config(**{field: str(candidate)})
+
+                    lstat_calls = []
+                    original_lstat = Path.lstat
+
+                    def observe_lstat(path, *args, **kwargs):
+                        lstat_calls.append(path)
+                        return original_lstat(path, *args, **kwargs)
+
+                    before_factory = len(self.factory_calls)
+                    before_processes = len(self.processes)
+                    with mock.patch.object(Path, "lstat", observe_lstat):
+                        with self.assertRaises(transport.TransportError) as caught:
+                            self.invoke(config=config)
+                    self.assertEqual(caught.exception.code, "provider_path_invalid")
+                    self.assertNotIn(str(candidate), str(caught.exception))
+                    self.assertEqual(lstat_calls, [])
+                    self.assertEqual(len(self.factory_calls), before_factory)
+                    self.assertEqual(len(self.processes), before_processes)
+            self.positive()
+
     def test_malformed_receipt_and_success_followed_by_nonzero_exit_are_not_success(self):
         malformed = self.actual_endpoint(lambda _: b'{"status":"succeeded"}\n')
         with self.assertRaises(transport.TransportError) as caught:

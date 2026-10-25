@@ -22,7 +22,10 @@ proxy commands, connection multiplexing, local commands, and host-key updates.
 Host, port, user, identity, known-hosts and correlation are
 strictly validated and passed as arguments. The remote command accepts only
 the fixed `--correlation deploy-<40 lowercase hex>` pair. Provider paths also
-reject whitespace and SSH percent expansion. Identity and known-host files are
+reject whitespace and SSH percent expansion. OpenSSH expands `${...}` in its
+`IdentityFile` and `UserKnownHostsFile` options, so both provider paths reject
+`$` entirely (including `${HOME}`, `${UNSET}`, and bare `$`) before metadata
+lookup ([OpenSSH `ssh_config(5)`, environment variables](https://man.openbsd.org/ssh_config#ENVIRONMENT_VARIABLES)). Identity and known-host files are
 checked with filesystem metadata only; Python never opens either file. The
 identity file must be current-user-owned, mode `0600`, and inside a private
 `0700` directory. Known-host data may be root- or current-user-owned and may
