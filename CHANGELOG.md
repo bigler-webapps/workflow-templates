@@ -12,6 +12,8 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-10-26
+
 ### Fixed
 
 The Loki role bounds WAL replay and per-stream ingestion memory, makes the container memory limit configurable, and supports a guarded one-time WAL discard for recovery.
@@ -34,6 +36,27 @@ The `tailscale_mgmt_route_pin` variable can disable the management daemon route 
 
 Promtail redacts reset and invite tokens, gallery `k` query values, and Kuma
 webhook secrets from Docker logs before shipping them to Loki.
+
+### Changed (WM-INF-98: the runner's two tailscale daemons)
+
+**`runner_tailnet_binding` gives the management address its own routing table**
+(default 54, `100.64.0.0/10 dev tsmgmt0`) instead of leaving rule 5254 on the
+shared table 52, so neither daemon's writes to table 52 can misroute management
+traffic. The route script adds the new rule before removing the old one, is
+idempotent, and removes stale priority-5254 selectors by their full selector. The
+unit now re-runs when either `tailscaled.service` or `tailscaled-mgmt.service`
+restarts. New variables: `tailnet_binding_mgmt_interface`,
+`tailnet_binding_mgmt_route_table`. The per-job table 53 and rule 5255 are unchanged.
+
+**`tailnet-connect` and `deploy-app` fail loudly instead of joining a dead
+interface.** When the default daemon is `Running` and tagged but carries no tailnet
+IPv4 on `tailscale0`, the probe step now fails at once with one message (restart
+`tailscaled` on the runner) and never runs `tailscale up`, `reset` or any other change
+against the shared daemon; before, `deploy-app` skipped the join and failed later with
+`getifaddrs: tailscale0: no suitable addresses`, and `tailnet-connect` fell through to
+a join. All other states (CLI absent, not running, other tag) take the existing join
+path. `deploy-app` compares `inet <ip>/` with a bash pattern, no longer needing `grep`.
+Consumers pick this up by bumping their pin to `v2.14.0`.
 
 ## [2.13.1] - 2026-10-17
 
