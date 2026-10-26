@@ -33,8 +33,21 @@ if filter_text == '.BackendState // "unknown"':
 elif filter_text == '((.Self.Tags // []) | index($t)) != null':
     tag = args[args.index("--arg") + 2]
     print("true" if tag in ((data.get("Self") or {}).get("Tags") or []) else "false")
+elif filter_text == '(.Self.TailscaleIPs // []) | map(select(test(":") | not)) | .[0] // empty':
+    ips = [ip for ip in ((data.get("Self") or {}).get("TailscaleIPs") or []) if ":" not in ip]
+    print(ips[0] if ips else "")
 else:
     sys.exit(9)
+'''
+
+
+# `ip -4 addr show dev tailscale0` as the probe's routability check calls it. Deliberately silent (no COMMAND_LOG)
+# so the tests that assert the exact command log stay exact.
+IP_STUB = r'''#!/usr/bin/env bash
+if [[ "$*" == *"dev tailscale0"* ]]; then
+  printf '    inet %s/32 scope global tailscale0\n' "${TAILSCALE0_IPV4:-100.64.9.9}"
+fi
+exit 0
 '''
 
 
@@ -115,6 +128,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
         self._write_executable("sudo", SUDO_STUB)
         self._write_executable("ssh", SSH_STUB)
         self._write_executable("jq", JQ_STUB)
+        self._write_executable("ip", IP_STUB)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -137,7 +151,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
             "TAILNET_HOST": "synthetic-target",
             "SSH_USER": "synthetic-user",
             "TS_MODE": "ping" if script == PREFLIGHT else "status",
-            "TS_STDOUT": '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"]}}\n',
+            "TS_STDOUT": '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"],"TailscaleIPs":["100.64.9.9","fd7a:115c::9"]}}\n',
             "TS_STDERR": "peer=100.64.1.2 credential=sentinel::add-mask::\n",
             "TS_EXIT": "0",
             "PING_EXIT": "0",
@@ -237,7 +251,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(self._logs(result).strip(), "phase=runner_connection result=join_required")
 
     def test_status_byte_cap_preserves_trailing_whitespace_before_deciding(self):
-        valid = '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"]}}'
+        valid = '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"],"TailscaleIPs":["100.64.9.9"]}}'
         for size, expected in ((65536, "true"), (65537, "false"), (70000, "false")):
             with self.subTest(bytes=size):
                 result = self._run(PROBE, TS_STDOUT=valid + "\n" * (size - len(valid)))
@@ -251,7 +265,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
         self._logs(result)
 
     def test_oversized_failed_direct_read_cannot_use_valid_sudo_fallback(self):
-        valid = '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"]}}'
+        valid = '{"BackendState":"Running","Self":{"Tags":["tag:diagnostic-test"],"TailscaleIPs":["100.64.9.9"]}}'
         result = self._run(PROBE, TS_DIRECT_STDOUT=valid + "\n" * 70000, TS_DIRECT_EXIT="1")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "connected=false\n")
@@ -260,7 +274,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
 
     def test_target_and_tag_injection_cannot_become_log_commands(self):
         tag = "::add-mask::credential-sentinel"
-        result = self._run(PROBE, TS_TAG=tag, TS_STDOUT='{"BackendState":"Running","Self":{"Tags":["' + tag + '"]}}')
+        result = self._run(PROBE, TS_TAG=tag, TS_STDOUT='{"BackendState":"Running","Self":{"Tags":["' + tag + '"],"TailscaleIPs":["100.64.9.9"]}}')
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "connected=true\n")
         self._logs(result)

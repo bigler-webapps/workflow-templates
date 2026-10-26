@@ -119,7 +119,9 @@ runs:
         # Reads tolerate a reset `--operator` (gh-runner may have lost CLI rights)
         # by falling back to non-interactive sudo; both paths are read-only.
         #
-        # Topology note: reuse is keyed on connection + tag only — NOT on routes.
+        # A warm tagged daemon must also have its IPv4 on tailscale0; otherwise
+        # BindInterface cannot reach tailnet peers and joining would mutate the shared daemon.
+        # Topology note: reuse is keyed on connection + tag + local address — NOT on routes.
         # Deploy targets here are DIRECT tailnet nodes (e.g. staging 100.100.1.1),
         # so `--accept-routes` is irrelevant. A future SUBNET-ROUTED target would
         # need accept-routes re-established and this assumption revisited.
@@ -150,7 +152,19 @@ runs:
             state="$(printf '%s' "$json" | jq -r '.BackendState // "unknown"' 2>/dev/null || true)"
             tagged="$(printf '%s' "$json" | jq -r --arg t "$TS_TAG" '((.Self.Tags // []) | index($t)) != null' 2>/dev/null || true)"
             if [ "$state" = "Running" ] && [ "$tagged" = "true" ]; then
-              connected=true
+              ip4="$(printf '%s' "$json" | jq -r '(.Self.TailscaleIPs // []) | map(select(test(":") | not)) | .[0] // empty' 2>/dev/null || true)"
+              routable=false
+              # Literal match on "inet <ip>/": the leading "inet " and the trailing "/" anchor it, so a
+              # reported 100.109.210.1 never matches a bound 100.109.210.125.
+              addr_out="$(ip -4 addr show dev tailscale0 2>/dev/null || true)"
+              [ -n "$ip4" ] && [[ "$addr_out" == *"inet ${ip4}/"* ]] && routable=true
+              if [ "$routable" = true ]; then
+                connected=true
+              else
+                # Running + tagged and no tailnet IPv4 on tailscale0 (reported or bound): never join.
+                echo "::error::The default tailscaled on this runner reports itself connected, but tailscale0 has no tailnet IPv4 address; restart it on the runner with: sudo systemctl restart tailscaled (WM-INF-98)."
+                exit 1
+              fi
             fi
           fi
         fi

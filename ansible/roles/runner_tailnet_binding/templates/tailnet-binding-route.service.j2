@@ -1,8 +1,9 @@
 [Unit]
 Description=Route tailnet traffic bound to the per-job interface
-After=tailscaled.service
+After=tailscaled.service tailscaled-mgmt.service
+Wants=tailscaled-mgmt.service
 Requires=tailscaled.service
-PartOf=tailscaled.service
+PartOf=tailscaled.service tailscaled-mgmt.service
 
 [Service]
 Type=oneshot

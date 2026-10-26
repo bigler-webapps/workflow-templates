@@ -211,15 +211,18 @@ class WftCi26ProbeTests(unittest.TestCase):
 
     def test_running_tagged_but_not_routable_does_not_reuse(self):
         """The netcup-runner-1 defect, reproduced: Running + tagged, but the
-        reported tailnet IPv4 is not bound to any local interface (only a
-        link-local IPv6 on tailscale0, as measured). Must fall through to a
-        join, not silently reuse an unroutable daemon."""
+        reported tailnet IPv4 is not bound to tailscale0 (only a link-local
+        IPv6 on tailscale0, as measured). WM-INF-98: the probe must neither
+        reuse the unroutable daemon nor join (a join would change the shared
+        daemon); it fails at once and names the remedy."""
         proc, connected = _run_probe(
             status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.125"]}}',
             local_ipv4s="",
         )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(connected, "false")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIsNone(connected, "the probe must stop before reporting a connection state")
+        self.assertIn("tailscale0 has no tailnet IPv4 address", proc.stdout)
+        self.assertIn("sudo systemctl restart tailscaled", proc.stdout)
 
     def test_not_running_does_not_reuse(self):
         proc, connected = _run_probe(
@@ -239,13 +242,15 @@ class WftCi26ProbeTests(unittest.TestCase):
 
     def test_no_tailscale_ipv4_at_all_does_not_reuse(self):
         """No TailscaleIPs entry (or only IPv6) -- ip4 resolves empty, must
-        not pass the `grep -qF ""` degenerate case as a match."""
+        not pass the `grep -qF ""` degenerate case as a match. WM-INF-98: a Running,
+        tagged daemon without a tailnet IPv4 fails loudly instead of joining."""
         proc, connected = _run_probe(
             status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["fd7a:115c::1"]}}',
             local_ipv4s="10.0.0.5",
         )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(connected, "false")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIsNone(connected)
+        self.assertIn("tailscale0 has no tailnet IPv4 address", proc.stdout)
 
     def test_prefix_address_does_not_false_positive_on_a_longer_local_address(self):
         """Reviewer-caught (R3): an unanchored substring match would let a
@@ -257,8 +262,10 @@ class WftCi26ProbeTests(unittest.TestCase):
             status_json='{"BackendState":"Running","Self":{"Tags":["tag:ci-deploy"],"TailscaleIPs":["100.109.210.1"]}}',
             local_ipv4s="100.109.210.125",
         )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(connected, "false")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIsNone(connected, "the probe must stop before reporting a connection state")
+        self.assertIn("tailscale0 has no tailnet IPv4 address", proc.stdout)
+        self.assertIn("sudo systemctl restart tailscaled", proc.stdout)
 
     def test_assertion_fails_against_the_pre_fix_two_condition_probe(self):
         """Mutation check: run the OLD (pre-WFT-CI-26) two-condition probe
@@ -271,10 +278,12 @@ class WftCi26ProbeTests(unittest.TestCase):
             '  # WFT-CI-26: state=Running + tagged alone', 1
         )
         _, after = rest.split(
-            '  [ -n "$ip4" ] && ip -4 addr show 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true\n',
+            '  [ -n "$ip4" ] && ip -4 addr show dev tailscale0 2>/dev/null | grep -qE "inet ${ip4//./[.]}/" && routable=true\n',
             1,
         )
         old_script = before + after
+        # WM-INF-98 added a fail-loud branch behind the routable check; the pre-WFT-CI-26 probe had none.
+        old_script = re.sub(r'elif \[ "\$state" = "Running" \].*?exit 1\n\s*fi', 'fi', old_script, count=1, flags=re.S)
         old_script = old_script.replace(
             'echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}  routable(${ip4:-none})=${routable}"',
             'echo "BackendState=${state}  hasTag(${TS_TAG})=${tagged}"',
