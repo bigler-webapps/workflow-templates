@@ -27,6 +27,10 @@ inputs:
     description: 'JSON-array of substrings expected in running container names after reboot'
     required: false
     default: '[]'
+  recovery_contract_required:
+    description: 'Whether inventory requires the installed recovery exclusion contract on this target.'
+    required: false
+    default: 'true'
   ts_oauth_client_id:
     description: 'Tailscale OAuth client ID. Required (v2.0.0+).'
     required: true
@@ -56,6 +60,7 @@ runs:
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_SSH_USER: ${{ inputs.ssh_user }}
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
+        INPUT_RECOVERY_CONTRACT_REQUIRED: ${{ inputs.recovery_contract_required }}
         INPUT_TS_OAUTH_CLIENT_ID: ${{ inputs.ts_oauth_client_id }}
         INPUT_TS_OAUTH_SECRET: ${{ inputs.ts_oauth_secret }}
       run: |
@@ -75,75 +80,46 @@ runs:
         printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
+        printf '%s' "$INPUT_RECOVERY_CONTRACT_REQUIRED" | grep -qE '^(true|false)$' || { echo "Invalid recovery_contract_required input"; exit 1; }
 
-    - name: 🛠️ Kick off system updates
+    - name: Ship guarded maintenance adapter
+      shell: bash
+      env:
+        SSH_HOST: ${{ inputs.ssh_host }}
+        SSH_USER: ${{ inputs.ssh_user }}
+        RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+        SCRIPT_PATH: ${{ github.action_path }}/../../scripts/guarded_maintenance.py
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT_PATH" ] || { echo "Guarded maintenance adapter is missing."; exit 1; }
+        STATUS_DIR="/var/tmp/gha-maintenance-${RUN_TOKEN}"
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" \
+          "mkdir -p $(printf '%q' "$STATUS_DIR") && chmod 700 $(printf '%q' "$STATUS_DIR")"
+        scp -o StrictHostKeyChecking=accept-new \
+          "$SCRIPT_PATH" "${SSH_USER}@${SSH_HOST}:${STATUS_DIR}/guarded_maintenance.py"
+
+    - name: 🛠️ Kick off system updates under recovery guard
       if: ${{ inputs.apply_updates == 'true' }}
       shell: bash
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
         RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+        RECOVERY_CONTRACT_REQUIRED: ${{ inputs.recovery_contract_required }}
       run: |
         set -euo pipefail
-        # apt-get upgrade can restart sshd (needrestart) mid-session, which
-        # drops this ssh connection with exit 255 even though the upgrade
-        # itself succeeds on the remote host. Decouple the upgrade from this
-        # SSH session entirely: write a script, launch it detached
-        # (setsid + nohup, disowned) so a dropped connection cannot kill it,
-        # and let the next step poll for completion with reconnect tolerance.
-        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" bash -s -- "/tmp/gha-maintenance-${RUN_TOKEN}" << "EOF"
-        set -euo pipefail
-        STATUS_DIR="$1"
-        mkdir -p "$STATUS_DIR"
-        rm -f "$STATUS_DIR/done" "$STATUS_DIR/exit_code" "$STATUS_DIR/log"
-
-        cat > "$STATUS_DIR/run.sh" << "SCRIPT"
-        #!/bin/bash
-        set -uo pipefail
-        STATUS_DIR="$(cd "$(dirname "$0")" && pwd)"
-        SUDO=""
-        if [ "$(id -u)" -ne 0 ]; then
-          SUDO="sudo -n"
-        fi
-        (
-          set -e
-          echo "Refreshing apt index..."
-          $SUDO apt-get update -y
-
-          BEFORE_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
-          echo "Upgradable packages before upgrade: ${BEFORE_COUNT}"
-
-          if [ "${BEFORE_COUNT}" -gt 0 ]; then
-            echo "Installing upgrades..."
-            # Avoid relying on DEBIAN_FRONTEND via sudo (requires SETENV: in
-            # sudoers). Pass non-interactive behaviour as apt/dpkg options
-            # directly so this works on every provisioned server.
-            APT_OPTS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
-            $SUDO apt-get "${APT_OPTS[@]}" upgrade
-            $SUDO apt-get "${APT_OPTS[@]}" autoremove
-            $SUDO apt-get -y autoclean
-          else
-            echo "No package upgrades required."
-          fi
-
-          AFTER_COUNT="$($SUDO apt list --upgradable 2>/dev/null | tail -n +2 | wc -l || true)"
-          echo "Upgradable packages after upgrade: ${AFTER_COUNT}"
-        ) > "$STATUS_DIR/log" 2>&1
-        # Capture the subshell's own exit code, not the last redirected
-        # command's — the subshell runs its own `set -e` so it stops (and
-        # exits non-zero) on the first failing apt/dpkg command instead of
-        # silently continuing to the final (near-always-zero) echo.
-        RC=$?
-        echo "$RC" > "$STATUS_DIR/exit_code"
-        touch "$STATUS_DIR/done"
-        SCRIPT
-        chmod +x "$STATUS_DIR/run.sh"
-
-        setsid nohup "$STATUS_DIR/run.sh" >/dev/null 2>&1 < /dev/null &
-        disown
-        echo "Upgrade kicked off in background (status dir: $STATUS_DIR)."
-        EOF
-
+        STATUS_DIR="/var/tmp/gha-maintenance-${RUN_TOKEN}"
+        {
+          printf 'set -euo pipefail\n'
+          printf 'STATUS_DIR=%q\n' "$STATUS_DIR"
+          printf 'REQUIRED=%q\n' "$RECOVERY_CONTRACT_REQUIRED"
+          printf 'SCRIPT="$STATUS_DIR/guarded_maintenance.py"\n'
+          printf 'rm -f "$STATUS_DIR/done" "$STATUS_DIR/exit_code" "$STATUS_DIR/log"\n'
+          printf 'setsid nohup bash -c %q guarded-maintenance "$SCRIPT" "$REQUIRED" "$STATUS_DIR" > "$STATUS_DIR/log" 2>&1 < /dev/null &\n' \
+            'set +e; python3 "$1" apt --contract-required "$2"; rc=$?; echo "$rc" > "$3/exit_code"; touch "$3/done"'
+          printf 'disown\n'
+        } | ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" bash -s
+        echo "Upgrade started in the background with destination recovery admission held by the adapter."
     - name: ⏳ Wait for system updates to finish
       if: ${{ inputs.apply_updates == 'true' }}
       shell: bash
@@ -153,7 +129,7 @@ runs:
         RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         set -euo pipefail
-        STATUS_DIR="/tmp/gha-maintenance-${RUN_TOKEN}"
+        STATUS_DIR="/var/tmp/gha-maintenance-${RUN_TOKEN}"
 
         echo "Waiting for the remote apt upgrade to finish..."
         DONE="no"
@@ -182,7 +158,7 @@ runs:
         EXIT_CODE="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "cat '${STATUS_DIR}/exit_code'")"
         echo "Remote apt upgrade exit code: ${EXIT_CODE}"
 
-        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "rm -rf '${STATUS_DIR}'" || true
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "rm -f '${STATUS_DIR}/log' '${STATUS_DIR}/exit_code' '${STATUS_DIR}/done'" || true
 
         if [ "$EXIT_CODE" != "0" ]; then
           echo "::error::Remote apt upgrade failed with exit code ${EXIT_CODE}."
@@ -213,6 +189,12 @@ runs:
         echo "need_reboot=$NEED_REBOOT" >> "$GITHUB_OUTPUT"
         echo "reason=$REASON" >> "$GITHUB_OUTPUT"
 
+        if [ "$NEED_REBOOT" = "yes" ]; then
+          BOOT_ID_BEFORE="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "cat /proc/sys/kernel/random/boot_id")"
+          printf '%s' "$BOOT_ID_BEFORE" | grep -qE '^[a-f0-9-]{36}$' || { echo "Invalid host boot identity."; exit 1; }
+          echo "boot_id_before=$BOOT_ID_BEFORE" >> "$GITHUB_OUTPUT"
+        fi
+
         echo "Decision: need_reboot=$NEED_REBOOT (reason=$REASON)"
         # Informational only — the decision above is already final, so a
         # transient connection drop here (e.g. a sshd restart from the prior
@@ -230,10 +212,45 @@ runs:
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
+        RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+        RECOVERY_CONTRACT_REQUIRED: ${{ inputs.recovery_contract_required }}
       run: |
         set -euo pipefail
-        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "sudo -n systemctl reboot || sudo -n reboot || reboot" || true
-        echo "Reboot command sent."
+        STATUS_DIR="/var/tmp/gha-maintenance-${RUN_TOKEN}"
+        {
+          printf 'set -euo pipefail\n'
+          printf 'STATUS_DIR=%q\n' "$STATUS_DIR"
+          printf 'SCRIPT="$STATUS_DIR/guarded_maintenance.py"\n'
+          printf 'REQUIRED=%q\n' "$RECOVERY_CONTRACT_REQUIRED"
+          printf 'rm -f "$STATUS_DIR/guard-acquired" "$STATUS_DIR/reboot-requested" "$STATUS_DIR/reboot-failed" "$STATUS_DIR/reboot.log"\n'
+          printf 'setsid nohup python3 "$SCRIPT" reboot --contract-required "$REQUIRED" --status-dir "$STATUS_DIR" > "$STATUS_DIR/reboot.log" 2>&1 < /dev/null &\n'
+          printf 'echo $! > "$STATUS_DIR/reboot.pid"\n'
+        } | ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" bash -s
+
+        TRANSPORT_UNKNOWN=false
+        REQUESTED=false
+        for i in $(seq 1 30); do
+          if RESULT="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "${SSH_USER}@${SSH_HOST}" \
+            "if [ -f '${STATUS_DIR}/reboot-failed' ]; then echo failed; elif [ -f '${STATUS_DIR}/reboot-requested' ]; then echo requested; else echo pending; fi" 2>/dev/null)"; then
+            case "$RESULT" in
+              requested) REQUESTED=true; break ;;
+              failed) echo "Guarded reboot was refused or failed."; exit 1 ;;
+            esac
+          else
+            SSH_RC=$?
+            if [ "$SSH_RC" -eq 255 ]; then
+              TRANSPORT_UNKNOWN=true
+              break
+            fi
+            exit "$SSH_RC"
+          fi
+          sleep 1
+        done
+        if [ "$REQUESTED" = false ] && [ "$TRANSPORT_UNKNOWN" = false ]; then
+          echo "Guarded reboot adapter did not record an accepted reboot request."
+          exit 1
+        fi
+        echo "Reboot request marker confirmed; post-reconnect checks must prove the host rebooted."
 
     - name: ⏳ Wait for host to come back
       if: steps.decision.outputs.need_reboot == 'yes'
@@ -266,9 +283,21 @@ runs:
       env:
         SSH_HOST: ${{ inputs.ssh_host }}
         SSH_USER: ${{ inputs.ssh_user }}
+        RUN_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+        BOOT_ID_BEFORE: ${{ steps.decision.outputs.boot_id_before }}
+        RECOVERY_CONTRACT_REQUIRED: ${{ inputs.recovery_contract_required }}
         EXPECTED_CONTAINER_TOKENS_JSON: ${{ inputs.expected_container_tokens_json }}
       run: |
         set -euo pipefail
+
+        STATUS_DIR="/var/tmp/gha-maintenance-${RUN_TOKEN}"
+        RECOVERY_STATUS="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" \
+          "if [ -f '${STATUS_DIR}/reboot-failed' ]; then echo failed; elif [ -f '${STATUS_DIR}/reboot-requested' ]; then echo requested; else echo missing; fi")"
+        [ "$RECOVERY_STATUS" = "requested" ] || { echo "Guarded reboot status is '$RECOVERY_STATUS'."; exit 1; }
+        BOOT_ID_AFTER="$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "cat /proc/sys/kernel/random/boot_id")"
+        [ -n "$BOOT_ID_BEFORE" ] && [ "$BOOT_ID_AFTER" != "$BOOT_ID_BEFORE" ] || { echo "Host boot identity did not change; reboot is unverified."; exit 1; }
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" \
+          "python3 '${STATUS_DIR}/guarded_maintenance.py' verify-reboot --contract-required '${RECOVERY_CONTRACT_REQUIRED}'"
 
         ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${SSH_USER}@${SSH_HOST}" "uptime"
         echo

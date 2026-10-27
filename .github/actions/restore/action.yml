@@ -115,6 +115,10 @@ runs:
           echo "❌ ${OPS_SCRIPTS_PATH}/restore.py missing — webapp-ops-scripts checkout failed?"
           exit 1
         fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/stack_recovery.py" ]; then
+          echo "${OPS_SCRIPTS_PATH}/stack_recovery.py missing; recovery contract is required."
+          exit 1
+        fi
 
         ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "mkdir -p /srv/infrastructure/ops-scripts"
@@ -132,25 +136,45 @@ runs:
         B2_KEY_ID: ${{ inputs.b2_key_id }}
         B2_APP_KEY: ${{ inputs.b2_app_key }}
         APP_NAME: ${{ inputs.app_name }}
+        RECOVERY_SOURCE: ${{ inputs.target }}
         TARGET_ENV: ${{ inputs.target_env }}
         SNAPSHOT_ID: ${{ inputs.snapshot_id }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
+        IDENTITY_HASH="$(printf '%s\0%s\0%s\0%s\0%s\0%s' "$RUN_ID" "$RUN_ATTEMPT" "$APP_NAME" "$SSH_HOST" "$TARGET_ENV" "$RECOVERY_SOURCE" | sha256sum | awk '{print $1}')"
+        RECOVERY_OPERATION_ID="github-${RUN_ID}-${RUN_ATTEMPT}-${IDENTITY_HASH}"
         ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "RESTIC_REPO_B2=$(printf '%q' "$RESTIC_REPO_B2") \
            RESTIC_PASSWORD=$(printf '%q' "$RESTIC_PASSWORD") \
            B2_KEY_ID=$(printf '%q' "$B2_KEY_ID") \
            B2_APP_KEY=$(printf '%q' "$B2_APP_KEY") \
            APP_NAME=$(printf '%q' "$APP_NAME") \
+           RECOVERY_SOURCE=$(printf '%q' "$RECOVERY_SOURCE") \
+           RECOVERY_OPERATION_ID=$(printf '%q' "$RECOVERY_OPERATION_ID") \
            TARGET_ENV=$(printf '%q' "$TARGET_ENV") \
            SNAPSHOT_ID=$(printf '%q' "$SNAPSHOT_ID") \
+           RUN_ID=$(printf '%q' "$RUN_ID") \
+           RUN_ATTEMPT=$(printf '%q' "$RUN_ATTEMPT") \
            bash -s" <<'EOF'
         set -euo pipefail
         export PATH=$PATH:/usr/local/bin
+        RECOVERY_ARGS=()
+        if [ "$TARGET_ENV" != "zip-file" ]; then
+          RECOVERY_ARGS=(
+            --operation-id "$RECOVERY_OPERATION_ID"
+            --recovery-source "$RECOVERY_SOURCE"
+            --origin-run-id "$RUN_ID"
+            --origin-attempt "$RUN_ATTEMPT"
+            --auto-restart
+          )
+        fi
         python3 /srv/infrastructure/ops-scripts/restore.py \
           --app "$APP_NAME" \
           --target-env "$TARGET_ENV" \
-          --snapshot "$SNAPSHOT_ID"
+          --snapshot "$SNAPSHOT_ID" \
+          "${RECOVERY_ARGS[@]}"
         EOF
 
     - name: 📥 Download Artifact (if Zip mode)

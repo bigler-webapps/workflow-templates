@@ -627,211 +627,51 @@ runs:
         fi
         EOF
 
-    - name: 🐳 Pull/build, restart & migrate (via plain ssh over Tailnet)
+    - name: Pull/build, restart & migrate under destination recovery guard
       shell: bash
       env:
         TAILNET_HOST: ${{ env.RESOLVED_SSH_HOST }}
         SSH_USER: ${{ inputs.ssh_user }}
         REMOTE_PATH: ${{ env.REMOTE_PATH }}
+        PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        TARGET_ENV: ${{ env.TARGET_ENV }}
         HRAM_ENGINE_READ_TOKEN: ${{ inputs.hram_engine_token }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        GITHUB_ACTOR: ${{ github.actor }}
         USE_BUILD_FALLBACK: ${{ inputs.use_build_fallback }}
         IMAGE_TAG: ${{ inputs.image_tag }}
         SKIP_MIGRATE: ${{ inputs.skip_migrate }}
         PERSISTENT_DIRS: ${{ env.PERSISTENT_DIRS }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        DEPLOY_HELPER_PATH: ${{ github.action_path }}/../../scripts/guarded_deploy.py
       run: |
         set -euo pipefail
-        [ -n "$IMAGE_TAG" ] || { echo "❌ IMAGE_TAG is empty; refusing a non-deterministic deploy."; exit 1; }
-        case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "❌ use_build_fallback must be 'true' or 'false'."; exit 1 ;; esac
+        [ -n "$IMAGE_TAG" ] || { echo "IMAGE_TAG is empty; refusing a non-deterministic deploy."; exit 1; }
+        case "$USE_BUILD_FALLBACK" in true|false) ;; *) echo "use_build_fallback must be true or false."; exit 1 ;; esac
         if [ "$USE_BUILD_FALLBACK" != "true" ] && [ -z "$GITHUB_TOKEN" ]; then
-          echo "❌ GITHUB_TOKEN is required for pull-based deploys."
+          echo "GITHUB_TOKEN is required for pull-based deploys."
           exit 1
         fi
-        # Heredoc pattern (same as file-secrets step above):
-        #   - The top assignment block injects local runner values into
-        #     remote shell variables. `${VAR}` references in those
-        #     assignments are interpolated LOCALLY when the heredoc body
-        #     is built, before the script is piped to remote bash.
-        #   - All subsequent `\$VAR` references are escaped and resolve
-        #     REMOTE-side, against the just-assigned remote variables.
-        # This split keeps the data/code boundary explicit and audit-clean.
-        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TAILNET_HOST}" bash <<EOF
-        set -euo pipefail
-
-        REMOTE_PATH="${REMOTE_PATH}"
-        HRAM_ENGINE_READ_TOKEN="${HRAM_ENGINE_READ_TOKEN}"
-        GITHUB_TOKEN="${GITHUB_TOKEN}"
-        GHCR_USERNAME="${GITHUB_ACTOR}"
-        USE_BUILD_FALLBACK="${USE_BUILD_FALLBACK}"
-        IMAGE_TAG="${IMAGE_TAG}"
-        SKIP_MIGRATE="${SKIP_MIGRATE}"
-        PERSISTENT_DIRS="${PERSISTENT_DIRS}"
-
-        cd "\$REMOTE_PATH"
-
-        # v2.0.2: Server-side global serialization — single lock file.
-        # SHARED ACROSS ALL APPS on this server. Two effects:
-        #   1. Two concurrent runs of the SAME app+env can't race container
-        #      names (the original v1.x reason).
-        #   2. The explicit legacy build fallback cannot race container names
-        #      or consume memory alongside another fallback build.
-        # Cross-repo GitHub Actions concurrency.group doesn't help here —
-        # group keys are repo-scoped. Server-side flock is the only
-        # cross-app coordination point.
-        #
-        # Lock auto-releases when this bash process exits (flock holds the
-        # fd, not the file itself — no stale-lock-after-crash risk).
-        LOCK_FILE="/tmp/deploy-server.lock"
-        exec 200>"\$LOCK_FILE"
-        echo "🔒 Acquiring deploy lock (\${LOCK_FILE})..."
-        flock -x 200
-        echo "🔒 Lock acquired."
-
-        DOCKER="docker"
-        if ! docker info >/dev/null 2>&1; then
-          # --preserve-env: sudo resets the environment by default, which would
-          # silently drop the DOCKER_CONFIG scoping below and write back to the
-          # shared default store -- review finding on this same scope item.
-          DOCKER="sudo -n --preserve-env=DOCKER_CONFIG docker"
-        fi
-
-        DOCKER_CONFIG_DIR="\$(mktemp -d)"
-        trap 'rm -rf "\$DOCKER_CONFIG_DIR"' EXIT
-        export DOCKER_CONFIG="\$DOCKER_CONFIG_DIR"
-
-        COMPOSE_FILES="-f docker-compose.yml"
-
-        echo "🚀 Starting Deployment..."
-        # Dangling layers only. Every deploy image carries its commit SHA as
-        # a tag and is therefore NEVER dangling, so this line has never removed
-        # a replaced deploy image and was never going to -- that is the explicit
-        # removal near the end of this script (INF-51). Kept because dangling
-        # layers do still accumulate from server-side fallback builds.
-        \$DOCKER image prune -f
-
-        # INF-51: remember what this project is running BEFORE the recreate, so
-        # the image this deploy replaces can be removed once the new one is up.
-        # Nothing bounded image CREATION previously: every push to develop built
-        # a full image and left its predecessor behind, fully tagged. Staging
-        # reached 100% disk that way, with three containers in restart loops.
-        # Read from the running containers rather than from compose config, so
-        # this is what is actually running and not what a file says should be.
-        PREV_IMAGE_REFS="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
-          | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
-
-        for dir in \$PERSISTENT_DIRS; do
-          mkdir -p -- "\$dir"
-        done
-        [ -n "\${IMAGE_TAG}" ] || { echo "❌ IMAGE_TAG is empty on target; refusing to use compose's latest default."; exit 1; }
-        if [ "\${USE_BUILD_FALLBACK}" = "true" ]; then
-          echo "🔥 Recreating containers with explicit server-build fallback..."
-          if [ -n "\${HRAM_ENGINE_READ_TOKEN}" ]; then export HRAM_ENGINE_READ_TOKEN="\${HRAM_ENGINE_READ_TOKEN}"; fi
-          export DOCKER_BUILDKIT=1
-          \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --build --force-recreate --remove-orphans
-        else
-          echo "📥 Logging in to GHCR and pulling the CI image..."
-          printf '%s' "\${GITHUB_TOKEN}" | \$DOCKER login ghcr.io --username "\${GHCR_USERNAME}" --password-stdin
-          \$DOCKER compose \$COMPOSE_FILES --env-file .env pull
-          echo "🔥 Recreating containers from pulled image..."
-          \$DOCKER compose \$COMPOSE_FILES --env-file .env up -d --force-recreate --remove-orphans
-        fi
-
-        if [ "\${SKIP_MIGRATE}" != "true" ]; then
-          echo "⏳ Waiting for backend to initialize..."
-          sleep 3
-
-          echo "🔄 Running migrations..."
-          \$DOCKER compose \$COMPOSE_FILES --env-file .env exec -T backend python manage.py migrate --noinput
-        fi
-
-        # CI-18: assert the stack survived the deploy before reporting success.
-        # 2026-08-20 incident: cockpit's `beat` container crash-looped after an
-        # unpinned dependency resolved backwards; the deploy reported success in
-        # 57s and stayed green while the scheduler was dead for 2h25m, caught
-        # only by Kuma ~14 minutes after the container actually died. A health
-        # endpoint was rejected (see CI-18's WO/register row): its freshness
-        # window reads green immediately after a deploy that killed it, and
-        # widening it either taxes every deploy by 10+ minutes or turns a public
-        # endpoint into a scheduler-tick oracle. Docker's own restart-policy
-        # state has neither problem -- a crash is visible the instant it happens
-        # -- and is generic: one check for every app's stack, no app-specific
-        # knowledge, no new secret.
-        # Scoped to `compose ps -q`: only THIS project's containers, so a
-        # crash-looping container on another app never fails this deploy.
-        # Placed BEFORE the INF-51 image cleanup below and before the success
-        # line: a failed assertion must leave the replaced image in place for
-        # rollback, exactly like a migration failure, and must not print
-        # "Deployment finished successfully" over a stack that didn't.
-        echo "🩺 Checking container health..."
-        RESTARTING_NAMES="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
-          | xargs -r \$DOCKER inspect --format '{{.Name}} {{.State.Restarting}}' 2>/dev/null \
-          | awk '\$2 == "true" { print \$1 }' || true)"
-        if [ -n "\$RESTARTING_NAMES" ]; then
-          echo "❌ Deploy completed but the following containers are stuck restarting:"
-          echo "\$RESTARTING_NAMES"
-          exit 1
-        fi
-        echo "✅ Container health check passed -- no container is restart-looping."
-
-        # INF-51: remove the image this deploy replaced. Placed here, after the
-        # recreate AND after migrations, so any earlier failure leaves the old
-        # image untouched and a rollback still possible.
-        #
-        # Three guards, because this runs on every app's deploy path including
-        # production, where an error here is worse than the disk problem it
-        # solves:
-        #   1. Candidates are only refs this project was running BEFORE and is
-        #      not running now. Another app's image can therefore never be a
-        #      candidate, and an unchanged sidecar (postgres, redis) drops out
-        #      of the set by itself.
-        #   2. The tag just deployed is refused explicitly. This is what saves a
-        #      crash-looping service: a container that failed to come up is
-        #      absent from the "after" set, and without this the NEW image would
-        #      look replaced.
-        #   3. Anything still referenced by any container is left alone, checked
-        #      host-wide rather than per-project -- and with `ps -aq`, so
-        #      STOPPED containers count too. That is what makes guard 1's use of
-        #      `compose ps -q` safe: if compose's default listing omits a
-        #      stopped container, its image merely looks replaced, and this
-        #      check still refuses to remove it.
-        # Best-effort throughout: a failed removal must never fail a deploy that
-        # has otherwise succeeded.
-        echo "Removing the image this deploy replaced (best effort)..."
+        [ -f "$DEPLOY_HELPER_PATH" ] || { echo "Guarded deploy adapter is missing."; exit 1; }
+        DEPLOY_SCRIPT="/tmp/gha-deploy-${RUN_ID}-${RUN_ATTEMPT}.py"
+        scp -o StrictHostKeyChecking=accept-new \
+          "$DEPLOY_HELPER_PATH" "${SSH_USER}@${TAILNET_HOST}:${DEPLOY_SCRIPT}"
         {
-          NEW_IMAGE_REFS="\$(\$DOCKER compose \$COMPOSE_FILES --env-file .env ps -q 2>/dev/null \
-            | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
-          IN_USE_REFS="\$(\$DOCKER ps -aq 2>/dev/null \
-            | xargs -r \$DOCKER inspect --format '{{.Config.Image}}' 2>/dev/null | sort -u || true)"
-          printf '%s\n' "\$PREV_IMAGE_REFS" | while IFS= read -r ref; do
-            [ -n "\$ref" ] || continue
-            # `if`, not `grep ... && continue`: the latter leaves the statement
-            # with grep's non-zero status in the not-found case, which is the
-            # case we want to fall THROUGH on, and would only be survivable
-            # because errexit happens to be off inside this group.
-            if printf '%s\n' "\$NEW_IMAGE_REFS" | grep -qxF "\$ref"; then
-              continue
-            fi
-            case "\$ref" in
-              *:"\${IMAGE_TAG}")
-                echo "   refusing to remove the tag just deployed: \$ref"
-                continue
-                ;;
-            esac
-            if printf '%s\n' "\$IN_USE_REFS" | grep -qxF "\$ref"; then
-              echo "   still in use by a container, left in place: \$ref"
-              continue
-            fi
-            if \$DOCKER image rm "\$ref" >/dev/null 2>&1; then
-              echo "   removed replaced image: \$ref"
-            else
-              echo "   could not remove (left in place): \$ref"
-            fi
-          done
-        } || true
-
-        echo "✅ Deployment finished successfully!"
-        EOF
-
+          printf 'set -euo pipefail\n'
+          printf 'cd %q\n' "$REMOTE_PATH"
+          printf 'export PROJECT_NAME=%q\n' "$PROJECT_NAME"
+          printf 'export TARGET_ENV=%q\n' "$TARGET_ENV"
+          printf 'export REMOTE_PATH=%q\n' "$REMOTE_PATH"
+          printf 'export HRAM_ENGINE_READ_TOKEN=%q\n' "$HRAM_ENGINE_READ_TOKEN"
+          printf 'export GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+          printf 'export GITHUB_ACTOR=%q\n' "$GITHUB_ACTOR"
+          printf 'export USE_BUILD_FALLBACK=%q\n' "$USE_BUILD_FALLBACK"
+          printf 'export IMAGE_TAG=%q\n' "$IMAGE_TAG"
+          printf 'export SKIP_MIGRATE=%q\n' "$SKIP_MIGRATE"
+          printf 'export PERSISTENT_DIRS=%q\n' "$PERSISTENT_DIRS"
+          printf 'exec python3 %q\n' "$DEPLOY_SCRIPT"
+        } | ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TAILNET_HOST}" bash -s
     - name: 🧹 Remove runner runtime .env
       if: ${{ always() }}
       shell: bash

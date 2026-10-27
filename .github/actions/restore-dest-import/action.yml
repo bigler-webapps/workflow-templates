@@ -3,7 +3,7 @@ description: >-
   Downloads the encrypted dump produced by restore-source-export, ships it to
   the destination host, decrypts it there with a passphrase deterministically
   derived from the pre-shared transport key, and imports it into the dest
-  app's running DB via restore.py --mode import-only. Always deletes the
+  app database via the recovery transaction. Always deletes the
   GitHub Artifact at the end (success or failure).
 
 # v2.0.0 — Tailscale-SSH-only. ssh_private_key removed.
@@ -19,13 +19,12 @@ inputs:
     description: 'Destination compose env (e.g. staging, production). Selects which {app}_{env} compose project on the dest host receives the dump.'
     required: true
   auto_restart:
-    description: 'If "true", run docker compose up -d after import. Default false. Requires dest_compose_path.'
+    description: 'If "true", transaction finalization starts the intended app stack after verified recovery. Default false leaves it stopped.'
     required: false
     default: 'false'
-  dest_compose_path:
-    description: 'Path on the dest host containing docker-compose.yml. Required when auto_restart=true.'
-    required: false
-    default: ''
+  recovery_source:
+    description: 'Trusted inventory identity of the source host, used to associate and reconcile this recovery.'
+    required: true
   ssh_host:
     description: 'Tailnet hostname of destination'
     required: true
@@ -72,10 +71,10 @@ runs:
         INPUT_DEST_TARGET: ${{ inputs.dest_target }}
         INPUT_APP_NAME: ${{ inputs.app_name }}
         INPUT_DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+        INPUT_RECOVERY_SOURCE: ${{ inputs.recovery_source }}
         INPUT_SSH_USER: ${{ inputs.ssh_user }}
         INPUT_SSH_HOST: ${{ inputs.ssh_host }}
         INPUT_AUTO_RESTART: ${{ inputs.auto_restart }}
-        INPUT_DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
         ARTIFACT_NAME: ${{ inputs.artifact_name }}
         TRANSPORT_KEY: ${{ inputs.transport_key }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
@@ -101,13 +100,7 @@ runs:
         printf '%s' "$INPUT_SSH_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,31}$' || { echo "❌ Invalid 'ssh_user' input"; exit 1; }
         printf '%s' "$INPUT_SSH_HOST" | grep -qE '^[a-zA-Z0-9._:-]+$' || { echo "❌ Invalid 'ssh_host' input"; exit 1; }
         printf '%s' "$INPUT_AUTO_RESTART" | grep -qE '^(true|false)$' || { echo "❌ Invalid 'auto_restart' input (must be true/false)"; exit 1; }
-        if [ "$INPUT_AUTO_RESTART" = "true" ]; then
-          if [ -z "$INPUT_DEST_COMPOSE_PATH" ]; then
-            echo "❌ auto_restart=true requires 'dest_compose_path' input."
-            exit 1
-          fi
-          printf '%s' "$INPUT_DEST_COMPOSE_PATH" | grep -qE '^/[a-zA-Z0-9._/-]+$' || { echo "❌ Invalid 'dest_compose_path' input (must be absolute path)"; exit 1; }
-        fi
+        printf '%s' "$INPUT_RECOVERY_SOURCE" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'recovery_source' input"; exit 1; }
 
     - name: 🧮 Compute work-dir
       id: compute_names
@@ -116,10 +109,15 @@ runs:
         RUN_ID: ${{ github.run_id }}
         RUN_ATTEMPT: ${{ github.run_attempt }}
         APP_NAME: ${{ inputs.app_name }}
+        DEST_TARGET: ${{ inputs.dest_target }}
+        DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+        RECOVERY_SOURCE: ${{ inputs.recovery_source }}
       run: |
         set -euo pipefail
         WORK_TAG="restore-import-${RUN_ID}-${RUN_ATTEMPT}-${APP_NAME}"
         echo "work_tag=${WORK_TAG}" >> "$GITHUB_OUTPUT"
+        IDENTITY_HASH="$(printf '%s\0%s\0%s\0%s\0%s\0%s' "$RUN_ID" "$RUN_ATTEMPT" "$APP_NAME" "$DEST_TARGET" "$DEST_SUBTARGET" "$RECOVERY_SOURCE" | sha256sum | awk '{print $1}')"
+        echo "operation_id=github-${RUN_ID}-${RUN_ATTEMPT}-${IDENTITY_HASH}" >> "$GITHUB_OUTPUT"
 
     - name: 🔐 Derive run-scoped passphrase from transport key
       shell: bash
@@ -152,6 +150,10 @@ runs:
           echo "❌ ${OPS_SCRIPTS_PATH}/restore.py missing — webapp-ops-scripts checkout failed?"
           exit 1
         fi
+        if [ ! -f "${OPS_SCRIPTS_PATH}/stack_recovery.py" ]; then
+          echo "${OPS_SCRIPTS_PATH}/stack_recovery.py missing; recovery contract is required."
+          exit 1
+        fi
 
         # Stage restore.py inside the per-run work dir (mode 700, user-writable
         # /tmp/<work_tag>/). Avoids needing root/sudo to write into
@@ -168,7 +170,8 @@ runs:
         EOF
         scp -o StrictHostKeyChecking=accept-new \
           "${OPS_SCRIPTS_PATH}/restore.py" \
-          "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/restore.py"
+          "${OPS_SCRIPTS_PATH}/stack_recovery.py" \
+          "${SSH_USER}@${SSH_HOST}:/tmp/${WORK_TAG}/"
 
     - name: 📥 Download encrypted artifact
       uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
@@ -235,39 +238,42 @@ runs:
         SSH_USER: ${{ inputs.ssh_user }}
         WORK_TAG: ${{ steps.compute_names.outputs.work_tag }}
         APP_NAME: ${{ inputs.app_name }}
+        RECOVERY_SOURCE: ${{ inputs.recovery_source }}
         DEST_SUBTARGET: ${{ inputs.dest_subtarget }}
+        AUTO_RESTART: ${{ inputs.auto_restart }}
+        RECOVERY_OPERATION_ID: ${{ steps.compute_names.outputs.operation_id }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
         ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
           "WORK_TAG=$(printf '%q' "$WORK_TAG") \
            APP_NAME=$(printf '%q' "$APP_NAME") \
+           RECOVERY_SOURCE=$(printf '%q' "$RECOVERY_SOURCE") \
            DEST_SUBTARGET=$(printf '%q' "$DEST_SUBTARGET") \
+           AUTO_RESTART=$(printf '%q' "$AUTO_RESTART") \
+           RECOVERY_OPERATION_ID=$(printf '%q' "$RECOVERY_OPERATION_ID") \
+           RUN_ID=$(printf '%q' "$RUN_ID") \
+           RUN_ATTEMPT=$(printf '%q' "$RUN_ATTEMPT") \
            bash -s" <<'EOF'
         set -euo pipefail
         export PATH=$PATH:/usr/local/bin
         WORK_DIR="/tmp/${WORK_TAG}"
+        RECOVERY_ARGS=(
+          --operation-id "$RECOVERY_OPERATION_ID"
+          --recovery-source "$RECOVERY_SOURCE"
+          --origin-run-id "$RUN_ID"
+          --origin-attempt "$RUN_ATTEMPT"
+        )
+        if [ "$AUTO_RESTART" = "true" ]; then
+          RECOVERY_ARGS+=(--auto-restart)
+        fi
         python3 "${WORK_DIR}/restore.py" \
           --mode import-only \
           --app "$APP_NAME" \
           --target-env "$DEST_SUBTARGET" \
-          --dump-file "${WORK_DIR}/dump.sql.gz"
-        EOF
-
-    - name: 🚀 Auto-restart dest stack (optional)
-      if: ${{ inputs.auto_restart == 'true' }}
-      shell: bash
-      env:
-        SSH_HOST: ${{ inputs.ssh_host }}
-        SSH_USER: ${{ inputs.ssh_user }}
-        DEST_COMPOSE_PATH: ${{ inputs.dest_compose_path }}
-      run: |
-        set -euo pipefail
-        ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" \
-          "DEST_COMPOSE_PATH=$(printf '%q' "$DEST_COMPOSE_PATH") \
-           bash -s" <<'EOF'
-        set -euo pipefail
-        cd "$DEST_COMPOSE_PATH"
-        docker compose up -d
+          --dump-file "${WORK_DIR}/dump.sql.gz" \
+          "${RECOVERY_ARGS[@]}"
         EOF
 
     - name: 🧹 Cleanup dest host work-dir
