@@ -303,8 +303,8 @@ jobs:
             -e DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1' \
             -e DEBUG='False' \
             -e ENV_TYPE='local' \
-            -e TEST_DB_HOST='localhost' \
-            -e DB_HOST='localhost' \
+            -e TEST_DB_HOST='127.0.0.1' \
+            -e DB_HOST='127.0.0.1' \
             -e DB_PORT="${{ job.services.postgres.ports['5432'] }}" \
             -e DB_NAME='test' \
             -e DB_USER='test' \
@@ -330,8 +330,8 @@ jobs:
             -e DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1' \
             -e DEBUG='False' \
             -e ENV_TYPE='local' \
-            -e TEST_DB_HOST='localhost' \
-            -e DB_HOST='localhost' \
+            -e TEST_DB_HOST='127.0.0.1' \
+            -e DB_HOST='127.0.0.1' \
             -e DB_PORT="${{ job.services.postgres.ports['5432'] }}" \
             -e DB_NAME='test' \
             -e DB_USER='test' \
