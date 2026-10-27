@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -73,16 +74,18 @@ class DeployCallerTests(unittest.TestCase):
     def _docker_stub(self, *, restarting=False):
         calls = []
         compose_ps = 0
+        all_ps = 0
 
         def run(argv, **kwargs):
-            nonlocal compose_ps
+            nonlocal compose_ps, all_ps
             argv = list(argv)
             active = self.recovery.events and self.recovery.events[-1][0] != "exit"
             calls.append((argv, kwargs, active))
             if argv == ["docker", "info"]:
                 return subprocess.CompletedProcess(argv, 0)
             if argv[:2] == ["docker", "compose"] and argv[-3:] == ["ps", "-a", "-q"]:
-                return subprocess.CompletedProcess(argv, 0, stdout="created-app created-db\n")
+                all_ps += 1
+                return subprocess.CompletedProcess(argv, 0, stdout="created-app created-db\n" if all_ps == 1 else "new-app new-db\n")
             if argv[:2] == ["docker", "compose"] and argv[-2:] == ["ps", "-q"]:
                 compose_ps += 1
                 ids = "old-app old-db\n" if compose_ps == 1 else "new-app new-db\n"
@@ -99,7 +102,9 @@ class DeployCallerTests(unittest.TestCase):
             if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
                 return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{
                     "Config": {"Labels": {"com.docker.compose.project": "demo-app_staging"}},
-                }]))
+                    "State": {"Running": True, "Restarting": restarting},
+                    "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+                } for _cid in argv[2:]]))
             if argv[:2] == ["docker", "inspect"] and "{{.Name}} {{.State.Restarting}}" in argv:
                 row = "/demo-backend true\n" if restarting else "/demo-backend false\n"
                 return subprocess.CompletedProcess(argv, 0, stdout=row)
@@ -151,6 +156,74 @@ class DeployCallerTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0], ["docker", "info"])
         self.assertEqual(self.recovery.events[-1], ("exit", "demo-app_staging"))
+
+    def test_failed_or_malformed_post_deploy_observation_cannot_report_success(self):
+        for failure in ("command", "empty-inventory", "malformed", "missing-state", "short-inspect"):
+            with self.subTest(failure=failure):
+                calls, stub = self._docker_stub()
+                after_up = False
+
+                def run(argv, **kwargs):
+                    nonlocal after_up
+                    if "up" in argv:
+                        after_up = True
+                    if after_up and argv[:2] == ["docker", "compose"] and argv[-3:] == ["ps", "-a", "-q"]:
+                        if failure == "command":
+                            raise subprocess.CalledProcessError(1, argv)
+                        if failure == "empty-inventory":
+                            return subprocess.CompletedProcess(argv, 0, stdout="")
+                    if after_up and argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+                        values = {"malformed": "not-json", "missing-state": '[{},{}]', "short-inspect": '[]'}
+                        if failure in values:
+                            return subprocess.CompletedProcess(argv, 0, stdout=values[failure])
+                    return stub(argv, **kwargs)
+
+                output = io.StringIO()
+                with mock.patch.object(guarded_deploy.subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
+                    with self.assertRaises(guarded_deploy.DeployError) as raised:
+                        guarded_deploy.deploy(self.env, self.recovery)
+                if failure == "command":
+                    self.assertEqual(str(raised.exception), "Docker observation failed; container state is unknown")
+                    self.assertIsInstance(raised.exception.__cause__, subprocess.CalledProcessError)
+                elif failure == "empty-inventory":
+                    self.assertEqual(str(raised.exception), "post-deploy container inventory is unknown")
+                self.assertNotIn("Deployment finished successfully", output.getvalue())
+                self.assertFalse(any(argv[:3] == ["docker", "image", "rm"] for argv, _, _ in calls))
+
+    def test_primary_deploy_failure_is_not_replaced_by_an_observation_error(self):
+        _calls, stub = self._docker_stub()
+        primary = subprocess.CalledProcessError(7, ["docker", "compose", "up"])
+        def run(argv, **kwargs):
+            if "up" in argv:
+                raise primary
+            return stub(argv, **kwargs)
+        with mock.patch.object(guarded_deploy.subprocess, "run", side_effect=run):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                guarded_deploy.deploy(self.env, self.recovery)
+        self.assertIs(raised.exception, primary)
+
+    def test_stopped_restartable_service_fails_but_completed_compose_oneoff_does_not(self):
+        for oneoff in (False, True):
+            with self.subTest(oneoff=oneoff):
+                _calls, stub = self._docker_stub()
+                after_up = False
+                def run(argv, **kwargs):
+                    nonlocal after_up
+                    if "up" in argv:
+                        after_up = True
+                    result = stub(argv, **kwargs)
+                    if after_up and argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+                        observed = json.loads(result.stdout)
+                        observed[0]["State"]["Running"] = False
+                        observed[0]["Config"]["Labels"]["com.docker.compose.oneoff"] = str(oneoff)
+                        result.stdout = json.dumps(observed)
+                    return result
+                with mock.patch.object(guarded_deploy.subprocess, "run", side_effect=run):
+                    if oneoff:
+                        guarded_deploy.deploy(self.env, self.recovery)
+                    else:
+                        with self.assertRaisesRegex(guarded_deploy.DeployError, "stopped or restart-looping"):
+                            guarded_deploy.deploy(self.env, self.recovery)
 
     def test_build_token_is_limited_to_the_fixed_fallback_build(self):
         calls, docker_run = self._docker_stub()

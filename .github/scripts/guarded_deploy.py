@@ -52,8 +52,10 @@ def _captured(argv: Iterable[str], *, guard, env) -> str:
             list(argv), env=env, check=True, pass_fds=(guard.fd,),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
-        return ""
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise DeployError("Docker observation failed; container state is unknown") from exc
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        raise DeployError("Docker observation is unavailable; container state is unknown")
     return result.stdout
 
 
@@ -173,20 +175,30 @@ def deploy(env: dict[str, str], recovery) -> None:
                 )
 
             print("Checking for containers stuck restarting.", flush=True)
-            current_ids = _captured([*compose, "ps", "-q"], guard=guard, env=child_env).split()
-            restart_rows = _captured(
-                [*docker("inspect", "--format", "{{.Name}} {{.State.Restarting}}"), *current_ids],
-                guard=guard, env=child_env,
-            ) if current_ids else ""
-            restarting = [
-                row.split()[0] for row in restart_rows.splitlines()
-                if len(row.split()) == 2 and row.split()[1] == "true"
-            ]
-            if restarting:
-                print("Deployment completed but containers are stuck restarting:", flush=True)
-                print("\n".join(restarting), flush=True)
-                raise DeployError("container restart loop detected")
-            print("Container health check passed; no container is restart-looping.", flush=True)
+            current_ids = _captured([*compose, "ps", "-a", "-q"], guard=guard, env=child_env).split()
+            if not current_ids or len(set(current_ids)) != len(current_ids):
+                raise DeployError("post-deploy container inventory is unknown")
+            raw = _captured(docker("inspect", *current_ids), guard=guard, env=child_env)
+            try:
+                observed = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise DeployError("post-deploy container observation is malformed") from exc
+            if not isinstance(observed, list) or len(observed) != len(current_ids):
+                raise DeployError("post-deploy container observation is incomplete")
+            for item in observed:
+                if not isinstance(item, dict):
+                    raise DeployError("post-deploy container observation is malformed")
+                state = item.get("State") or {}
+                labels = (item.get("Config") or {}).get("Labels") or {}
+                policy = ((item.get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name")
+                if (type(state.get("Running")) is not bool or type(state.get("Restarting")) is not bool
+                        or labels.get("com.docker.compose.project") != compose_project
+                        or policy not in {"no", "always", "unless-stopped", "on-failure"}):
+                    raise DeployError("post-deploy container state is unknown")
+                oneoff = str(labels.get("com.docker.compose.oneoff", "false")).lower() == "true"
+                if not oneoff and (state["Restarting"] or (not state["Running"] and policy != "no")):
+                    raise DeployError("application service is stopped or restart-looping")
+            print("Container states observed; no restart loop detected.", flush=True)
 
             new_ids = current_ids
             new_refs = set(_unique_lines(
