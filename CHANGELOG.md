@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-11-02
+
+### Fixed
+
+Shared CI jobs now bound Vitest and pytest-xdist worker counts, and E2E stacks are stopped before artifact uploads with a labelled runner janitor fallback.
+
 ## [2.15.0] - 2026-11-02
 
 ### Fixed
