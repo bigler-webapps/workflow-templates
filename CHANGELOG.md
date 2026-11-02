@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-11-02
+
+### Fixed
+
+Shared CI jobs bound the Vitest and pytest-xdist worker counts (`CI_TEST_WORKERS_CAP`, lowered per app through the new `frontend-test-max-workers` and `backend-test-max-workers` inputs). E2E stacks are labelled and stopped before the artifact uploads, because a cancelled job can end while it walks its `if: always()` tail; the runner janitor removes the leftovers.
+
 ## [2.16.0] - 2026-11-02
 
 ### Added

@@ -39,6 +39,12 @@ on:
       pytest-args:
         type: string
         default: ''
+      frontend-test-max-workers:
+        type: string
+        default: ''
+      backend-test-max-workers:
+        type: string
+        default: ''
       pytest-import-mode:
         description: >
           pytest --import-mode value. Default 'importlib' avoids basename
@@ -192,6 +198,9 @@ permissions:
   # separate main.yml publish path; out of scope here (not this workflow).
   contents: read
 
+env:
+  CI_TEST_WORKERS_CAP: '4'
+
 jobs:
   validate-inputs:
     # MIG-2: `run-migration-check` only takes effect inside the `backend` job,
@@ -254,6 +263,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
+      - name: Checkout workflow-templates (for worker limits)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: bigler-webapps/workflow-templates
+          ref: 7f76a969c351361588a2642ee969739fab9b44aa  # WM-INF-101 — bump to the commit that adds ci_test_workers.py
+          path: .wt-checkout
+
       - name: Clean stale Python byte-code
         run: find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
@@ -296,7 +312,13 @@ jobs:
         # confirmed on hram's own memory-heavy geo-build tests (live-reproduced OOM kill,
         # anon-rss ~7GB, on this exact box). Capping arenas reduces that inflation; cheap,
         # backward-compatible for every consumer of this template, no behavior/correctness change.
+        # The worker inputs reach the shell through env, never through interpolation into the script text.
+        env:
+          BACKEND_TEST_MAX_WORKERS: ${{ inputs.backend-test-max-workers }}
+          PYTEST_ARGS_INPUT: ${{ inputs.pytest-args }}
         run: |
+          set -euo pipefail
+          mapfile -d '' -t pytest_args < <(python3 .wt-checkout/.github/scripts/ci_test_workers.py pytest-args "$CI_TEST_WORKERS_CAP" "$BACKEND_TEST_MAX_WORKERS" "$PYTEST_ARGS_INPUT")
           docker run --rm --network host \
             -e DJANGO_SETTINGS_MODULE='${{ inputs.django-settings-module }}' \
             -e DJANGO_SECRET_KEY='ci-dummy-secret' \
@@ -312,8 +334,9 @@ jobs:
             -e EMAIL_PORT='25' \
             -e EMAIL_USE_TLS='False' \
             -e MALLOC_ARENA_MAX='2' \
+            -e PYTEST_XDIST_AUTO_NUM_WORKERS="$(python3 .wt-checkout/.github/scripts/ci_test_workers.py resolve "$CI_TEST_WORKERS_CAP" "$BACKEND_TEST_MAX_WORKERS")" \
             "$CI_IMAGE" \
-            pytest --import-mode=${{ inputs.pytest-import-mode }} ${{ inputs.pytest-args }}
+            pytest --import-mode=${{ inputs.pytest-import-mode }} "${pytest_args[@]}"
 
       - name: Check for missing migrations
         # MIG-2 (cockpit): catches model/migration drift (e.g. a removed field,
@@ -513,7 +536,13 @@ jobs:
       - name: Test
         if: ${{ inputs.run-frontend-tests }}
         working-directory: ${{ inputs.frontend-path }}
-        run: pnpm test
+        env:
+          FRONTEND_TEST_MAX_WORKERS: ${{ inputs.frontend-test-max-workers }}
+        run: |
+          worker_limit="$(python3 "${GITHUB_WORKSPACE}/.wt-checkout/.github/scripts/ci_test_workers.py" resolve "$CI_TEST_WORKERS_CAP" "$FRONTEND_TEST_MAX_WORKERS")"
+          # Env only: a literal `--` before a flag would reach vitest as "end of options", and a CLI
+          # --maxWorkers would also override an app's own lower setting in its `test` script.
+          VITEST_MAX_WORKERS="$worker_limit" pnpm test
 
   e2e:
     if: ${{ inputs.run-e2e }}
@@ -537,6 +566,9 @@ jobs:
             --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
             --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
             --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label ci.e2e.run=${{ github.run_id }} \
+            --label ci.e2e.attempt=${{ github.run_attempt }} \
+            --label ci.e2e.runner=${{ runner.name }} \
             -t "$CI_IMAGE" \
             -f "${{ inputs.dockerfile }}" \
             "${{ inputs.build-context }}"
@@ -544,8 +576,9 @@ jobs:
       - name: Create E2E network and dependencies
         run: |
           set -euo pipefail
-          docker network create "$E2E_NETWORK"
+          docker network create --label ci.e2e.run=${{ github.run_id }} --label ci.e2e.attempt=${{ github.run_attempt }} --label ci.e2e.runner=${{ runner.name }} "$E2E_NETWORK"
           docker run -d --name "$E2E_DB_CONTAINER" --network "$E2E_NETWORK" \
+            --label ci.e2e.run=${{ github.run_id }} --label ci.e2e.attempt=${{ github.run_attempt }} --label ci.e2e.runner=${{ runner.name }} \
             -e POSTGRES_USER=test \
             -e POSTGRES_PASSWORD=test \
             -e POSTGRES_DB=test \
@@ -553,6 +586,7 @@ jobs:
             --health-interval=10s --health-timeout=5s --health-retries=10 \
             "${{ inputs.db-image }}"
           docker run -d --name "$E2E_REDIS_CONTAINER" --network "$E2E_NETWORK" \
+            --label ci.e2e.run=${{ github.run_id }} --label ci.e2e.attempt=${{ github.run_attempt }} --label ci.e2e.runner=${{ runner.name }} \
             --health-cmd='redis-cli ping' \
             --health-interval=10s --health-timeout=5s --health-retries=10 \
             redis:7
@@ -587,6 +621,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name "$E2E_APP_CONTAINER" --network "$E2E_NETWORK" -p 127.0.0.1::8000 \
+            --label ci.e2e.run=${{ github.run_id }} --label ci.e2e.attempt=${{ github.run_attempt }} --label ci.e2e.runner=${{ runner.name }} \
             ${E2E_MAIL_APP_ARGS:-} \
             -e DJANGO_SETTINGS_MODULE='${{ inputs.e2e-settings-module }}' \
             -e DJANGO_SECRET_KEY='ci-dummy-secret' \
@@ -857,22 +892,6 @@ jobs:
           mkdir -p test-results/e2e-mail
           cp -a "$E2E_MAIL_HOST_DIR/." test-results/e2e-mail/ || true
 
-      - name: Upload E2E failure artifacts
-        # `failure()` alone would NOT see a quarantine-only failure: continue-on-error: true reports
-        # that step's own conclusion as success regardless of its internal exit code, hence the
-        # quarantine step's own `had_failure` output above. A fully green run never reaches this
-        # step at all (the `if:` is false), so retention/if-no-files-found only matter on an actual
-        # failure -- `warn` (matching the existing capture-artifact step below) surfaces the case
-        # where a failure happened but test-results/ is still empty (for example the container
-        # crashed before Playwright could write a trace), rather than staying silent about it.
-        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
-        with:
-          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ inputs.frontend-path }}/test-results
-          retention-days: 7
-          if-no-files-found: warn
-
       - name: Capture E2E screens and report
         if: always()
         continue-on-error: ${{ !inputs.e2e-capture-gate }}
@@ -937,6 +956,28 @@ jobs:
           fi
           exit 0
 
+      # Cancelled runs can terminate while walking the `if: always()` tail:
+      # the prior final cleanup remained pending after artifact uploads. Stop
+      # the long-lived stack as soon as capture has finished, before uploads.
+      - name: Stop E2E stack
+        if: always()
+        run: |
+          docker rm -f "$E2E_APP_CONTAINER" "$E2E_REDIS_CONTAINER" "$E2E_DB_CONTAINER" 2>/dev/null || true
+          docker network rm "$E2E_NETWORK" 2>/dev/null || true
+          docker image rm -f "$CI_IMAGE" 2>/dev/null || true
+
+      - name: Upload E2E failure artifacts
+        # Quarantine-only failures are reported through the step output because that step is
+        # continue-on-error; upload after stack teardown so cancellation during artifact upload
+        # cannot leave the long-lived app/database containers behind.
+        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.frontend-path }}/test-results
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Upload E2E capture artifact
         if: always()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
@@ -951,4 +992,4 @@ jobs:
           docker rm -f "$E2E_APP_CONTAINER" "$E2E_REDIS_CONTAINER" "$E2E_DB_CONTAINER" 2>/dev/null || true
           docker network rm "$E2E_NETWORK" 2>/dev/null || true
           docker image rm -f "$CI_IMAGE" 2>/dev/null || true
-          if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi
+          if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR" || true; fi
