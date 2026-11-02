@@ -267,7 +267,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: 7f76a969c351361588a2642ee969739fab9b44aa  # WM-INF-101 — bump to the commit that adds ci_test_workers.py
+          ref: 9ce4476de8568a3d3373203f9c42bd1450aeb097  # WM-INF-101 — bump to the commit that adds ci_test_workers.py
           path: .wt-checkout
 
       - name: Clean stale Python byte-code
@@ -518,7 +518,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           repository: bigler-webapps/workflow-templates
-          ref: 7f76a969c351361588a2642ee969739fab9b44aa  # CI-15 — bump deliberately when this script changes
+          ref: 9ce4476de8568a3d3373203f9c42bd1450aeb097  # CI-15 — bump deliberately when this script changes
           path: .wt-checkout
 
       - name: Install dependencies
