@@ -412,6 +412,15 @@
     group: "{{ github_runner_user }}"
     mode: "0750"
 
+- name: Deploy runner drain controller
+  become: true
+  ansible.builtin.template:
+    src: gh-runner-drain.sh.j2
+    dest: "{{ github_runner_base_dir }}/bin/gh-runner-drain.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Check which per-slot directories already exist
   # Idempotency: only initialise slots that have not been set up yet.
   # become: true required — base_dir is mode 0750 owned by github_runner_user;

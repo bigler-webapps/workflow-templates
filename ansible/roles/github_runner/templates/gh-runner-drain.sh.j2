@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Managed by Ansible. See jit-config.sh for the complementary registration gate.
+set -euo pipefail
+
+BASE_DIR="{{ github_runner_base_dir }}"
+HOST_SHORT=$(hostname -s)
+SLOTS=( {% for slot in range(1, github_runner_slots + 1) if slot not in github_runner_retired_slots %}{{ slot }} {% endfor %} )
+MARKER="/run/gh-runner.drain"
+PROC_ROOT="${GH_RUNNER_PROC_ROOT:-/proc}"
+
+worker_for_slot() {
+  shopt -s nullglob
+  local slot="$1" unit="gh-runner@${slot}.service" proc cmdline cgroup
+  WORKER_PID=""
+  for proc in "${PROC_ROOT}"/[0-9]*; do
+    [[ -r "${proc}/cmdline" && -r "${proc}/cgroup" ]] || return 2
+    cmdline=$(tr '\0' ' ' < "${proc}/cmdline" 2>/dev/null) || return 2
+    [[ "${cmdline}" == *Runner.Worker* ]] || continue
+    cgroup=$(cat "${proc}/cgroup" 2>/dev/null) || return 2
+    if [[ "${cgroup}" == *"${unit}"* ]]; then WORKER_PID="${proc##*/}"; return 0; fi
+  done
+  return 1
+}
+
+case "${1:-}" in
+  begin)
+    minutes="${2:?Usage: gh-runner-drain.sh begin <minutes>}"
+    [[ "${minutes}" =~ ^[1-9][0-9]*$ ]] || { echo "minutes must be positive" >&2; exit 2; }
+    expiry=$(($(date +%s) + minutes * 60))
+    tmp="${MARKER}.tmp.$$"
+    printf '%s\n' "${expiry}" > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${MARKER}"
+    for slot in "${SLOTS[@]}"; do
+      name="${HOST_SHORT}-slot${slot}"
+      set +e
+      output=$("${BASE_DIR}/bin/jit-config.sh" --deregister-if-idle "${name}")
+      result=$?
+      set -e
+      if [[ ${result} -eq 0 ]]; then
+        # A local worker check also protects against an absent/stale API record.
+        # Only restart when no worker is present and process metadata is readable.
+        if worker_for_slot "${slot}"; then
+          continue
+        else
+          probe=$?
+          [[ ${probe} -eq 1 ]] || { echo "slot ${slot}: process state unreadable; leaving it untouched" >&2; continue; }
+        fi
+        # --no-block: the restarted slot waits in ExecStartPre (drain marker) and never becomes "active", so a
+        # blocking restart would hang here until the marker expires.
+        systemctl restart --no-block "gh-runner@${slot}.service"
+      elif [[ ${result} -ne 3 ]]; then
+        echo "slot ${slot}: deregistration failed" >&2
+        exit 1
+      fi
+    done
+    ;;
+  status)
+    busy=0
+    for slot in "${SLOTS[@]}"; do
+      state=idle; details=""
+      if worker_for_slot "${slot}"; then
+        state=busy
+        busy=$((busy + 1))
+        stat_line=$(cat "${PROC_ROOT}/${WORKER_PID}/stat" 2>/dev/null) || stat_line=""
+        start_ticks=$(awk '{print $22}' <<< "${stat_line}")
+        uptime=$(awk '{print $1}' "${PROC_ROOT}/uptime" 2>/dev/null || echo 0)
+        ticks=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        elapsed=unknown
+        if [[ "${start_ticks}" =~ ^[0-9]+$ && "${uptime%%.*}" =~ ^[0-9]+$ && "${ticks}" =~ ^[0-9]+$ && ${ticks} -gt 0 ]]; then
+          elapsed=$(( ${uptime%%.*} - start_ticks / ticks ))
+          (( elapsed < 0 )) && elapsed=0
+        fi
+        work_dir="${BASE_DIR}/slot-${slot}/_work"
+        repo=$(find "${work_dir}" -mindepth 2 -maxdepth 2 -type d ! -name .git -print -quit 2>/dev/null || true)
+        details=" elapsed=${elapsed}s"
+        [[ -n "${repo}" ]] && details+=" repository=${repo}"
+      else
+        probe=$?
+        if [[ ${probe} -eq 2 ]]; then
+          state=busy; busy=$((busy + 1)); details=" elapsed=unknown repository=unknown"
+        else
+          # No local worker YET does not mean idle: GitHub may have just assigned a job whose worker has not
+          # started. GitHub is the authority; anything but "deregistered or not registered" counts as busy.
+          set +e
+          "${BASE_DIR}/bin/jit-config.sh" --deregister-if-idle "${HOST_SHORT}-slot${slot}" >/dev/null 2>&1
+          registration=$?
+          set -e
+          if [[ ${registration} -ne 0 ]]; then state=busy; busy=$((busy + 1)); details=" github=busy-or-unknown"; fi
+        fi
+      fi
+      printf 'slot %s %s%s\n' "${slot}" "${state}" "${details}"
+    done
+    printf 'busy_slots=%s\n' "${busy}"
+    ;;
+  extend)
+    # Keep the marker valid while provisioning runs after the wait; it never shortens an existing expiry.
+    minutes="${2:?Usage: gh-runner-drain.sh extend <minutes>}"
+    [[ "${minutes}" =~ ^[1-9][0-9]*$ ]] || { echo "minutes must be positive" >&2; exit 2; }
+    expiry=$(($(date +%s) + minutes * 60))
+    current=$(cat "${MARKER}" 2>/dev/null || true)
+    if [[ "${current}" =~ ^[0-9]+$ ]] && (( current > expiry )); then expiry="${current}"; fi
+    tmp="${MARKER}.tmp.$$"
+    printf '%s\n' "${expiry}" > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${MARKER}"
+    ;;
+  end)
+    rm -f "${MARKER}"
+    ;;
+  *)
+    echo "Usage: gh-runner-drain.sh {begin <minutes>|extend <minutes>|status|end}" >&2
+    exit 2
+    ;;
+esac

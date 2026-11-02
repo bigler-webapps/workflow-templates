@@ -88,6 +88,10 @@ github_runner_base_dir: /opt/gh-runner
 # Number of parallel ephemeral runner slots on this host
 github_runner_slots: 3
 
+# Slots intentionally retired from this host are excluded from all slot-wide
+# runner operations, including draining.
+github_runner_retired_slots: []
+
 # github_runner_restart_sec:
 #   INF-43 (2026-08-20): the fixed 30s this replaces dated from the role's
 #   original commit, before jit-config.sh's stale-same-name-runner delete

@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-11-02
+
+### Added
+
+The `github_runner` role installs `gh-runner-drain.sh` (begin, extend, status, end) and an expiring drain marker. A drained runner deregisters its idle slots through the GitHub API (GitHub refuses a runner that is running a job), blocks every re-registration until the marker is removed or has expired on its own, and reports a slot busy while GitHub or a local worker says so. `jit-config.sh` gains `--deregister-if-idle`, and the slot unit waits in `ExecStartPre` without a start timeout while drained.
+
 ## [2.15.0] - 2026-11-02
 
 ### Fixed

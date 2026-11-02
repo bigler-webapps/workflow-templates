@@ -14,7 +14,31 @@
 # Shell variables (${VAR}) are resolved at runtime by bash.
 set -euo pipefail
 
-RUNNER_NAME="${1:?Usage: jit-config.sh <runner-name>}"
+MODE="register"
+if [[ "${1:-}" == "--deregister-if-idle" ]]; then
+  MODE="deregister"
+  RUNNER_NAME="${2:?Usage: jit-config.sh --deregister-if-idle <runner-name>}"
+else
+  RUNNER_NAME="${1:?Usage: jit-config.sh <runner-name>}"
+fi
+
+# A drain prevents the restart-after-job path from registering another JIT
+# runner. Expiry is checked by the runner itself, independent of the workflow.
+if [[ "${MODE}" == "register" ]]; then
+  DRAIN_MARKER="/run/gh-runner.drain"
+  while [[ -f "${DRAIN_MARKER}" ]]; do
+    expiry=$(cat "${DRAIN_MARKER}" 2>/dev/null || true)
+    now=$(date +%s)
+    if [[ "${expiry}" =~ ^[0-9]+$ ]] && (( expiry > now )); then
+      sleep 10
+    else
+      # The slot runs as the runner user and /run belongs to root, so removing the expired marker may be
+      # refused; an expired marker is ignored either way and the root-run `end` or the next `begin` clears it.
+      rm -f "${DRAIN_MARKER}" 2>/dev/null || true
+      break
+    fi
+  done
+fi
 
 APP_ID="{{ github_runner_app_id }}"
 INSTALLATION_ID="{{ github_runner_app_installation_id }}"
@@ -65,6 +89,43 @@ INSTALL_TOKEN=$(
 
 if [[ -z "${INSTALL_TOKEN}" || "${INSTALL_TOKEN}" == "null" ]]; then
   echo "ERROR: jit-config.sh: failed to obtain installation access token" >&2
+  exit 1
+fi
+
+if [[ "${MODE}" == "deregister" ]]; then
+  RUNNER_RECORD=$(
+    curl -sf \
+      -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "${GH_API}/orgs/${ORG}/actions/runners?per_page=100" \
+    | jq -r --arg n "${RUNNER_NAME}" '[.runners[] | select(.name == $n) | [.id, .busy]][0] | if . == null then "" else @tsv end'
+  )
+  if [[ -z "${RUNNER_RECORD}" ]]; then
+    echo "not registered"
+    exit 0
+  fi
+  IFS=$'\t' read -r EXISTING_ID RUNNER_BUSY <<< "${RUNNER_RECORD}"
+  if [[ "${RUNNER_BUSY}" == "true" ]]; then
+    echo "busy"
+    exit 3
+  fi
+  HTTP_CODE=$(
+    curl -sS -o /dev/null -w '%{http_code}' \
+      -X DELETE \
+      -H "Authorization: Bearer ${INSTALL_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "${GH_API}/orgs/${ORG}/actions/runners/${EXISTING_ID}" || true
+  )
+  if [[ "${HTTP_CODE}" == "204" || "${HTTP_CODE}" == "200" ]]; then
+    echo "deregistered"
+    exit 0
+  elif [[ "${HTTP_CODE}" == "422" ]]; then
+    echo "busy"
+    exit 3
+  fi
+  echo "ERROR: jit-config.sh: runner deregistration failed (HTTP ${HTTP_CODE})" >&2
   exit 1
 fi
 
