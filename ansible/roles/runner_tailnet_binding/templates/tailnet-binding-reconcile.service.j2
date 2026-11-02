@@ -1,0 +1,7 @@
+[Unit]
+Description=Reconcile dual Tailscale runner source routes and recover job interface
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tailnet-binding-route.sh reconcile

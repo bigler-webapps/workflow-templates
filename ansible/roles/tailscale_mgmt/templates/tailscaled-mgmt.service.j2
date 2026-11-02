@@ -21,13 +21,13 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStartPre=/usr/sbin/tailscaled --cleanup --socket={{ tailscale_mgmt_socket }}
+ExecStartPre=/usr/sbin/tailscaled --cleanup --socket={{ tailscale_mgmt_socket }} --tun={{ tailscale_mgmt_tun }}
 ExecStart=/usr/sbin/tailscaled \
   --statedir={{ tailscale_mgmt_statedir }} \
   --socket={{ tailscale_mgmt_socket }} \
   --tun={{ tailscale_mgmt_tun }} \
   --port={{ tailscale_mgmt_port }}
-ExecStopPost=/usr/sbin/tailscaled --cleanup --socket={{ tailscale_mgmt_socket }}
+ExecStopPost=/usr/sbin/tailscaled --cleanup --socket={{ tailscale_mgmt_socket }} --tun={{ tailscale_mgmt_tun }}
 
 Restart=on-failure
 RestartSec=5

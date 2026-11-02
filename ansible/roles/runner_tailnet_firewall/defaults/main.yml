@@ -1,0 +1,7 @@
+runner_tailnet_firewall_job_interface: tailscale0
+runner_tailnet_firewall_mgmt_interface: tsmgmt0
+runner_tailnet_firewall_tailnet_ipv4: 100.64.0.0/10
+runner_tailnet_firewall_tailnet_ipv6: fd7a:115c:a1e0::/48
+runner_tailnet_firewall_health_port: 9110
+runner_tailnet_firewall_health_consumers: []
+runner_tailnet_firewall_chain_prefix: WM-TAILNET

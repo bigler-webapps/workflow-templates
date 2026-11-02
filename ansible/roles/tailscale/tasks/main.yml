@@ -76,6 +76,8 @@
              '--hostname=' ~ tailscale_hostname,
              '--ssh=' ~ (tailscale_ssh | string | lower),
              '--accept-routes=' ~ (tailscale_accept_routes | string | lower)]
+            + (['--netfilter-mode=' ~ tailscale_netfilter_mode] if tailscale_netfilter_mode | length > 0 else [])
+            + (['--accept-dns=' ~ tailscale_accept_dns] if tailscale_accept_dns | length > 0 else [])
             + (['--advertise-tags=' ~ (tailscale_advertise_tags | join(','))] if tailscale_advertise_tags else [])
             + (['--advertise-routes=' ~ (tailscale_advertise_routes | join(','))] if tailscale_advertise_routes else [])
           }}
@@ -84,6 +86,74 @@
         - (_tailscale_backend_state != 'Running') or (tailscale_force_up | bool)
       no_log: true
       changed_when: true
+
+    - name: Read Tailscale preferences before enforcing runner settings
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tailscale', 'debug', 'prefs'] }}
+      register: _tailscale_prefs
+      changed_when: false
+      failed_when: false
+      when: tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+
+    - name: Parse Tailscale preferences
+      ansible.builtin.set_fact:
+        _tailscale_prefs_json: "{{ _tailscale_prefs.stdout | from_json }}"
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+        - _tailscale_prefs.rc == 0
+
+    - name: Apply declared Tailscale preferences
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tailscale', 'set']
+                 + (['--netfilter-mode=' ~ tailscale_netfilter_mode] if tailscale_netfilter_mode | length > 0 else [])
+                 + (['--accept-dns=' ~ tailscale_accept_dns] if tailscale_accept_dns | length > 0 else [])
+                 + (['--auto-update=' ~ tailscale_auto_update] if tailscale_auto_update | length > 0 else []) }}
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+        - >-
+          _tailscale_prefs.rc != 0 or not (
+          (tailscale_netfilter_mode | length == 0 or (_tailscale_prefs_json.NetfilterMode | default('') | string | lower) in tailscale_netfilter_mode_aliases[tailscale_netfilter_mode]) and
+          (tailscale_accept_dns | length == 0 or (_tailscale_prefs_json.CorpDNS | default(false) | string | lower) == tailscale_accept_dns) and
+          (tailscale_auto_update | length == 0 or (((_tailscale_prefs_json.AutoUpdate | default({})).Apply if (_tailscale_prefs_json.AutoUpdate | default({})) is mapping else _tailscale_prefs_json.AutoUpdate | default('')) | default('') | string | lower) == tailscale_auto_update))
+      changed_when: true
+
+    - name: Read Tailscale preferences after enforcement
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tailscale', 'debug', 'prefs'] }}
+      register: _tailscale_prefs_post
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+
+    - name: Parse Tailscale preferences after enforcement
+      ansible.builtin.set_fact:
+        _tailscale_prefs_post_json: "{{ _tailscale_prefs_post.stdout | from_json }}"
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+
+    - name: Report raw Tailscale preference values
+      ansible.builtin.debug:
+        msg: "NetfilterMode={{ _tailscale_prefs_post_json.NetfilterMode | default('?') }} CorpDNS={{ _tailscale_prefs_post_json.CorpDNS | default('?') }} AutoUpdate={{ _tailscale_prefs_post_json.AutoUpdate | default('?') }}"
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
+
+    - name: Assert Tailscale preferences
+      ansible.builtin.assert:
+        that:
+          - (tailscale_netfilter_mode | length == 0 or (_tailscale_prefs_post_json.NetfilterMode | default('') | string | lower) in tailscale_netfilter_mode_aliases[tailscale_netfilter_mode])
+          - (tailscale_accept_dns | length == 0 or (_tailscale_prefs_post_json.CorpDNS | default(false) | string | lower) == tailscale_accept_dns)
+          - (tailscale_auto_update | length == 0 or (((_tailscale_prefs_post_json.AutoUpdate | default({})).Apply if (_tailscale_prefs_post_json.AutoUpdate | default({})) is mapping else _tailscale_prefs_post_json.AutoUpdate | default('')) | default('') | string | lower) == tailscale_auto_update)
+      when:
+        - not ansible_check_mode
+        - tailscale_netfilter_mode | length > 0 or tailscale_accept_dns | length > 0 or tailscale_auto_update | length > 0
 
     - name: Re-check Tailscale state after up
       ansible.builtin.command: tailscale status --json

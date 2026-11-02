@@ -15,29 +15,50 @@ MGMT_TUN="{{ tailnet_binding_mgmt_interface }}"
 CIDR="{{ tailnet_binding_tailnet_cidr }}"
 TABLE="{{ tailnet_binding_route_table }}"
 MGMT_TABLE="{{ tailnet_binding_mgmt_route_table }}"
-MGMT_ADDR="{{ tailnet_binding_mgmt_address }}"
 MGMT_PRIORITY="{{ tailnet_binding_mgmt_rule_priority }}"
 JOB_PRIORITY="{{ tailnet_binding_rule_priority }}"
+MODE="${1:-apply}"
+STATE_DIR="${TAILNET_BINDING_STATE_DIR:-/run/tailnet-binding}"
+WAIT_TRIES="${TAILNET_BINDING_WAIT_TRIES:-30}"
+WAIT_SLEEP="${TAILNET_BINDING_WAIT_SLEEP:-2}"
+TAILNET_ADDR_RE='^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
+
+# One run at a time: the daemon-bound unit and the reconcile timer share this script. The timer skips a
+# busy run; the unit waits for it.
+install -d -m 0755 "$STATE_DIR"
+exec 9>"$STATE_DIR/route.lock"
+if [ "$MODE" = reconcile ]; then
+    flock -n 9 || exit 0
+else
+    flock -w 120 9 || { echo "tailnet-binding-route: another run holds the lock" >&2; exit 1; }
+fi
+
+mgmt_address() {
+    ip -4 -o addr show dev "$MGMT_TUN" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -m1 -E "$TAILNET_ADDR_RE" || true
+}
+
+# Boot and daemon (re)start: the interfaces and the management address appear a little after the units.
+# The timer never waits; it simply tries again on its next tick.
+if [ "$MODE" != reconcile ]; then
+    for _ in $(seq 1 "$WAIT_TRIES"); do
+        if ip link show dev "$TUN" >/dev/null 2>&1 && ip link show dev "$MGMT_TUN" >/dev/null 2>&1 && [ -n "$(mgmt_address)" ]; then
+            break
+        fi
+        sleep "$WAIT_SLEEP"
+    done
+fi
+
+if ! ip link show dev "$TUN" >/dev/null 2>&1 || ! ip link show dev "$MGMT_TUN" >/dev/null 2>&1; then
+    [ "$MODE" = reconcile ] && exit 0
+    echo "tailnet-binding-route: required link absent" >&2; exit 1
+fi
+MGMT_ADDR="$(mgmt_address)"
 
 if [ -z "$MGMT_ADDR" ]; then
+    [ "$MODE" = reconcile ] && exit 0
     echo "tailnet-binding-route: management address is empty, refusing to install rules" >&2
     exit 1
 fi
-
-for link in "$TUN" "$MGMT_TUN"; do
-    ready=0
-    for _ in $(seq 1 30); do
-        if ip link show dev "$link" >/dev/null 2>&1; then
-            ready=1
-            break
-        fi
-        sleep 2
-    done
-    if [ "$ready" -ne 1 ]; then
-        echo "tailnet-binding-route: link $link did not appear after 60s" >&2
-        exit 1
-    fi
-done
 
 ip route replace "$CIDR" dev "$TUN" table "$TABLE"
 ip route replace "$CIDR" dev "$MGMT_TUN" table "$MGMT_TABLE"
@@ -63,3 +84,16 @@ while IFS= read -r rule; do
 done < <(ip -4 rule show)
 while ip rule del priority "$JOB_PRIORITY" 2>/dev/null; do :; done
 ip rule add from "$CIDR" lookup "$TABLE" priority "$JOB_PRIORITY"
+
+# Reconciliation alone is allowed to request recovery. This script is not part
+# of the daemon PartOf unit, so restarting tailscaled cannot restart this unit.
+if [ "$MODE" = reconcile ]; then
+    job_ip="$(ip -4 -o addr show dev "$TUN" | awk '{print $4}' | cut -d/ -f1 | grep -m1 -E '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' || true)"
+    if [ -z "$job_ip" ] && tailscale status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then
+        now="$(date +%s)"; last="$(cat "$STATE_DIR/last-restart" 2>/dev/null || echo 0)"
+        if [ $((now - last)) -ge 600 ]; then
+            printf '%s\n' "$now" >"$STATE_DIR/last-restart"
+            systemctl restart --no-block tailscaled.service
+        fi
+    fi
+fi

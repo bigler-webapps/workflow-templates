@@ -102,6 +102,15 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Read runner-specific Tailscale up arguments
+      id: ts_args
+      shell: bash
+      run: |
+        set -euo pipefail
+        args=""
+        if [ -f /etc/tailnet-runner/job-up-args ]; then args="$(cat /etc/tailnet-runner/job-up-args)"; fi
+        echo "args=${args}" >> "$GITHUB_OUTPUT"
+
     - name: 🔎 Probe existing tailnet connection
       id: ts_probe
       shell: bash
@@ -179,6 +188,7 @@ runs:
       if: steps.ts_probe.outputs.connected != 'true'
       uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade  # v3.2.3
       with:
+        args: ${{ steps.ts_args.outputs.args }}
         oauth-client-id: ${{ inputs.ts_oauth_client_id }}
         oauth-secret: ${{ inputs.ts_oauth_secret }}
         tags: ${{ inputs.ts_tag }}

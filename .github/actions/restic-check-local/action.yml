@@ -58,7 +58,7 @@ runs:
         printf '%s' "$INPUT_TARGET" | grep -qE '^[a-zA-Z0-9_-]+$' || { echo "❌ Invalid 'target' input"; exit 1; }
 
     - name: Connect to tailnet
-      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.5.2
+      uses: bigler-webapps/workflow-templates/.github/actions/tailnet-connect@v2.15.0
       with:
         ts_oauth_client_id: ${{ inputs.ts_oauth_client_id }}
         ts_oauth_secret: ${{ inputs.ts_oauth_secret }}

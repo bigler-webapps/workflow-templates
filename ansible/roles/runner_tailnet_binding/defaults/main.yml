@@ -19,7 +19,6 @@ tailnet_binding_host_patterns:
 tailnet_binding_tailnet_cidr: "100.64.0.0/10"
 # This host's permanent management-daemon address (interface tsmgmt0). Fact-derived so a
 # re-registered node needs no variable change; an empty value makes the script refuse to run.
-tailnet_binding_mgmt_address: "{{ ansible_tsmgmt0.ipv4.address | default('', true) }}"
 tailnet_binding_route_table: 53
 # The permanent management daemon has its own table so writes to shared table 52
 # by either daemon cannot change the management source route.
@@ -31,3 +30,4 @@ tailnet_binding_shared_table: 52
 # shared-table rule (5270).
 tailnet_binding_mgmt_rule_priority: 5254
 tailnet_binding_rule_priority: 5255
+tailnet_binding_job_up_args: []

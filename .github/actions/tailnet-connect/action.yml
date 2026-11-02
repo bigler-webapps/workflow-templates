@@ -32,6 +32,15 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Read runner-specific Tailscale up arguments
+      id: ts_args
+      shell: bash
+      run: |
+        set -euo pipefail
+        args=""
+        if [ -f /etc/tailnet-runner/job-up-args ]; then args="$(cat /etc/tailnet-runner/job-up-args)"; fi
+        echo "args=${args}" >> "$GITHUB_OUTPUT"
+
     - name: Probe existing tailnet connection
       id: ts_probe
       shell: bash
@@ -94,6 +103,7 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: ${{ inputs.version }}
         use-cache: 'true'
+        args: ${{ steps.ts_args.outputs.args }}
 
     - name: Backoff and re-probe after failed join
       id: ts_probe_2
@@ -140,3 +150,4 @@ runs:
         tags: ${{ inputs.ts_tag }}
         version: ${{ inputs.version }}
         use-cache: 'true'
+        args: ${{ steps.ts_args.outputs.args }}

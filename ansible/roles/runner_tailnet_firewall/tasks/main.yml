@@ -1,0 +1,32 @@
+- name: Require declared health consumers
+  ansible.builtin.assert:
+    that: runner_tailnet_firewall_health_consumers | length > 0
+- name: Install runner tailnet firewall script
+  become: true
+  ansible.builtin.template:
+    src: runner-tailnet-firewall.sh.j2
+    dest: /usr/local/sbin/runner-tailnet-firewall.sh
+    owner: root
+    group: root
+    mode: "0755"
+- name: Install runner tailnet firewall unit
+  become: true
+  ansible.builtin.template:
+    src: runner-tailnet-firewall.service.j2
+    dest: /etc/systemd/system/runner-tailnet-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+- name: Apply runner tailnet firewall
+  become: true
+  ansible.builtin.systemd:
+    name: runner-tailnet-firewall.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
+- name: Check runner tailnet firewall hook precedence
+  become: true
+  ansible.builtin.shell: >-
+    iptables -S INPUT | sed -n '2p' | grep -Fx -- '-A INPUT -j WM-TAILNET-IN' &&
+    ip6tables -S INPUT | sed -n '2p' | grep -Fx -- '-A INPUT -j WM-TAILNET-IN'
+  changed_when: false

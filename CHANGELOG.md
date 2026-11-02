@@ -12,6 +12,20 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-11-02
+
+### Fixed
+
+The management daemon cleanup commands name their own `tsmgmt0` interface, preserving the default daemon's `tailscale0` address.
+
+### Added
+
+The Tailscale roles expose netfilter mode, DNS ownership and automatic-update preferences. The `runner_tailnet_firewall` role installs a persistent Ansible-owned IPv4/IPv6 policy, and `runner_tailnet_binding` adds periodic route reconciliation, bounded recovery and `/etc/tailnet-runner/job-up-args` for job joins.
+
+### Changed
+
+The nine nested `tailnet-connect` consumers now pin `@v2.15.0`.
+
 ## [2.14.0] - 2026-10-26
 
 ### Fixed

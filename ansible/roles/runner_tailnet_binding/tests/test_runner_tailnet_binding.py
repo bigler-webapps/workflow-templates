@@ -42,7 +42,7 @@ def test_route_script_routes_job_sourced_traffic_by_source_address_not_by_device
         assert command in code, command  # an executable line, not text inside a comment
     assert 'ip route replace "$CIDR" dev "$TUN" table "$TABLE"' in rendered
     assert 'CIDR="100.64.0.0/10"' in rendered and 'TUN="tailscale0"' in rendered and 'TABLE="53"' in rendered
-    assert 'MGMT_ADDR="100.71.144.113"' in rendered
+    assert 'ip -4 -o addr show dev "$MGMT_TUN"' in rendered and 'MGMT_ADDR="$(mgmt_address)"' in rendered
     assert 'ip route replace "$CIDR" dev "$MGMT_TUN" table "$MGMT_TABLE"' in rendered
     assert 'CIDR="100.64.0.0/10"' in rendered and 'MGMT_TUN="tsmgmt0"' in rendered and 'MGMT_TABLE="54"' in rendered
     assert 'ip rule add from "$MGMT_ADDR/32" lookup "$MGMT_TABLE" priority "$MGMT_PRIORITY"' in rendered
@@ -71,8 +71,11 @@ def test_route_script_refuses_an_empty_management_address():
     assert "exit 1" in rendered[guard:guard + 200]
 
 
-def test_management_address_defaults_to_the_tsmgmt0_fact():
-    assert "ansible_tsmgmt0.ipv4.address" in _defaults()["tailnet_binding_mgmt_address"]
+def test_management_address_is_read_live_and_not_rendered_as_an_inventory_constant():
+    assert "tailnet_binding_mgmt_address" not in _defaults()
+    script = (ROLE / "templates" / "tailnet-binding-route.sh.j2").read_text(encoding="utf-8")
+    assert 'ip -4 -o addr show dev "$MGMT_TUN"' in script
+    assert 'grep -m1' in script
 
 
 def test_unit_tracks_both_tailscaled_daemons():
@@ -143,6 +146,11 @@ args=("$@")
 [ "${args[0]:-}" = "-4" ] && args=("${args[@]:1}")
 case "${args[0]:-}:${args[1]:-}" in
   link:show) exit 0 ;;
+  -o:addr)
+    iface="${args[4]}"
+    if [ "$iface" = "tsmgmt0" ]; then echo "2: tsmgmt0 inet ${MGMT_ADDR:-100.71.144.113}/32 scope global tsmgmt0"; fi
+    if [ "$iface" = "tailscale0" ] && [ -n "${JOB_ADDR:-100.109.210.125}" ]; then echo "3: tailscale0 inet ${JOB_ADDR}/32 scope global tailscale0"; fi
+    exit 0 ;;
   route:replace) exit 0 ;;
   rule:show) cat "$RULES_FILE"; exit 0 ;;
   rule:add)
@@ -166,7 +174,7 @@ exit 0
 """
 
 
-def _run_route_script(tmp_path, rules, runs=1):
+def _run_route_script(tmp_path, rules, runs=1, mode="apply", job_addr="100.109.210.125", mgmt_addr="100.71.144.113"):
     import os
     import shutil
     import stat
@@ -177,6 +185,7 @@ def _run_route_script(tmp_path, rules, runs=1):
     bash = shutil.which("bash")
     if not bash:
         pytest.skip("no bash available on PATH")
+    tmp_path.mkdir(parents=True, exist_ok=True)
     values = _defaults()
     values["tailnet_binding_mgmt_address"] = "100.71.144.113"
     script = tmp_path / "route.sh"
@@ -186,14 +195,26 @@ def _run_route_script(tmp_path, rules, runs=1):
     ip_stub = bin_dir / "ip"
     ip_stub.write_text(IP_RULE_SIMULATOR, encoding="utf-8", newline="\n")
     ip_stub.chmod(ip_stub.stat().st_mode | stat.S_IEXEC)
+    for name, body in {
+        "tailscale": '#!/usr/bin/env bash\necho \'{"BackendState":"Running"}\'\n',
+        "systemctl": '#!/usr/bin/env bash\necho "$*" >> "$SYSTEMCTL_LOG"\n',
+        "date": '#!/usr/bin/env bash\necho 1000\n',
+        # Serialisation is a util-linux property; the script's own logic is what is under test here.
+        "flock": '#!/usr/bin/env bash\nexit 0\n',
+    }.items():
+        stub = bin_dir / name
+        stub.write_text(body, encoding="utf-8", newline="\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     rules_file = tmp_path / "rules.txt"
     rules_file.write_text("".join(f"{line}\n" for line in rules), encoding="utf-8", newline="\n")
     logs = []
     for index in range(runs):
         log = tmp_path / f"ip-{index}.log"
         env = os.environ.copy()
-        env.update({"PATH": str(bin_dir) + os.pathsep + env["PATH"], "RULES_FILE": str(rules_file), "IP_LOG": str(log)})
-        proc = subprocess.run([bash, str(script)], env=env, capture_output=True, text=True, timeout=30)
+        env.update({"PATH": str(bin_dir) + os.pathsep + env["PATH"], "RULES_FILE": str(rules_file), "IP_LOG": str(log),
+                    "SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"), "TAILNET_BINDING_STATE_DIR": str(tmp_path / "run"),
+                    "JOB_ADDR": job_addr, "MGMT_ADDR": mgmt_addr})
+        proc = subprocess.run([bash, str(script), mode], env=env, capture_output=True, text=True, timeout=30)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         logs.append(log.read_text(encoding="utf-8").splitlines())
     return rules_file.read_text(encoding="utf-8").splitlines(), logs
@@ -222,3 +243,48 @@ def test_route_script_removes_a_stale_mgmt_address_but_keeps_the_current_rule(tm
     final, (calls,) = _run_route_script(tmp_path, start)
     assert final == ["5254:\tfrom 100.71.144.113 lookup 54", "5255:\tfrom 100.64.0.0/10 lookup 53"]
     assert not any(call.startswith("ip rule add from 100.71.144.113/32") for call in calls)
+
+
+def test_reconcile_timer_is_separate_from_partof_route_unit_and_recovers_without_daemon_restart_hook():
+    route_unit = _render(ROLE / "templates" / "tailnet-binding-route.service.j2", _defaults())
+    rec_service = _render(ROLE / "templates" / "tailnet-binding-reconcile.service.j2", _defaults())
+    timer = _render(ROLE / "templates" / "tailnet-binding-reconcile.timer.j2", _defaults())
+    assert "PartOf=tailscaled.service tailscaled-mgmt.service" in route_unit
+    assert "systemctl restart" not in route_unit
+    assert "ExecStart=/usr/local/sbin/tailnet-binding-route.sh reconcile" in rec_service
+    assert "PartOf=" not in rec_service and "systemctl restart" not in rec_service
+    assert "OnBootSec=30s" in timer and "OnUnitActiveSec=30s" in timer and "AccuracySec=5s" in timer
+    script = (ROLE / "templates" / "tailnet-binding-route.sh.j2").read_text(encoding="utf-8")
+    assert "flock -n 9" in script and "-ge 600" in script and "systemctl restart --no-block tailscaled.service" in script
+
+
+def test_reconcile_recovers_running_job_daemon_only_once_within_600_seconds(tmp_path):
+    _run_route_script(tmp_path, [], runs=2, mode="reconcile", job_addr="")
+    calls = (tmp_path / "systemctl.log").read_text(encoding="utf-8").splitlines()
+    assert calls == ["restart --no-block tailscaled.service"]
+
+
+def test_live_management_address_refresh_installs_new_selector_before_removing_old(tmp_path):
+    start = ["5254:\tfrom 100.71.144.113 lookup 54", "5255:\tfrom 100.64.0.0/10 lookup 53"]
+    final, (calls,) = _run_route_script(tmp_path, start, mgmt_addr="100.71.144.114")
+    assert final == ["5254:\tfrom 100.71.144.114 lookup 54", "5255:\tfrom 100.64.0.0/10 lookup 53"]
+    new = next(i for i, call in enumerate(calls) if "rule add from 100.71.144.114/32 lookup 54" in call)
+    old = next(i for i, call in enumerate(calls) if "rule del from 100.71.144.113 lookup 54" in call)
+    assert new < old
+
+
+def test_routes_converge_after_restarts_in_either_order_stop_start_and_address_refresh(tmp_path):
+    """The script is order-independent: whichever daemon (re)starts last, a run ends in the same rule set."""
+    want = ["5254:\tfrom 100.71.144.113 lookup 54", "5255:\tfrom 100.64.0.0/10 lookup 53"]
+    # management daemon first, then the job daemon (boot order), then a second run for idempotence
+    twice, _ = _run_route_script(tmp_path / "a", [], runs=2)
+    assert twice == want
+    # networkd deleted the rules while either daemon restarted: the timer's reconcile run rebuilds them
+    rebuilt, _ = _run_route_script(tmp_path / "b", [], mode="reconcile")
+    assert rebuilt == want
+    # job daemon restarted first (no job address yet), management daemon second: still converges
+    ordered, _ = _run_route_script(tmp_path / "c", ["5255:\tfrom 100.64.0.0/10 lookup 53"], job_addr="")
+    assert ordered == want
+    # management node re-registered under a new address after a stop/start: new selector in, old selector out
+    moved, _ = _run_route_script(tmp_path / "d", list(want), mgmt_addr="100.71.144.200")
+    assert moved == ["5254:\tfrom 100.71.144.200 lookup 54", "5255:\tfrom 100.64.0.0/10 lookup 53"]

@@ -37,6 +37,11 @@ tailscale_advertise_routes: []
 # from previous invocations.
 tailscale_force_up: false
 
+# Empty values preserve the historical single-daemon and hosted-runner behavior.
+tailscale_netfilter_mode: ""
+tailscale_accept_dns: ""
+tailscale_auto_update: ""
+
 # Apt repository. Tailscale publishes per-codename `.noarmor.gpg`
 # (keyring) and `.tailscale-keyring.list` (sources) under this base URL.
 tailscale_apt_repo_url: "https://pkgs.tailscale.com/stable/ubuntu"
@@ -51,3 +56,10 @@ tailscale_apt_repo_filename: "tailscale"
 # via the admin console. For long-lived servers this rarely matters;
 # for hosts that are frequently re-provisioned, plan to clean up the
 # tailnet periodically.
+
+# `tailscale debug prefs` renders NetfilterMode as its enum value or its name depending on the release;
+# both spellings count as the declared mode.
+tailscale_netfilter_mode_aliases:
+  "off": ["0", "off"]
+  nodivert: ["1", "nodivert"]
+  "on": ["2", "on"]

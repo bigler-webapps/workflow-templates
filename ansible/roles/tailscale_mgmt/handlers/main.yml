@@ -11,6 +11,7 @@
     name: tailscaled-mgmt.service
     state: restarted
   listen: tailscaled-mgmt unit changed
+  when: tailscale_mgmt_restart_on_unit_change | bool
 
 - name: systemd daemon-reload for tsmgmt-route-pin
   become: true

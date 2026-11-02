@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+set -euo pipefail
+JOB="{{ runner_tailnet_firewall_job_interface }}"
+MGMT="{{ runner_tailnet_firewall_mgmt_interface }}"
+PORT="{{ runner_tailnet_firewall_health_port }}"
+PREFIX="{{ runner_tailnet_firewall_chain_prefix }}"
+IN="${PREFIX}-IN"; FWD="${PREFIX}-FWD"; MODE="${1:-apply}"
+CONSUMERS=( {% for consumer in runner_tailnet_firewall_health_consumers %}"{{ consumer }}" {% endfor %} )
+apply_family() {
+  local tool="$1" cidr="$2"
+  if [ "$MODE" = remove ]; then
+    while "$tool" -C INPUT -j "$IN" >/dev/null 2>&1; do "$tool" -D INPUT -j "$IN"; done
+    while "$tool" -C FORWARD -j "$FWD" >/dev/null 2>&1; do "$tool" -D FORWARD -j "$FWD"; done
+    for chain in "$IN" "$FWD"; do if "$tool" -L "$chain" >/dev/null 2>&1; then "$tool" -F "$chain"; "$tool" -X "$chain"; fi; done
+    return
+  fi
+  local newin="${IN}-NEW" newfwd="${FWD}-NEW"
+  for chain in "$newin" "$newfwd"; do
+    if "$tool" -L "$chain" >/dev/null 2>&1; then "$tool" -F "$chain"; else "$tool" -N "$chain"; fi
+  done
+  "$tool" -A "$newin" -i lo -j RETURN
+  for consumer in "${CONSUMERS[@]}"; do
+    if [ -n "$consumer" ]; then
+      if { [ "$tool" = iptables ] && [[ "$consumer" != *:* ]]; } || { [ "$tool" = ip6tables ] && [[ "$consumer" == *:* ]]; }; then
+        "$tool" -A "$newin" -i "$MGMT" -s "$consumer" -p tcp --dport "$PORT" -j ACCEPT
+      fi
+    fi
+  done
+  # Health HTTP only on the management path for declared consumers. Same-host Docker bridge sources are left to ufw.
+  "$tool" -A "$newin" -i "$MGMT" -p tcp --dport "$PORT" -j DROP
+  "$tool" -A "$newin" -i "$JOB" -p tcp --dport "$PORT" -j DROP
+  # Replies only after the health rules, so an already-established unauthorised health connection is cut too.
+  "$tool" -A "$newin" -i "$JOB" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  "$tool" -A "$newin" -i "$MGMT" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  # Anti-spoofing: a tailnet source is legitimate only on the two tailnet interfaces (iptables allows one -i per rule).
+  "$tool" -A "$newin" -i "$JOB" -s "$cidr" -j RETURN
+  "$tool" -A "$newin" -i "$MGMT" -s "$cidr" -j RETURN
+  "$tool" -A "$newin" -s "$cidr" -j DROP
+  "$tool" -A "$newin" -j RETURN
+  "$tool" -A "$newfwd" -i "$JOB" -s "$cidr" -j RETURN
+  "$tool" -A "$newfwd" -i "$MGMT" -s "$cidr" -j RETURN
+  "$tool" -A "$newfwd" -s "$cidr" -j DROP
+  "$tool" -I INPUT 1 -j "$newin"
+  "$tool" -I FORWARD 1 -j "$newfwd"
+  while "$tool" -C INPUT -j "$IN" >/dev/null 2>&1; do "$tool" -D INPUT -j "$IN"; done
+  while "$tool" -C FORWARD -j "$FWD" >/dev/null 2>&1; do "$tool" -D FORWARD -j "$FWD"; done
+  if "$tool" -L "$IN" >/dev/null 2>&1; then "$tool" -F "$IN"; "$tool" -X "$IN"; fi
+  if "$tool" -L "$FWD" >/dev/null 2>&1; then "$tool" -F "$FWD"; "$tool" -X "$FWD"; fi
+  "$tool" -E "$newin" "$IN"; "$tool" -E "$newfwd" "$FWD"
+}
+if [ "$MODE" != remove ] && [ -z "${CONSUMERS[*]}" ]; then echo 'health consumers must not be empty' >&2; exit 1; fi
+apply_family iptables '{{ runner_tailnet_firewall_tailnet_ipv4 }}'
+apply_family ip6tables '{{ runner_tailnet_firewall_tailnet_ipv6 }}'

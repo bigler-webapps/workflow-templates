@@ -1,0 +1,12 @@
+[Unit]
+Description=Ansible owned firewall policy for dual Tailscale runner
+After=ufw.service docker.service
+PartOf=ufw.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/runner-tailnet-firewall.sh
+
+[Install]
+WantedBy=multi-user.target

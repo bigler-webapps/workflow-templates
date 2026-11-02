@@ -31,6 +31,61 @@
   notify: tailnet binding unit changed
   when: tailnet_binding_enabled | bool
 
+- name: Deploy route reconciliation service
+  become: true
+  ansible.builtin.template:
+    src: tailnet-binding-reconcile.service.j2
+    dest: /etc/systemd/system/tailnet-binding-reconcile.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: tailnet binding unit changed
+  when: tailnet_binding_enabled | bool
+
+- name: Deploy route reconciliation timer
+  become: true
+  ansible.builtin.template:
+    src: tailnet-binding-reconcile.timer.j2
+    dest: /etc/systemd/system/tailnet-binding-reconcile.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: tailnet binding unit changed
+  when: tailnet_binding_enabled | bool
+
+- name: Ensure job-specific argument directory exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/tailnet-runner
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - tailnet_binding_enabled | bool
+    - tailnet_binding_job_up_args | length > 0
+
+- name: Write job-side Tailscale up arguments
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/tailnet-runner/job-up-args
+    content: "{{ tailnet_binding_job_up_args | join(' ') }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - tailnet_binding_enabled | bool
+    - tailnet_binding_job_up_args | length > 0
+
+- name: Remove job-side Tailscale up arguments when unset
+  become: true
+  ansible.builtin.file:
+    path: /etc/tailnet-runner/job-up-args
+    state: absent
+  when:
+    - tailnet_binding_enabled | bool
+    - tailnet_binding_job_up_args | length == 0
+
 - name: Flush handlers before reasserting per-job tailnet route
   ansible.builtin.meta: flush_handlers
 
@@ -38,6 +93,15 @@
   become: true
   ansible.builtin.systemd:
     name: tailnet-binding-route.service
+    daemon_reload: true
+    enabled: true
+    state: restarted
+  when: tailnet_binding_enabled | bool
+
+- name: Enable periodic route reconciliation
+  become: true
+  ansible.builtin.systemd:
+    name: tailnet-binding-reconcile.timer
     daemon_reload: true
     enabled: true
     state: restarted
