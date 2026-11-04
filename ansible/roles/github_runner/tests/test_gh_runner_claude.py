@@ -97,6 +97,7 @@ def test_effective_override_refuses_before_first_mutating_task(version):
               'github_runner_node_major': CONTRACT['node_major'],
               'github_runner_app_id': 'synthetic', 'github_runner_app_private_key': 'synthetic',
               'github_runner_app_installation_id': 'synthetic',
+              'github_runner_jit_broker': 'local',
               'github_runner_sha256': 'sha256:'+'a'*64,
               'role_path': str(ROLE),
               'lookup': lambda *_args: json.dumps(CONTRACT)}
@@ -109,6 +110,25 @@ def test_effective_override_refuses_before_first_mutating_task(version):
     assert all(env.compile_expression(c)(**values) for c in conditions)
     values['github_runner_node_major'] = 20
     assert not all(env.compile_expression(c)(**values) for c in conditions)
+
+
+def test_app_credentials_are_required_only_for_the_local_broker():
+    env = Environment(undefined=StrictUndefined)
+    env.filters['from_json'] = json.loads
+    env.tests['match'] = lambda value, pattern: bool(re.match(pattern, str(value)))
+    values = {'github_runner_routine_cli_contract': CONTRACT,
+              'github_runner_claude_code_version': CONTRACT['version'],
+              'github_runner_node_major': CONTRACT['node_major'],
+              'github_runner_app_id': '', 'github_runner_app_private_key': '',
+              'github_runner_app_installation_id': '',
+              'github_runner_jit_broker': 'issuer',
+              'github_runner_sha256': 'sha256:'+'a'*64,
+              'role_path': str(ROLE),
+              'lookup': lambda *_args: json.dumps(CONTRACT)}
+    conditions = TASKS[0]['ansible.builtin.assert']['that']
+    assert all(env.compile_expression(c)(**values) for c in conditions)
+    assert not all(env.compile_expression(c)(**{**values, 'github_runner_jit_broker': 'local'}) for c in conditions)
+    assert not all(env.compile_expression(c)(**{**values, 'github_runner_jit_broker': 'other'}) for c in conditions)
 
 
 @pytest.mark.parametrize('major',[True,False,22.0,'22.0','022',' 22','22 ','22\n','>=22','22; echo unsafe'])
