@@ -21,6 +21,24 @@ worker_for_slot() {
   done
   return 1
 }
+{% if (github_runner_jit_broker | default('local')) == 'issuer' %}
+
+# Issuer mode: this host cannot deregister a runner at GitHub, so "idle" is decided locally. A slot is
+# idle only when neither a Runner.Worker (a job) nor a Runner.Listener (a registered runner that could be
+# handed one) lives in its unit's cgroup. Unreadable process metadata counts as busy.
+listener_for_slot() {
+  shopt -s nullglob
+  local slot="$1" unit="gh-runner@${slot}.service" proc cmdline cgroup
+  for proc in "${PROC_ROOT}"/[0-9]*; do
+    [[ -r "${proc}/cmdline" && -r "${proc}/cgroup" ]] || return 2
+    cmdline=$(tr '\0' ' ' < "${proc}/cmdline" 2>/dev/null) || return 2
+    [[ "${cmdline}" == *Runner.Listener* ]] || continue
+    cgroup=$(cat "${proc}/cgroup" 2>/dev/null) || return 2
+    if [[ "${cgroup}" == *"${unit}"* ]]; then return 0; fi
+  done
+  return 1
+}
+{% endif %}
 
 case "${1:-}" in
   begin)
@@ -33,10 +51,17 @@ case "${1:-}" in
     mv -f "${tmp}" "${MARKER}"
     for slot in "${SLOTS[@]}"; do
       name="${HOST_SHORT}-slot${slot}"
+{% if (github_runner_jit_broker | default('local')) == 'issuer' %}
+      # No GitHub credential here: nothing to deregister. A slot without a worker is restarted below, which
+      # ends its listener (the runner then goes offline at GitHub and cannot be handed a job); one with a
+      # worker is left to finish.
+      result=0
+{% else %}
       set +e
       output=$("${BASE_DIR}/bin/jit-config.sh" --deregister-if-idle "${name}")
       result=$?
       set -e
+{% endif %}
       if [[ ${result} -eq 0 ]]; then
         # A local worker check also protects against an absent/stale API record.
         # Only restart when no worker is present and process metadata is readable.
@@ -80,6 +105,15 @@ case "${1:-}" in
         if [[ ${probe} -eq 2 ]]; then
           state=busy; busy=$((busy + 1)); details=" elapsed=unknown repository=unknown"
         else
+{% if (github_runner_jit_broker | default('local')) == 'issuer' %}
+          # No local worker YET does not mean idle: a live listener may have just been handed a job. Without
+          # a GitHub credential here, the local evidence decides: a listener (or unreadable metadata) is busy.
+          set +e
+          listener_for_slot "${slot}"
+          listening=$?
+          set -e
+          if [[ ${listening} -ne 1 ]]; then state=busy; busy=$((busy + 1)); details=" listener=present-or-unknown"; fi
+{% else %}
           # No local worker YET does not mean idle: GitHub may have just assigned a job whose worker has not
           # started. GitHub is the authority; anything but "deregistered or not registered" counts as busy.
           set +e
@@ -87,6 +121,7 @@ case "${1:-}" in
           registration=$?
           set -e
           if [[ ${registration} -ne 0 ]]; then state=busy; busy=$((busy + 1)); details=" github=busy-or-unknown"; fi
+{% endif %}
         fi
       fi
       printf 'slot %s %s%s\n' "${slot}" "${state}" "${details}"

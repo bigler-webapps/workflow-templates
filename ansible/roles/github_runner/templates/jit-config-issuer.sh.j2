@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# jit-config.sh — CI-side JIT-config broker client (issuer mode)
+# Managed by Ansible (github_runner role, github_runner_jit_broker: issuer). Do not edit manually.
+#
+# Usage:  jit-config.sh <runner-name>
+# Output: base64-encoded JIT config string on stdout (no trailing newline)
+#
+# Called by ExecStartPre in gh-runner@.service before every job. This host holds no GitHub credential:
+# the JIT configuration comes from the CI runner issuer on the ops host (ci-issue-jit signs one request
+# for this slot). The drain-marker wait below is unchanged from the local broker; --deregister-if-idle
+# does not exist here (the drain controller stops idle slots locally instead).
+set -euo pipefail
+
+if [[ "${1:-}" == -* ]]; then
+  echo "ERROR: jit-config.sh: options are not supported in issuer mode" >&2
+  exit 2
+fi
+RUNNER_NAME="${1:?Usage: jit-config.sh <runner-name>}"
+
+# A drain prevents the restart-after-job path from registering another JIT
+# runner. Expiry is checked by the runner itself, independent of the workflow.
+DRAIN_MARKER="/run/gh-runner.drain"
+while [[ -f "${DRAIN_MARKER}" ]]; do
+  expiry=$(cat "${DRAIN_MARKER}" 2>/dev/null || true)
+  now=$(date +%s)
+  if [[ "${expiry}" =~ ^[0-9]+$ ]] && (( expiry > now )); then
+    sleep 10
+  else
+    # The slot runs as the runner user and /run belongs to root, so removing the expired marker may be
+    # refused; an expired marker is ignored either way and the root-run `end` or the next `begin` clears it.
+    rm -f "${DRAIN_MARKER}" 2>/dev/null || true
+    break
+  fi
+done
+
+exec /usr/bin/python3 -I "{{ github_runner_base_dir }}/bin/ci-issue-jit" "${RUNNER_NAME}"

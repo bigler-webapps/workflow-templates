@@ -1,0 +1,143 @@
+#!/usr/bin/python3 -I
+"""CI-side client for the CI runner issuer on the ops host (standard library only).
+
+Managed by Ansible (github_runner role, github_runner_jit_broker: issuer). Do not edit manually.
+
+Called only by jit-config.sh, before every job, as the runner account. It signs one bounded request
+for this host's slot, sends it to the issuer on the ops tailnet address, and prints exactly one value on
+stdout: the one-use encoded JIT configuration. This host holds no GitHub credential at all; the issuer
+derives the runner name, group, labels and work folder from its own policy, so nothing here can choose
+them. Diagnostics are fixed codes on stderr; the key and the configuration never reach stderr.
+"""
+import hashlib
+import hmac
+import ipaddress
+import json
+import re
+import secrets
+import socket
+import sys
+import time
+
+BASE_DIR = "{{ github_runner_base_dir }}"
+CONFIG_PATH = BASE_DIR + "/issuer.json"
+KEY_PATH = BASE_DIR + "/issuer.key"
+DOMAIN = b"wm-sec18-ci-jit-v1\n"
+NAME = re.compile(r"[A-Za-z0-9-]{1,60}-slot([1-5])\Z")
+ID = re.compile(r"[A-Za-z0-9._-]{1,80}\Z")
+MAX_RESPONSE_BYTES = 65536 + 512
+DEADLINE_SECONDS = 15.0
+LIFETIME_SECONDS = 20
+_CODE = re.compile(r"[a-z_]{1,40}\Z")
+
+
+def fail(code):
+    sys.stderr.write("ci-issue-jit: " + code + "\n")
+    sys.exit(1)
+
+
+def load():
+    """(host, port, caller, key) from the two root-managed files, or a fixed failure."""
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as handle:
+            config = json.loads(handle.read(4096))
+        with open(KEY_PATH, encoding="ascii") as handle:
+            key = handle.read(256)
+    except (OSError, ValueError, UnicodeError):
+        fail("config_unavailable")
+    if key.endswith("\n"):
+        key = key[:-1]
+    if (not isinstance(config, dict) or set(config) != {"host", "port", "caller"}
+            or not isinstance(config["host"], str) or type(config["port"]) is not int
+            or not 1024 <= config["port"] <= 65535 or not isinstance(config["caller"], str)
+            or not ID.fullmatch(config["caller"]) or not 32 <= len(key) <= 128
+            or not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", key)):
+        fail("config_invalid")
+    try:
+        ipaddress.ip_address(config["host"])
+    except ValueError:
+        fail("config_invalid")
+    return config["host"], config["port"], config["caller"], key.encode("ascii")
+
+
+def signed_request(caller, key, slot, now):
+    body = {"version": 1, "caller": caller, "slot": slot, "issued_at": now,
+            "expires_at": now + LIFETIME_SECONDS, "nonce": secrets.token_hex(16),
+            "request_id": secrets.token_hex(16)}
+    canonical = DOMAIN + json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                                    allow_nan=False).encode("ascii")
+    body["signature"] = hmac.new(key, canonical, hashlib.sha256).hexdigest()
+    return body, json.dumps(body, separators=(",", ":")).encode("ascii") + b"\n"
+
+
+def exchange(host, port, request):
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    connection = socket.socket(family, socket.SOCK_STREAM)
+    chunks, size = [], 0
+    try:
+        connection.settimeout(DEADLINE_SECONDS)
+        try:
+            connection.connect((host, port))
+            connection.sendall(request)
+            connection.shutdown(socket.SHUT_WR)
+        except socket.timeout:
+            fail("issuer_timeout")
+        except OSError:
+            fail("issuer_unavailable")
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail("issuer_timeout")
+            connection.settimeout(remaining)
+            try:
+                chunk = connection.recv(8192)
+            except socket.timeout:
+                fail("issuer_timeout")
+            except OSError:
+                fail("issuer_unavailable")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                fail("response_too_large")
+    finally:
+        connection.close()
+    return b"".join(chunks)
+
+
+def parse(raw, request_id):
+    if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+        fail("response_invalid")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        fail("response_invalid")
+    if not isinstance(value, dict):
+        fail("response_invalid")
+    if set(value) == {"error"}:
+        error = value["error"]
+        fail(error if isinstance(error, str) and _CODE.fullmatch(error) else "issuer_refused")
+    encoded = value.get("encoded_jit_config") if set(value) == {"request_id", "expires_at", "encoded_jit_config"} else None
+    if (value.get("request_id") != request_id or not isinstance(encoded, str) or not encoded
+            or len(encoded) > 65536 or not encoded.isascii() or "\n" in encoded):
+        fail("response_invalid")
+    return encoded
+
+
+def main(argv):
+    if len(argv) != 1:
+        fail("arguments_invalid")
+    match = NAME.fullmatch(argv[0])
+    if match is None:
+        fail("arguments_invalid")
+    host, port, caller, key = load()
+    body, request = signed_request(caller, key, int(match.group(1)), int(time.time()))
+    encoded = parse(exchange(host, port, request), body["request_id"])
+    sys.stdout.write(encoded)
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

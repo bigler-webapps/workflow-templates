@@ -41,9 +41,10 @@
       # preserves its integer type. Exact canonical decimal equality supports
       # both without accepting floats, booleans, leading zeros or range drift.
       - (github_runner_node_major | string) == (github_runner_routine_cli_contract.node_major | string)
-      - github_runner_app_id | string | length > 0
-      - github_runner_app_private_key | string | length > 0
-      - github_runner_app_installation_id | string | length > 0
+      - github_runner_jit_broker in ['local', 'issuer']
+      - github_runner_jit_broker == 'issuer' or github_runner_app_id | string | length > 0
+      - github_runner_jit_broker == 'issuer' or github_runner_app_private_key | string | length > 0
+      - github_runner_jit_broker == 'issuer' or github_runner_app_installation_id | string | length > 0
       - github_runner_sha256 is match('^sha256:[0-9a-f]{64}$')
     fail_msg: >-
       github_runner role: required variable not set or has wrong format.
@@ -379,6 +380,81 @@
     group: "{{ github_runner_user }}"
     mode: "0600"
   no_log: true
+  when: github_runner_jit_broker == 'local'
+
+- name: Assert the issuer-mode switch is complete and acknowledged
+  # The switch removes the App key from this host and makes every slot depend on the issuer, so it must
+  # be a deliberate, fully specified step (see defaults/main.yml).
+  ansible.builtin.assert:
+    that:
+      - github_runner_issuer_ready is sameas true
+      - github_runner_issuer_host is string
+      - github_runner_issuer_host is regex('^[0-9A-Fa-f:.]{2,45}$')
+      - github_runner_issuer_port is integer
+      - github_runner_issuer_port >= 1024 and github_runner_issuer_port <= 65535
+      - github_runner_issuer_caller is match('^[A-Za-z0-9._-]{1,80}$')
+      - github_runner_issuer_key is string
+      - github_runner_issuer_key | length >= 32
+      - github_runner_issuer_key | length <= 128
+      - github_runner_issuer_key is match('^[A-Za-z0-9._~+/=-]+$')
+      - github_runner_issuer_key | list | unique | length >= 10
+    fail_msg: >-
+      github_runner_jit_broker: issuer needs github_runner_issuer_ready: true (set it only after the issuer
+      is active and the canary passed), an IP-literal github_runner_issuer_host, a port, a caller id and a
+      32 to 128 character github_runner_issuer_key of [A-Za-z0-9._~+/=-] with at least ten distinct
+      characters (the issuer refuses anything weaker at start).
+  when: github_runner_jit_broker == 'issuer'
+
+- name: Remove the GitHub App private key from this host (issuer mode)
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_base_dir }}/app.pem"
+    state: absent
+  when: github_runner_jit_broker == 'issuer'
+
+- name: Remove issuer client files after a return to the local broker
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_base_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - issuer.key
+    - issuer.json
+    - bin/ci-issue-jit
+  when: github_runner_jit_broker == 'local'
+
+- name: Deploy issuer client configuration
+  become: true
+  ansible.builtin.copy:
+    content: "{{ {'host': github_runner_issuer_host, 'port': github_runner_issuer_port, 'caller': github_runner_issuer_caller} | to_json }}\n"
+    dest: "{{ github_runner_base_dir }}/issuer.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when: github_runner_jit_broker == 'issuer'
+
+- name: Deploy issuer caller key
+  # Readable by the slot account (ExecStartPre runs as it); jobs run as that account too, so this key
+  # is exposed to job code on this host -- the issuer's per-slot caller binding and capacity are the limit.
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_issuer_key }}\n"
+    dest: "{{ github_runner_base_dir }}/issuer.key"
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0600"
+  no_log: true
+  when: github_runner_jit_broker == 'issuer'
+
+- name: Deploy issuer client
+  become: true
+  ansible.builtin.template:
+    src: ci-issue-jit.py.j2
+    dest: "{{ github_runner_base_dir }}/bin/ci-issue-jit"
+    owner: root
+    group: root
+    mode: "0755"
+  when: github_runner_jit_broker == 'issuer'
 
 - name: Assert per-slot runner labels are safe and in range
   ansible.builtin.assert:
@@ -406,7 +482,7 @@
 - name: Deploy JIT-config broker script
   become: true
   ansible.builtin.template:
-    src: jit-config.sh.j2
+    src: "{{ 'jit-config-issuer.sh.j2' if github_runner_jit_broker == 'issuer' else 'jit-config.sh.j2' }}"
     dest: "{{ github_runner_base_dir }}/bin/jit-config.sh"
     owner: "{{ github_runner_user }}"
     group: "{{ github_runner_user }}"

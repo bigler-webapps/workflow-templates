@@ -108,3 +108,28 @@ manifest and helper from its own checkout, runs `claude --version`, and sets
 `DISABLE_AUTOUPDATER=1` for later job steps. It does not install tools or
 authenticate. Existing routine callers remain unchanged until that staged
 adoption is authorized.
+
+## Issuer mode (WM-SEC-18 C2)
+
+`github_runner_jit_broker: local` (default) keeps `jit-config.sh` with the GitHub App key on the host.
+`issuer` removes every GitHub credential from the CI host: `jit-config.sh` is replaced by a thin wrapper
+(same drain-marker wait) that calls `ci-issue-jit`, a standard-library client that signs one request for the
+slot (`wm-sec18-ci-jit-v1` HMAC) and asks the CI runner issuer on the ops tailnet address. The issuer decides
+name, group and labels from its own policy; this host cannot choose them. `app.pem` is removed.
+
+The switch is deliberately explicit: `github_runner_issuer_ready: true` (set only after the issuer is active
+and a canary passed), `github_runner_issuer_host` (IP literal), `github_runner_issuer_port`,
+`github_runner_issuer_caller` and `github_runner_issuer_key` (sync-secrets, 32 to 128 printable characters).
+With the issuer unreachable every slot stops registering, so flip it inside the transition window only.
+
+In issuer mode the drain controller has no `--deregister-if-idle` (decision R3): `begin` restarts slots
+without a worker (which ends the listener, so the runner goes offline at GitHub and cannot be handed a job)
+and `status` counts a live `Runner.Worker` or `Runner.Listener` (or unreadable process metadata) as busy.
+Throughput: a slot is freed only 60 s after its request (R1), so after a short job the slot answers
+`slot_unavailable` and systemd retries every few seconds until then; the local broker re-registered at once.
+Residual: a job handed to a listener in the instant before the restart can be lost, as before. A slot
+restarted by a drain before its runner took a job leaves an unused runner registered (offline) at GitHub;
+the issuer frees that slot only when GitHub has removed the runner (R1 is absence-only), so after a drain
+the slot can answer `slot_unavailable` until then. The jobs run
+as the same account that reads `issuer.key`, so the key is exposed to job code on this host; the issuer's
+per-slot caller binding and capacity are the limit.

@@ -30,6 +30,24 @@
 
 github_runner_org: bigler-webapps
 
+# How the CI profile obtains its JIT configuration (WM-SEC-18 C2).
+#   local  — jit-config.sh holds the GitHub App key on this host and calls the API itself (default; the
+#            App variables below are required).
+#   issuer — this host holds NO GitHub credential: ci-issue-jit asks the CI runner issuer on the ops host,
+#            which derives name, group and labels from its own policy. The App variables are not used and
+#            app.pem is removed. Switch only inside the transition window, after the issuer is active and a
+#            canary has passed: with the issuer unreachable every slot stops registering, so the switch
+#            needs the explicit `github_runner_issuer_ready: true`.
+github_runner_jit_broker: local
+github_runner_issuer_ready: false
+# Issuer endpoint on the ops tailnet address (IP literal) and this host's caller identity.
+github_runner_issuer_host: ""
+github_runner_issuer_port: 9444
+github_runner_issuer_caller: ""
+# The caller's HMAC key ([A-Za-z0-9._~+/=-], 32 to 128 characters, at least ten distinct), delivered by
+# sync-secrets, never committed.
+github_runner_issuer_key: ""
+
 # Select the existing CI profile unless an inventory explicitly opts into the
 # isolated operations profile. This scaffolding never enables its service.
 github_runner_profile: ci
