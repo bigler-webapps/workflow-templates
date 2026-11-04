@@ -384,5 +384,222 @@ elif args[:3]==["buildx","imagetools","inspect"]: print(json.dumps({"name":args[
         self.assertEqual(Path(".dockerignore").read_text(), "node_modules\n!.env*\n")
 
 
+class StageDiagnosticsTests(unittest.TestCase):
+    """A failed run names its stage and a fixed outcome class, never child output."""
+
+    def setUp(self):
+        self.fixture = tempfile.TemporaryDirectory()
+        self.old_cwd = Path.cwd()
+        os.chdir(self.fixture.name)
+        Path("backend").mkdir()
+        Path("backend/Dockerfile").write_text("FROM scratch\nCOPY . /app\n", encoding="utf-8")
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        self.fixture.cleanup()
+
+    def produce_with(self, command, **context_overrides):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(release_build.ReleaseBuildError) as caught:
+                release_build.produce(context(**context_overrides), output_dir=Path(directory) / "output", run=command)
+        return caught.exception
+
+    def failing_command(self, argv_prefix, exception):
+        stub = CommandStub()
+
+        def command(argv, **kwargs):
+            if argv[:2] == argv_prefix:
+                raise exception
+            return stub(argv, **kwargs)
+
+        return command
+
+    def test_each_docker_stage_is_named_with_the_outcome_class_of_its_command(self):
+        stages = {
+            "docker_login": ["docker", "login"],
+            "docker_build": ["docker", "build"],
+            "docker_push": ["docker", "push"],
+            "docker_inspect": ["docker", "buildx"],
+        }
+        for stage, prefix in stages.items():
+            for detail in ("exit_1", "exit_125", "timeout", "spawn_failed"):
+                with self.subTest(stage=stage, detail=detail):
+                    failure = release_build.ReleaseBuildError("command_failed", detail=detail)
+                    error = self.produce_with(self.failing_command(prefix, failure))
+                    self.assertEqual(str(error), "release_production_failed")
+                    self.assertEqual((error.stage, error.detail), (stage, detail))
+
+    def test_build_control_and_manifest_stages_are_named(self):
+        with mock.patch.object(release_build, "_prepare_build_control",
+                               side_effect=release_build.ReleaseBuildError("build_control_invalid")):
+            error = self.produce_with(CommandStub())
+        self.assertEqual((str(error), error.stage, error.detail), ("release_production_failed", "build_control", None))
+        with mock.patch.object(release_build, "produce_image_manifest", side_effect=ValueError(FAKE_TOKEN)):
+            error = self.produce_with(CommandStub())
+        self.assertEqual((str(error), error.stage, error.detail), ("release_production_failed", "manifest", None))
+        # An invalid digest is rejected by the manifest producer after the inspect command succeeded.
+        error = self.produce_with(CommandStub(inspect={"digest": "not-a-digest"}))
+        self.assertEqual((str(error), error.stage, error.detail), ("release_production_failed", "manifest", None))
+        # A failing inspect command that raises a plain exception keeps the inspect stage and has no detail.
+        error = self.produce_with(self.failing_command(["docker", "buildx"], RuntimeError(FAKE_TOKEN)))
+        self.assertEqual((error.stage, error.detail), ("docker_inspect", None))
+        # An error that already carries a detail at the build-control stage keeps it.
+        with mock.patch.object(release_build, "_prepare_build_control",
+                               side_effect=release_build.ReleaseBuildError("command_failed", detail="timeout")):
+            error = self.produce_with(CommandStub())
+        self.assertEqual((error.stage, error.detail), ("build_control", "timeout"))
+
+    def test_real_child_commands_map_to_exactly_the_fixed_outcome_classes(self):
+        environment = dict(os.environ)
+        cases = [
+            ([sys.executable, "-c", "import sys; sys.stderr.write('" + FAKE_TOKEN + "'); sys.exit(2)"], 5, "exit_2"),
+            ([sys.executable, "-c", "import time; time.sleep(10)"], 0.2, "timeout"),
+            ([sys.executable, "-c", "import sys; sys.exit(255)"], 5, "exit_255"),
+            ([os.path.join(tempfile.gettempdir(), "no-such-binary-for-release-build")], 5, "spawn_failed"),
+        ]
+        for argv, timeout, detail in cases:
+            with self.subTest(detail=detail), self.assertRaises(release_build.ReleaseBuildError) as caught:
+                release_build._run(argv, env=environment, timeout=timeout)
+            self.assertEqual(str(caught.exception), "command_failed")
+            self.assertEqual(caught.exception.detail, detail)
+            self.assertNotIn(FAKE_TOKEN, "".join(traceback.format_exception(caught.exception)))
+        with self.assertRaises(release_build.ReleaseBuildError) as caught:
+            release_build._run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*200000)"],
+                               env=environment, timeout=5)
+        self.assertEqual((str(caught.exception), caught.exception.detail),
+                         ("registry_metadata_too_large", "output_overflow"))
+        # Only an exit code in 0..255 is ever reported.
+        self.assertEqual(release_build._exit_detail(2), "exit_2")
+        for value in (-9, 256, True, None, "2"):
+            self.assertIsNone(release_build._exit_detail(value))
+
+    def test_diagnostic_vocabulary_is_closed(self):
+        for kwargs in ({"stage": "evil"}, {"stage": ""}, {"detail": "boom"}, {"detail": "exit_256"},
+                       {"detail": "exit_-1"}, {"detail": "exit_01"}, {"detail": 5}, {"detail": FAKE_TOKEN}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError) as caught:
+                release_build.ReleaseBuildError("release_production_failed", **kwargs)
+            self.assertNotIn(FAKE_TOKEN, str(caught.exception))
+        for stage in ("build_control", "docker_login", "docker_build", "docker_push", "docker_inspect", "manifest"):
+            self.assertEqual(release_build.ReleaseBuildError("x", stage=stage).stage, stage)
+        for detail in ("exit_0", "exit_255", "timeout", "spawn_failed", "output_overflow", "reader_failed"):
+            self.assertEqual(release_build.ReleaseBuildError("x", detail=detail).detail, detail)
+
+    def test_main_prints_only_whitelisted_suffixes_and_never_child_output(self):
+        def run_main(side_effect):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, context(), clear=True), \
+                    mock.patch.object(sys, "argv", ["release-build", "--output-dir", "unused"]), \
+                    mock.patch.object(release_build, "produce", side_effect=side_effect), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(release_build.main(), 1)
+            self.assertEqual(stdout.getvalue(), "")
+            return stderr.getvalue()
+
+        failed = release_build.ReleaseBuildError("release_production_failed", stage="docker_build", detail="exit_1")
+        self.assertEqual(run_main(failed), "release-build failed: release_production_failed stage=docker_build detail=exit_1\n")
+        no_detail = release_build.ReleaseBuildError("release_production_failed", stage="manifest")
+        self.assertEqual(run_main(no_detail), "release-build failed: release_production_failed stage=manifest\n")
+        # Every other code keeps its exact line, even when it carries a stage or detail.
+        other = release_build.ReleaseBuildError("source_identity_invalid", stage="docker_login", detail="timeout")
+        self.assertEqual(run_main(other), "release-build failed: source_identity_invalid\n")
+        # A non-producer exception never adds a suffix and never echoes its text.
+        self.assertEqual(run_main(RuntimeError(FAKE_TOKEN)), "release-build failed: release_production_failed\n")
+
+    def run_main_with(self, command):
+        """Run the real main() with produce() driven by `command` and return (stdout, stderr)."""
+        original = release_build.produce
+
+        def produce(env, *, output_dir):
+            return original(env, output_dir=output_dir, run=command)
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, context(), clear=True), \
+                mock.patch.object(sys, "argv", ["release-build", "--output-dir", str(Path(directory) / "out")]), \
+                mock.patch.object(release_build, "produce", side_effect=produce), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(release_build.main(), 1)
+        return stdout.getvalue(), stderr.getvalue()
+
+    def test_every_stage_reaches_stderr_exactly_and_never_leaks_child_output(self):
+        docker = {
+            "docker_login": ["docker", "login"],
+            "docker_build": ["docker", "build"],
+            "docker_push": ["docker", "push"],
+            "docker_inspect": ["docker", "buildx"],
+        }
+        for stage, prefix in docker.items():
+            for exception, expected in (
+                (RuntimeError(FAKE_TOKEN), ""),
+                (release_build.ReleaseBuildError("command_failed", detail="exit_7"), " detail=exit_7"),
+            ):
+                with self.subTest(stage=stage, exception=type(exception).__name__):
+                    stdout, stderr = self.run_main_with(self.failing_command(prefix, exception))
+                    self.assertNotIn(FAKE_TOKEN, stdout + stderr)
+                    self.assertEqual(
+                        stderr, f"release-build failed: release_production_failed stage={stage}{expected}\n")
+        with self.subTest(stage="build_control"):
+            patcher = mock.patch.object(release_build, "_prepare_build_control",
+                                        side_effect=RuntimeError(FAKE_TOKEN))
+            with patcher:
+                stdout, stderr = self.run_main_with(CommandStub())
+            self.assertNotIn(FAKE_TOKEN, stdout + stderr)
+            self.assertEqual(stderr, "release-build failed: release_production_failed stage=build_control\n")
+        with self.subTest(stage="manifest"):
+            patcher = mock.patch.object(release_build, "produce_image_manifest",
+                                        side_effect=release_build.ReleaseBuildError("command_failed", detail="exit_9"))
+            with patcher:
+                stdout, stderr = self.run_main_with(CommandStub())
+            self.assertNotIn(FAKE_TOKEN, stdout + stderr)
+            self.assertEqual(stderr, "release-build failed: release_production_failed stage=manifest detail=exit_9\n")
+
+    def test_reader_failure_and_io_errors_on_a_running_child_have_the_right_class(self):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, *, read_error=False, communicate_error=None):
+                self.read_error, self.communicate_error = read_error, communicate_error
+                outer = self
+
+                class Stream:
+                    def read(self, count):
+                        if outer.read_error:
+                            raise OSError(FAKE_TOKEN)
+                        return b""
+
+                    def close(self):
+                        pass
+
+                self.stdout = Stream()
+                self.stdin = None
+
+            def communicate(self, input=None, timeout=None):
+                if self.communicate_error is not None:
+                    raise self.communicate_error
+                return b"", b""
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        environment = dict(os.environ)
+        with mock.patch.object(release_build.subprocess, "Popen", return_value=FakeProcess(read_error=True)):
+            with self.assertRaises(release_build.ReleaseBuildError) as caught:
+                release_build._run(["docker", "inspect"], env=environment)
+        self.assertEqual((str(caught.exception), caught.exception.detail), ("command_failed", "reader_failed"))
+        # A broken pipe while writing to a RUNNING child is not a spawn failure.
+        broken = FakeProcess(communicate_error=BrokenPipeError(FAKE_TOKEN))
+        with mock.patch.object(release_build.subprocess, "Popen", return_value=broken):
+            with self.assertRaises(release_build.ReleaseBuildError) as caught:
+                release_build._run(["docker", "login"], env=environment, capture=False, input_bytes=b"x")
+        self.assertEqual((str(caught.exception), caught.exception.detail), ("command_failed", None))
+        self.assertNotIn(FAKE_TOKEN, "".join(traceback.format_exception(caught.exception)))
+
+
 if __name__ == "__main__":
     unittest.main()

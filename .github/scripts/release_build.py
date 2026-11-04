@@ -24,8 +24,30 @@ _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _PATH = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\Z")
 
 
+# The only diagnostics a failed run may add to its fixed code: which stage failed and a
+# non-secret outcome class of a failed child command. Child output is never used.
+_STAGES = frozenset({"build_control", "docker_login", "docker_build", "docker_push",
+                     "docker_inspect", "manifest"})
+_DETAILS = frozenset({"timeout", "spawn_failed", "output_overflow", "reader_failed"})
+_EXIT_DETAIL = re.compile(r"exit_(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\Z")
+
+
 class ReleaseBuildError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, stage: str | None = None, detail: str | None = None):
+        if stage is not None and stage not in _STAGES:
+            raise ValueError("invalid_diagnostic")
+        if detail is not None and (not isinstance(detail, str)
+                                   or (detail not in _DETAILS and not _EXIT_DETAIL.fullmatch(detail))):
+            raise ValueError("invalid_diagnostic")
+        super().__init__(code)
+        self.stage = stage
+        self.detail = detail
+
+
+def _exit_detail(returncode) -> str | None:
+    if isinstance(returncode, int) and not isinstance(returncode, bool) and 0 <= returncode <= 255:
+        return f"exit_{returncode}"
+    return None
 
 
 def _scalar(value: str, pattern: re.Pattern[str]) -> bool:
@@ -91,14 +113,17 @@ def _run(argv: list[str], *, env: dict[str, str], timeout: float = TIMEOUT_SECON
         if reader:
             reader.join(timeout=1)
             if reader.is_alive() or read_failed.is_set():
-                raise ReleaseBuildError("command_failed")
+                raise ReleaseBuildError("command_failed", detail="reader_failed")
         if overflow.is_set():
-            raise ReleaseBuildError("registry_metadata_too_large")
+            raise ReleaseBuildError("registry_metadata_too_large", detail="output_overflow")
         if process.returncode:
-            raise ReleaseBuildError("command_failed")
+            raise ReleaseBuildError("command_failed", detail=_exit_detail(process.returncode))
         return collected[0] if collected else b""
-    except (OSError, subprocess.TimeoutExpired):
-        raise ReleaseBuildError("command_failed") from None
+    except subprocess.TimeoutExpired:
+        raise ReleaseBuildError("command_failed", detail="timeout") from None
+    except OSError:
+        # Only a failed Popen is a spawn failure; an I/O error on a running child has no fixed class.
+        raise ReleaseBuildError("command_failed", detail="spawn_failed" if process is None else None) from None
     finally:
         if process is not None:
             if process.poll() is None:
@@ -194,12 +219,16 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
         raise ReleaseBuildError("output_path_invalid")
     output_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     config_dir = None
+    stage = "build_control"
+    detail_seen = None
     try:
         config_dir = Path(tempfile.mkdtemp(prefix="release-docker-"))
         os.chmod(config_dir, 0o700)
         build_control = _prepare_build_control(dockerfile, context, config_dir)
         docker_env = dict(_command_environment(env), DOCKER_CONFIG=str(config_dir), DOCKER_BUILDKIT="1")
+        stage = "docker_login"
         run(["docker", "login", "ghcr.io", "--username", env.get("GITHUB_ACTOR", "github-actions"), "--password-stdin"], env=docker_env, timeout=30, capture=False, input_bytes=env["GITHUB_TOKEN"].encode("utf-8"))
+        stage = "docker_build"
         tag_ref = f"{namespace}:{tag}"
         build = ["docker", "build", "--pull", "--build-arg", "VITE_APP_MUI_LICENSE_KEY",
                  "--build-arg", "VITE_SURVEY_APP_API_BASE_URL",
@@ -214,10 +243,17 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
         if env.get("HRAM_ENGINE_READ_TOKEN"):
             build_env["HRAM_ENGINE_READ_TOKEN"] = env["HRAM_ENGINE_READ_TOKEN"]
         run(build, env=build_env, capture=False)
+        stage = "docker_push"
         run(["docker", "push", tag_ref], env=docker_env, timeout=600, capture=False)
 
         def resolve(repository: str, pushed_tag: str):
-            raw = run(["docker", "buildx", "imagetools", "inspect", f"{repository}:{pushed_tag}", "--format", '{"name":{{json .Name}},"digest":{{json .Manifest.Digest}}}'], env=docker_env, timeout=30)
+            nonlocal stage, detail_seen
+            stage = "docker_inspect"
+            try:
+                raw = run(["docker", "buildx", "imagetools", "inspect", f"{repository}:{pushed_tag}", "--format", '{"name":{{json .Name}},"digest":{{json .Manifest.Digest}}}'], env=docker_env, timeout=30)
+            except ReleaseBuildError as inspect_error:
+                detail_seen = inspect_error.detail
+                raise
             try:
                 if len(raw) > MAX_INSPECT_BYTES:
                     raise ReleaseBuildError("registry_metadata_too_large")
@@ -227,17 +263,20 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
                 digest = data["digest"]
             except (UnicodeError, json.JSONDecodeError):
                 digest = None
+            stage = "manifest"
             return {"repository": repository, "tag": pushed_tag, "digest": digest}
 
+        stage = "manifest"
         manifest = produce_image_manifest(identity, expected_namespace=namespace, pushed_tag=tag, resolve_pushed_image=resolve)
         (output_dir / "release.json").write_bytes(manifest)
         (output_dir / "image.txt").write_text(namespace + "@" + json.loads(manifest)["output"]["image"].split("@", 1)[1], encoding="ascii")
         os.chmod(output_dir / "release.json", 0o600)
         os.chmod(output_dir / "image.txt", 0o600)
         return namespace + "@" + json.loads(manifest)["output"]["image"].split("@", 1)[1], manifest
-    except Exception:
+    except Exception as exc:
         shutil.rmtree(output_dir, ignore_errors=True)
-        raise ReleaseBuildError("release_production_failed") from None
+        detail = exc.detail if isinstance(exc, ReleaseBuildError) else (detail_seen if stage == "docker_inspect" else None)
+        raise ReleaseBuildError("release_production_failed", stage=stage, detail=detail) from None
     finally:
         if config_dir is not None:
             try:
@@ -255,7 +294,13 @@ def main() -> int:
         produce(dict(os.environ), output_dir=Path(args.output_dir))
     except Exception as exc:
         code = str(exc) if isinstance(exc, ReleaseBuildError) else "release_production_failed"
-        print(f"release-build failed: {code}", file=sys.stderr)
+        suffix = ""
+        if isinstance(exc, ReleaseBuildError) and code == "release_production_failed":
+            if exc.stage:
+                suffix += f" stage={exc.stage}"
+            if exc.detail:
+                suffix += f" detail={exc.detail}"
+        print(f"release-build failed: {code}{suffix}", file=sys.stderr)
         return 1
     return 0
 

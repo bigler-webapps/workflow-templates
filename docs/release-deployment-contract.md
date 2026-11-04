@@ -177,6 +177,10 @@ The source Dockerfile and effective Dockerfile-specific or context ignore file a
 
 The dedicated CI-side static producer is documented in [Static release producer](static-release-producer.md). Its additive source passed the WFT-CI-45 scoped source gate; real uploaded-artifact compatibility, strict deployment, versioned release and consumer acceptance remain separate gates. Existing callers keep their pinned paths.
 
+## Release producer failure diagnostics
+
+A failed `release_production_failed` names the stage that failed and, for a failed child command, a fixed outcome class: `release-build failed: release_production_failed stage=<stage> detail=<detail>`. `<stage>` is one of `build_control`, `docker_login`, `docker_build`, `docker_push`, `docker_inspect`, `manifest`; `<detail>` is `exit_<0-255>`, `timeout`, `spawn_failed`, `output_overflow` or `reader_failed` and is omitted when there is none. Both come from closed vocabularies, never from child output: no stdout, stderr, argument, path, image name, token or exception text is ever printed. Every other code keeps its exact line.
+
 ## Bounded connection diagnostics
 
 The legacy `deploy-app` action emits fixed phase/result codes in its three
