@@ -8,6 +8,7 @@ readonly STATE="{{ github_runner_operations_runtime_dir }}/slot"
 readonly ISSUER="{{ github_runner_operations_issuer_client }}"
 readonly REPOSITORY="{{ github_runner_operations_repository }}"
 readonly RUNNER="ops-slot-1"
+readonly LABELS="self-hosted,ops-deploy"
 
 fail() { printf '%s\n' "operations runner: $1" >&2; exit 1; }
 [[ "$(id -u)" != 0 ]] || fail "must run as the dedicated unprivileged account"
@@ -48,7 +49,7 @@ cd "$STATE"
 # It must enforce repository/group/label policy server-side and emit exactly
 # one short-lived, repository-scoped JIT config on stdout; diagnostics go to
 # stderr and must be credential-free. Never enable shell tracing here.
-jit_config="$("$ISSUER" --repository "$REPOSITORY" --runner-name "$RUNNER")" || fail "issuer client failed"
+jit_config="$("$ISSUER" --repository "$REPOSITORY" --runner-name "$RUNNER" --labels "$LABELS")" || fail "issuer client failed"
 {% raw %}
 [[ -n "$jit_config" && "${#jit_config}" -le 65536 ]] || fail "issuer returned an empty or oversized JIT config"
 {% endraw %}

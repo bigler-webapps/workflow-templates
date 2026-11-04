@@ -182,6 +182,8 @@ def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_p
         assert directories[path] == {'path': path, 'state': 'directory', 'owner': user, 'group': user, 'mode': '0700'}
     assert module_arguments('ansible.builtin.systemd') == [{
         'name': 'gh-operations.service', 'enabled': False, 'state': 'stopped'}]
+    assert module_arguments('ansible.builtin.command') == []
+    assert module_arguments('ansible.builtin.shell') == []
     assert 'ansible.builtin.apt' in output and 'git=1.0-1' in output
     assert 'root' in output and '0755' in output and '0700' in output
     assert 'gh-runner-issuer' in output and 'gh-operations-poller' in output
@@ -383,7 +385,7 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
     if corruption == 'path':
         config['../escape'] = encode('bad')
     payload = '' if corruption == 'empty' else encode(config)
-    issuer.write_text('#!/bin/sh\n[ "$1" = --repository ] && [ "$2" = bigler-webapps/webapp-operations ] && [ "$3" = --runner-name ] && [ "$4" = ops-slot-1 ] || exit 20\nprintf ' + payload + '\n', encoding='utf-8')
+    issuer.write_text('#!/bin/sh\n[ "$1" = --repository ] && [ "$2" = bigler-webapps/webapp-operations ] && [ "$3" = --runner-name ] && [ "$4" = ops-slot-1 ] && [ "$5" = --labels ] && [ "$6" = self-hosted,ops-deploy ] || exit 20\nprintf ' + payload + '\n', encoding='utf-8')
     issuer.chmod(0o750)
     listener = runtime / 'slot/bin/Runner.Listener'
     listener.write_text('#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = run ] || exit 31\n[ -d work ] && [ -d temp ] && [ -d home ] && [ -f .runner ] && [ -f .credentials ] || exit 32\n[ "$HOME" = "$PWD/home" ] && [ "$TMPDIR" = "$PWD/temp" ] || exit 33\n', encoding='utf-8')

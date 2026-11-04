@@ -57,10 +57,12 @@ this credential-free client; the issuer's keys and policy remain isolated under
 its separate identity. The role does not install or implement this client.
 
 The fixed request is `issue-runner-jit --repository
-bigler-webapps/webapp-operations --runner-name ops-slot-1`. The client/issuer
-must authenticate the fixed caller, choose and enforce repository, group,
-labels, single-slot capacity and one-use lifetime server-side, and emit one
-encoded JIT configuration on stdout. Its `.runner` settings must encode
+bigler-webapps/webapp-operations --runner-name ops-slot-1 --labels
+self-hosted,ops-deploy`. The launcher passes this label string literally, not
+from inventory. WM-SEC-18's issuer must refuse any request whose label set is
+not exactly `self-hosted,ops-deploy`; it must also authenticate the fixed
+caller, enforce repository, group, single-slot capacity and one-use lifetime
+server-side, and emit one encoded JIT configuration on stdout. Its `.runner` settings must encode
 `ephemeral=true`, `disableUpdate=true` and `workFolder=work`; job code must not
 select these values. Failure diagnostics must contain no credentials. The
 launcher checks the client file and digest, decodes only the known JIT files

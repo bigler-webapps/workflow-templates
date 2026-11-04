@@ -21,6 +21,22 @@
       CI App credentials; use the CI profile for existing runner hosts.
       The CI profile cannot target the ops host or operations inventory group.
 
+- name: Assert the ops-deploy label cannot reach a CI runner
+  ansible.builtin.assert:
+    that:
+      - github_runner_labels is string
+      - github_runner_slot_extra_labels is mapping
+      - "github_runner_labels is match('^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')"
+      - "'ops-deploy' not in (github_runner_labels.split(',') | map('lower') | list)"
+      - "github_runner_slot_extra_labels.values() | select('string') | list | length == github_runner_slot_extra_labels | length"
+      - "github_runner_slot_extra_labels.values() | select('match', '^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$') | list | length == github_runner_slot_extra_labels | length"
+      - "'ops-deploy' not in (github_runner_slot_extra_labels.values() | join(',') | split(',') | map('lower') | list)"
+    fail_msg: >-
+      The ops-deploy label is reserved for the operations runner. github_runner_labels
+      and the values of github_runner_slot_extra_labels must be comma-separated
+      labels of letters, digits, underscores, periods and hyphens, and cannot
+      contain ops-deploy.
+
 - name: Apply existing CI runner profile
   ansible.builtin.include_tasks: ci.yml
   when: github_runner_profile == 'ci'
