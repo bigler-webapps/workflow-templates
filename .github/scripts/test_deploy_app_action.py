@@ -326,6 +326,10 @@ class WftCi42RuntimeEnvTests(unittest.TestCase):
         self.assertEqual(rsync.returncode, 0, rsync.stdout + rsync.stderr)
         rsync_args = Path(env["RSYNC_LOG"]).read_text(encoding="utf-8").splitlines()
         self.assertTrue("--exclude=/.env" in rsync_args or "/.env" in rsync_args, rsync_args)
+        if action_key == "deploy-app":
+            # --delete must not remove the gate overlay: a deploy refused before guarded_deploy rewrites
+            # it would otherwise leave the recovery migration without its compose file.
+            self.assertIn("--exclude=/.webapp-recovery-compose.json", rsync_args)
 
         transfer_name = "🔐 Transfer runtime .env to server"
         cleanup_name = "🧹 Remove runner runtime .env"

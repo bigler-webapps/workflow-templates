@@ -531,6 +531,7 @@ runs:
           --rsync-path="mkdir -p ${REMOTE_PATH} && rsync"
           -e "ssh -o StrictHostKeyChecking=accept-new"
           --exclude=/.env
+          --exclude=/.webapp-recovery-compose.json
           --exclude=certbot/letsencrypt
           --exclude=docker-compose.override.yml
           --exclude=.git
