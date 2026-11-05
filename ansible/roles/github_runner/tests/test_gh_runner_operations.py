@@ -42,8 +42,14 @@ def render(name, overrides=None):
 
 
 def test_unchanged_jit_template_remains_exact_baseline():
+    # Baseline of the local CI broker. Last matched 8ebd4e2 (WM-INF-79) and went stale unnoticed afterwards.
+    # Re-baselined 2026-11-05 after reading the whole diff of jit-config.sh.j2 since 8ebd4e2; the only changes are
+    #   da6bae4  WM-INF-102  drain gate: wait while /run/gh-runner.drain is valid, and the --deregister-if-idle mode
+    #   70b775c  WM-INF-102  line endings restored to LF (no content change)
+    #   d192671  WM-INF-105  generate-jitconfig names its HTTP status in the journal (curl status as the last line)
+    # The next change to this template must update the digest in the same commit.
     expected = {
-        'templates/jit-config.sh.j2': '95658badd360333c594a402a65338cccfb9b57b7456e28cafa943ef6fc066b65',
+        'templates/jit-config.sh.j2': 'f5ff55989ec9424c6b6afe631dcdb60aea8cbc7cbd569a0362544091a66c5828',
     }
     for name, digest in expected.items():
         data = (ROLE / name).read_bytes().replace(b'\r\n', b'\n')
