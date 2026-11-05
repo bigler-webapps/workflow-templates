@@ -54,8 +54,9 @@ github_runner_profile: ci
 github_runner_operations_repository: bigler-webapps/webapp-operations
 github_runner_operations_slots: 1
 github_runner_operations_active: false
-github_runner_operations_runner_version: "2.338.0"
-github_runner_operations_runner_sha256: "sha256:af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32"
+# Always bump version and checksum together; the checksum is the linux-x64 line of the actions/runner release body.
+github_runner_operations_runner_version: "2.338.2"
+github_runner_operations_runner_sha256: "sha256:baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
 github_runner_operations_user: gh-operations
 github_runner_operations_base_dir: /opt/gh-operations
 github_runner_operations_runtime_dir: /var/lib/gh-operations

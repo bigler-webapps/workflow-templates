@@ -12,7 +12,7 @@ pins, including Git, SSH, rsync, Python, curl and jq. Only those tools and the
 explicitly allowlisted certificate/timezone and runtime-library packages are
 accepted; a verified flag cannot add Docker, Node/npm or arbitrary tools. Other
 deployment clients need a reviewed toolchain change under WFT-CI-45. Target OS/runtime-library
-pins are not guessed here. The separate runner archive is pinned at 2.338.0 and
+pins are not guessed here. The separate runner archive is pinned at 2.338.2 and
 its SHA256; CI's existing runner pin is unaffected. Missing package evidence
 fails before any provisioning. The role refuses provisioning an active slot;
 use the separately approved drain/recovery lifecycle first.

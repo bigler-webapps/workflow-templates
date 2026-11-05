@@ -152,9 +152,9 @@ def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_p
     def module_arguments(name):
         return [message['arguments'] for message in messages if message['mock_module'] == name]
     assert module_arguments('ansible.builtin.get_url') == [{
-        'url': 'https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-linux-x64-2.338.0.tar.gz',
+        'url': 'https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz',
         'dest': '/opt/gh-operations/cache/runner.tar.gz',
-        'checksum': 'sha256:af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32',
+        'checksum': 'sha256:baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40',
         'mode': '0644',
     }]
     assert module_arguments('ansible.builtin.unarchive') == [{
