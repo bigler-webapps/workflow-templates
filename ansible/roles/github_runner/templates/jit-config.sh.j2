@@ -175,17 +175,26 @@ JIT_PAYLOAD=$(
     '{name: $name, runner_group_id: $group, labels: $lbls, work_folder: "_work"}'
 )
 
-ENCODED=$(
-  curl -sf \
+# The HTTP status is appended as the last line so a refusal is named in the journal (WM-INF-105): a 409 here is
+# a stale BUSY registration of this slot's runner name (step 2b removes only non-busy ones), and the provision's
+# slot verification reports it as such with the operator's remedy. The body is never printed.
+RESPONSE=$(
+  curl -sS \
     -X POST \
     -H "Authorization: Bearer ${INSTALL_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     -H "Content-Type: application/json" \
     -d "${JIT_PAYLOAD}" \
-    "${GH_API}/orgs/${ORG}/actions/runners/generate-jitconfig" \
-  | jq -r '.encoded_jit_config'
+    -w $'\n%{http_code}' \
+    "${GH_API}/orgs/${ORG}/actions/runners/generate-jitconfig" || true
 )
+HTTP_CODE="${RESPONSE##*$'\n'}"
+if [[ "${HTTP_CODE}" != "201" ]]; then
+  echo "ERROR: jit-config.sh: generate-jitconfig failed (HTTP ${HTTP_CODE:-none})" >&2
+  exit 1
+fi
+ENCODED=$(printf '%s' "${RESPONSE%$'\n'*}" | jq -r '.encoded_jit_config')
 
 if [[ -z "${ENCODED}" || "${ENCODED}" == "null" ]]; then
   echo "ERROR: jit-config.sh: generate-jitconfig returned empty config" >&2

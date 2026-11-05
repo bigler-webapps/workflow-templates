@@ -36,7 +36,7 @@ def setup(tmp_path: Path):
         dest = runner/"bin"/("jit-config.sh" if name.startswith("jit") else "gh-runner-drain.sh")
         dest.write_text(body, encoding="utf-8", newline="\n"); dest.chmod(0o755); files[name] = dest
     bindir = tmp_path/"bin"; bindir.mkdir()
-    executable(bindir/"curl", "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$GH_CALL_LOG\"\nif [[ \" $* \" == *\" -w %{http_code} \"* ]]; then printf '%s' \"$GH_DELETE_CODE\"; else printf '{}'; fi\n")
+    executable(bindir/"curl", "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$GH_CALL_LOG\"\nif [[ \" $* \" == *generate-jitconfig* ]]; then printf '{}\\n%s' \"${GH_JIT_CODE:-201}\"; elif [[ \" $* \" == *\" -w %{http_code} \"* ]]; then printf '%s' \"$GH_DELETE_CODE\"; else printf '{}'; fi\n")
     executable(bindir/"jq", "#!/usr/bin/env bash\ncat >/dev/null\ncase \"$*\" in\n  *.token*) echo token ;;\n  *select*) printf '%s' \"$GH_RECORD\" ;;\n  *.encoded_jit_config*) echo encoded-config ;;\n  *) echo '{}' ;;\nesac\n")
     executable(bindir/"openssl", "#!/usr/bin/env bash\ncat\n")
     executable(bindir/"hostname", "#!/usr/bin/env bash\necho netcup-runner-1\n")
@@ -153,3 +153,14 @@ def test_extend_never_shortens_the_marker(setup):
     assert run(setup, files["gh-runner-drain.sh.j2"], "extend", "40").returncode == 0
     assert int(marker.read_text().strip()) >= int(time.time()) + 39 * 60
 
+
+def test_a_refused_jit_request_names_its_http_status_for_the_provision_verification(setup):
+    """WM-INF-105: curl -sf swallowed the status; the journal must carry "HTTP 409" for a stale busy registration."""
+    root, _, marker, files, _ = setup
+    marker.unlink(missing_ok=True)
+    result = run(setup, files["jit-config.sh.j2"], "host-slot1", extra={"GH_JIT_CODE": "409"})
+    assert result.returncode == 1
+    assert "ERROR: jit-config.sh: generate-jitconfig failed (HTTP 409)" in result.stderr
+    assert result.stdout == ""
+    ok = run(setup, files["jit-config.sh.j2"], "host-slot1")
+    assert ok.returncode == 0 and ok.stdout == "encoded-config"

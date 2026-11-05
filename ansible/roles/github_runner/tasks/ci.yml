@@ -544,11 +544,13 @@
   loop: "{{ range(1, github_runner_slots + 1) | list }}"
 
 - name: Restart gh-runner slot services after binary upgrade
-  # Only runs when github_runner_version changed — forces slots to pick up
-  # the new binary without requiring a separate manual restart.
+  # Provision drains this host and releases the marker only after the play. A
+  # blocking restart would wait on its own drain; the workflow verifies slots
+  # after release (WM-INF-105).
   become: true
   ansible.builtin.systemd:
     name: "gh-runner@{{ item }}.service"
     state: restarted
+    no_block: true
   loop: "{{ range(1, github_runner_slots + 1) | list }}"
   when: _runner_needs_update | bool
