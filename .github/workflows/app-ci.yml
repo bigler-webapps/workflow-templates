@@ -372,6 +372,102 @@ jobs:
         if: always()
         run: docker image rm -f "$CI_IMAGE" 2>/dev/null || true
 
+  # The Node 26 bump in cockpit's backend/Dockerfile exposed a gap: the
+  # pytest-only target never builds frontend_build, where corepack is enabled.
+  # Keep this check named image-build; webapp-management WM-RT-49 requires the
+  # fixed ci / image-build check name for Dockerfile changes. Detection fails
+  # open on non-PR events or when the PR merge commit has no second parent.
+  image-build:
+    if: ${{ inputs.run-backend && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ${{ inputs.runs-on }}
+    env:
+      # Docker runs on a shared daemon across runner slots, so this tag is unique per run.
+      CI_IMAGE: ci-image-build:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 2
+
+      - name: Detect Dockerfile changes
+        id: scope
+        shell: bash
+        env:
+          BACKEND_DOCKERFILE: ${{ inputs.dockerfile }}
+          BACKEND_BUILD_CONTEXT: ${{ inputs.build-context }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          write_output() {
+            printf 'dockerfile_changed=%s\n' "$1" >> "$GITHUB_OUTPUT"
+          }
+
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            write_output true
+            echo "::notice::Dockerfile scope fail-open: non-pull-request event; building the full image."
+            exit 0
+          fi
+          if ! git rev-parse --verify -q HEAD^2 >/dev/null; then
+            write_output true
+            echo "::notice::Dockerfile scope fail-open: pull-request HEAD has no second parent; building the full image."
+            exit 0
+          fi
+
+          normalized_dockerfile="$BACKEND_DOCKERFILE"
+          case "$normalized_dockerfile" in
+            ./*) normalized_dockerfile="${normalized_dockerfile#./}" ;;
+          esac
+          normalized_context="$BACKEND_BUILD_CONTEXT"
+          case "$normalized_context" in
+            ./*) normalized_context="${normalized_context#./}" ;;
+          esac
+          normalized_context="${normalized_context%/}"
+
+          dockerfile_changed=false
+          scope_rule="no Dockerfile path matched the caller path or build context"
+          while IFS= read -r -d '' path; do
+            if [[ "$path" == "$normalized_dockerfile" ]]; then
+              dockerfile_changed=true
+              scope_rule="changed path equals caller Dockerfile"
+              break
+            fi
+
+            basename="${path##*/}"
+            if [[ "$basename" == Dockerfile* ]]; then
+              if [[ -z "$normalized_context" || "$normalized_context" == "." || "$path" == "$normalized_context/"* ]]; then
+                dockerfile_changed=true
+                scope_rule="Dockerfile* basename changed inside build context"
+                break
+              fi
+            fi
+          done < <(git diff --name-only -z HEAD^1 HEAD)
+
+          write_output "$dockerfile_changed"
+          echo "::notice::Dockerfile scope: $scope_rule; full image build=$dockerfile_changed."
+
+      - name: Build full production image (no --target)
+        if: ${{ steps.scope.outputs.dockerfile_changed == 'true' }}
+        shell: bash
+        env:
+          HRAM_ENGINE_READ_TOKEN: ${{ secrets.HRAM_ENGINE_READ_TOKEN }}
+          VITE_APP_MUI_LICENSE_KEY: ${{ secrets.VITE_APP_MUI_LICENSE_KEY }}
+          BACKEND_DOCKERFILE: ${{ inputs.dockerfile }}
+          BACKEND_BUILD_CONTEXT: ${{ inputs.build-context }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg "VITE_APP_MUI_LICENSE_KEY=$VITE_APP_MUI_LICENSE_KEY" \
+            --secret id=hram_engine_token,env=HRAM_ENGINE_READ_TOKEN \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            -t "$CI_IMAGE" \
+            -f "$BACKEND_DOCKERFILE" \
+            "$BACKEND_BUILD_CONTEXT"
+
+      - name: Remove CI image
+        if: ${{ always() && steps.scope.outputs.dockerfile_changed == 'true' }}
+        shell: bash
+        run: docker rmi -f "$CI_IMAGE" >/dev/null 2>&1 || true
+
   security:
     if: ${{ inputs.run-security }}
     runs-on: ${{ inputs.runs-on }}
