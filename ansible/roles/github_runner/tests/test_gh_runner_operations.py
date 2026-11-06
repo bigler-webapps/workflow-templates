@@ -391,7 +391,7 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
     if corruption == 'path':
         config['../escape'] = encode('bad')
     payload = '' if corruption == 'empty' else encode(config)
-    issuer.write_text('#!/bin/sh\n[ "$1" = --repository ] && [ "$2" = bigler-webapps/webapp-operations ] && [ "$3" = --runner-name ] && [ "$4" = ops-slot-1 ] && [ "$5" = --labels ] && [ "$6" = self-hosted,ops-deploy ] || exit 20\nprintf ' + payload + '\n', encoding='utf-8')
+    issuer.write_text('#!/bin/sh\n[ "$1" = --repository ] && [ "$2" = bigler-webapps-ops/webapp-operations ] && [ "$3" = --runner-name ] && [ "$4" = ops-slot-1 ] && [ "$5" = --labels ] && [ "$6" = self-hosted,ops-deploy ] || exit 20\nprintf ' + payload + '\n', encoding='utf-8')
     issuer.chmod(0o750)
     listener = runtime / 'slot/bin/Runner.Listener'
     listener.write_text('#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = run ] || exit 31\n[ -d work ] && [ -d temp ] && [ -d home ] && [ -f .runner ] && [ -f .credentials ] || exit 32\n[ "$HOME" = "$PWD/home" ] && [ "$TMPDIR" = "$PWD/temp" ] || exit 33\n', encoding='utf-8')
@@ -466,3 +466,12 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
     issuer.unlink()  # Own synthetic fixture only.
     result = subprocess.run(['bash', str(launcher)], env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode != 0 and 'unavailable' in result.stderr
+
+
+def test_the_operations_repository_is_named_with_its_new_organization_everywhere_in_the_role():
+    """WM-SEC-23: webapp-operations lives in bigler-webapps-ops; a redirect from the old owner must not hide a stale name."""
+    old = re.compile(r"bigler-webapps/(webapp-operations|webapps)\b", re.IGNORECASE)
+    offenders = [str(path.relative_to(ROLE)) for path in ROLE.rglob("*")
+                 if path.is_file() and "__pycache__" not in path.parts and old.search(path.read_text(encoding="utf-8", errors="replace"))]
+    assert offenders == []
+    assert DEFAULTS["github_runner_operations_repository"] == "bigler-webapps-ops/webapp-operations"

@@ -51,7 +51,7 @@ github_runner_issuer_key: ""
 # Select the existing CI profile unless an inventory explicitly opts into the
 # isolated operations profile. This scaffolding never enables its service.
 github_runner_profile: ci
-github_runner_operations_repository: bigler-webapps/webapp-operations
+github_runner_operations_repository: bigler-webapps-ops/webapp-operations
 github_runner_operations_slots: 1
 github_runner_operations_active: false
 # Always bump version and checksum together; the checksum is the linux-x64 line of the actions/runner release body.

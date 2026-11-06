@@ -70,7 +70,7 @@ try:
         raise ValueError()
     if (settings.get("ephemeral") is not True or settings.get("disableupdate") is not True
         or settings.get("workfolder") != "work" or settings.get("agentname") != "ops-slot-1"
-        or settings.get("githuburl") not in (None, "", "https://github.com/bigler-webapps/webapp-operations")):
+        or settings.get("githuburl") not in (None, "", "https://github.com/bigler-webapps-ops/webapp-operations")):
         raise ValueError()
     for name, content in decoded.items():
         descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

@@ -7,7 +7,7 @@
       - github_runner_profile == 'operations'
       - inventory_hostname == 'ops'
       - "'operations' in group_names and 'runners' not in group_names"
-      - github_runner_operations_repository == 'bigler-webapps/webapp-operations'
+      - github_runner_operations_repository == 'bigler-webapps-ops/webapp-operations'
       - github_runner_operations_slots is integer and github_runner_operations_slots == 1
       - github_runner_user not in [github_runner_operations_user, github_runner_operations_issuer_user, github_runner_operations_poller_user]
       - github_runner_base_dir != github_runner_operations_base_dir

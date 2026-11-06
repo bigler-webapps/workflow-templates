@@ -6,7 +6,7 @@
       - github_runner_profile != 'ci' or inventory_hostname != 'ops'
       - github_runner_profile != 'ci' or 'operations' not in group_names
       - github_runner_profile in ['ci', 'operations']
-      - github_runner_profile != 'operations' or (github_runner_operations_repository == 'bigler-webapps/webapp-operations')
+      - github_runner_profile != 'operations' or (github_runner_operations_repository == 'bigler-webapps-ops/webapp-operations')
       - github_runner_profile != 'operations' or (github_runner_operations_slots is integer and github_runner_operations_slots == 1)
       - github_runner_profile != 'operations' or (github_runner_slots is integer and github_runner_slots == 1)
       - github_runner_profile != 'operations' or (github_runner_group_id | string == '1')
