@@ -866,10 +866,10 @@ jobs:
               OUTPUT_SUBDIR="test-results/regular-$(printf '%03d' "$idx")-$(echo "$f" | tr '/' '-')"
               OUTPUT_ARGS=" --output '$OUTPUT_SUBDIR'"
             fi
-            if docker run --rm --network host \
+            if docker run --rm --network container:"$E2E_APP_CONTAINER" \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
-              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:8000" \
               -e E2E_RESEED=runner \
               -v "${{ github.workspace }}:/workspace" \
               -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
@@ -935,10 +935,10 @@ jobs:
             # Computed in THIS (outer/runner) shell, not inside the container's
             # string, to avoid a nested double-quote breaking the outer string.
             OUTPUT_SUBDIR="test-results/$(printf '%03d' "$idx")-$(echo "$f" | tr '/' '-')"
-            docker run --rm --network host \
+            docker run --rm --network container:"$E2E_APP_CONTAINER" \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
-              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:8000" \
               -e E2E_RESEED=runner \
               -v "${{ github.workspace }}:/workspace" \
               -v "${{ github.workspace }}/.git:/workspace/.git:ro" \
@@ -1022,10 +1022,10 @@ jobs:
               worst=$reseed_status
               continue
             fi
-            docker run --rm --network host \
+            docker run --rm --network container:"$E2E_APP_CONTAINER" \
               --user "$(id -u):$(id -g)" \
               -e HOME=/tmp \
-              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:$APP_PORT" \
+              -e PLAYWRIGHT_BASE_URL="http://127.0.0.1:8000" \
               -e E2E_RESEED=runner \
               -e GIT_CONFIG_COUNT=1 \
               -e GIT_CONFIG_KEY_0=safe.directory \

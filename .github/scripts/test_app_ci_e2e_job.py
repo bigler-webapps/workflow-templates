@@ -92,6 +92,66 @@ class WftCi40GitMountTests(unittest.TestCase):
                 self.assertLess(command.index(workspace_mount.group(0)), command.index(read_only_git_mount), command)
 
 
+class WftCi49NetworkNamespaceTests(unittest.TestCase):
+    @staticmethod
+    def _docker_run_options(step):
+        return re.findall(
+            r'docker run(?P<command>.*?)(?=\n\s+"\$\{\{ inputs\.e2e-playwright-image \}\}")',
+            step,
+            re.DOTALL,
+        )
+
+    def _assert_app_facing_runs_use_app_namespace(self, job):
+        for name in (
+            "Playwright specs",
+            "Playwright quarantine specs",
+            "Capture E2E screens and report",
+        ):
+            runs = self._docker_run_options(step_body(job, name))
+            expected_runs = 2 if name == "Capture E2E screens and report" else 1
+            self.assertEqual(len(runs), expected_runs, f"unexpected Docker run count in {name}")
+            app_runs = [run for run in runs if "PLAYWRIGHT_BASE_URL" in run]
+            self.assertEqual(len(app_runs), 1, f"expected one app-facing Playwright run in {name}")
+            run = app_runs[0]
+            self.assertIn('--network container:"$E2E_APP_CONTAINER"', run, name)
+            self.assertIn('-e PLAYWRIGHT_BASE_URL="http://127.0.0.1:8000"', run, name)
+            self.assertNotIn("--network host", run, name)
+            self.assertNotIn("$APP_PORT", run, name)
+
+    def test_app_facing_playwright_runs_join_the_app_network_namespace(self):
+        self._assert_app_facing_runs_use_app_namespace(E2E_JOB)
+
+        # Playwright specs uses this same run site in both fail-fast and
+        # collect-failures modes; the functional collection tests drive the latter.
+        specs = step_body(E2E_JOB, "Playwright specs")
+        self.assertIn("inputs.e2e-collect-spec-failures", specs)
+        self.assertIn("if docker run", specs)
+
+        install = step_body(E2E_JOB, "Install Playwright dependencies")
+        self.assertIn("--network host", install)
+        self.assertNotIn("PLAYWRIGHT_BASE_URL", install)
+
+        capture = step_body(E2E_JOB, "Capture E2E screens and report")
+        capture_runs = self._docker_run_options(capture)
+        manifest_runs = [run for run in capture_runs if "PLAYWRIGHT_BASE_URL" not in run]
+        self.assertEqual(len(capture_runs), 2, "capture must keep manifest enumeration and cell execution separate")
+        self.assertEqual(len(manifest_runs), 1)
+        self.assertIn("--network host", manifest_runs[0])
+        self.assertIn("node -e", capture)
+
+    def test_assertion_fails_if_an_app_run_reverts_to_host_networking(self):
+        quarantine = step_body(E2E_JOB, "Playwright quarantine specs")
+        mutated_quarantine = quarantine.replace(
+            '--network container:"$E2E_APP_CONTAINER"',
+            "--network host",
+            1,
+        )
+        self.assertNotEqual(mutated_quarantine, quarantine, "fixture setup did not match quarantine network")
+        mutated_job = E2E_JOB.replace(quarantine, mutated_quarantine, 1)
+        with self.assertRaises(AssertionError):
+            self._assert_app_facing_runs_use_app_namespace(mutated_job)
+
+
 class WftCi30StructuralTests(unittest.TestCase):
     def test_e2e_inputs_have_required_types_and_defaults(self):
         expected = {
@@ -1163,6 +1223,13 @@ class WftCi38SpecFailureTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self._spec_calls(calls), ["tests/first.spec.js", "tests/second.spec.js"])
         self.assertEqual(self._reseed_count(calls), 2)
+        playwright_runs = [call for call in calls if "npx playwright test" in call]
+        self.assertEqual(len(playwright_runs), 2, calls)
+        for call in playwright_runs:
+            self.assertIn("--network container:app", call)
+            self.assertIn("-e PLAYWRIGHT_BASE_URL=http://127.0.0.1:8000", call)
+            self.assertNotIn("--network host", call)
+            self.assertNotIn("$APP_PORT", call)
         self.assertEqual(sorted(markers.values()), ["tests/first.spec.js", "tests/second.spec.js"])
 
     @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
