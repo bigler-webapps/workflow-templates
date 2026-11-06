@@ -23,13 +23,17 @@ OPS = yaml.safe_load((ROLE / 'tasks/operations.yml').read_text(encoding='utf-8')
 def values(**overrides):
     result = {**DEFAULTS,
         'github_runner_profile': 'operations', 'github_runner_slots': 1,
-        'github_runner_operations_package_manifest_verified': True,
-        'github_runner_operations_package_pins': {
-            name: f'{name}=1.0-1' for name in
-            ('git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq')},
+        'github_runner_operations_packages': ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq'],
         'getent_group': {},
         'getent_passwd': {'gh-operations': ['x', '1234', '1234', '', '/unused', '/usr/sbin/nologin']},
-        'ansible_facts': {'services': {}},
+        'ansible_facts': {'services': {}, 'packages': {
+            'git': [{'name': 'git', 'version': '1:2.43.0-1ubuntu7.5'}],
+            'curl': [{'name': 'curl', 'version': '8.5.0-2ubuntu10.17'}],
+            'jq': [{'name': 'jq', 'version': '1.7.1-3ubuntu0.24.04.2'}],
+            'rsync': [{'name': 'rsync', 'version': '3.2.7-1ubuntu1.5'}],
+            'python3': [{'name': 'python3', 'version': '3.12.3-0ubuntu2.1'}],
+            'openssh-client': [{'name': 'openssh-client', 'version': '1:9.6p1-3ubuntu13.20'}],
+        }},
     }
     result.update(overrides)
     return result
@@ -59,8 +63,11 @@ def test_unchanged_jit_template_remains_exact_baseline():
         assert hashlib.sha256(data).hexdigest() == digest, name
     assert DEFAULTS['github_runner_profile'] == 'ci'
     assert DEFAULTS['github_runner_operations_active'] is False
-    assert DEFAULTS['github_runner_operations_package_pins'] == {}
-    assert DEFAULTS['github_runner_operations_package_manifest_verified'] is False
+    # No exact version pins any more (an Ubuntu security update would break them); the list is names only.
+    assert 'github_runner_operations_package_pins' not in DEFAULTS
+    assert 'github_runner_operations_package_manifest_verified' not in DEFAULTS
+    assert {'git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq'} <= set(DEFAULTS['github_runner_operations_packages'])
+    assert all('=' not in name for name in DEFAULTS['github_runner_operations_packages'])
 
 
 def instrument(tasks):
@@ -119,9 +126,11 @@ def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False
     ({'github_runner_operations_issuer_user': 'gh-operations'}, 'ops', ['operations']),
     pytest.param({'github_runner_user': 'gh-runner-issuer'}, 'ops', ['operations'], id='ci_user_is_issuer'),
     pytest.param({'github_runner_user': 'gh-operations-poller'}, 'ops', ['operations'], id='ci_user_is_poller'),
-    ({'github_runner_operations_package_pins': {}}, 'ops', ['operations']),
-    ({'github_runner_operations_package_manifest_verified': False}, 'ops', ['operations']),
-    ({'github_runner_operations_package_pins': {'curl': 'curl=latest'}}, 'ops', ['operations']),
+    ({'github_runner_operations_packages': []}, 'ops', ['operations']),
+    ({'github_runner_operations_packages': ['git', 'curl']}, 'ops', ['operations']),
+    ({'github_runner_operations_packages': 'git'}, 'ops', ['operations']),
+    ({'github_runner_operations_packages': ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq', 'curl=8.5.0']}, 'ops', ['operations']),
+    ({'github_runner_operations_packages': ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq', 'jq']}, 'ops', ['operations']),
     ({'github_runner_operations_active': True}, 'ops', ['operations']),
     ({'github_runner_operations_active': True, 'github_runner_operations_activation_authorized': True,
       'github_runner_operations_containment_verified': True, 'github_runner_operations_issuer_client_verified': True,
@@ -165,9 +174,22 @@ def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_p
     apt = module_arguments('ansible.builtin.apt')
     assert len(apt) == 1
     assert apt[0]['state'] == 'present' and apt[0]['update_cache'] is True
-    assert len(apt[0]['name']) == 6
-    assert set(apt[0]['name']) == {name + '=1.0-1' for name in
-        ('git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq')}
+    assert apt[0]['name'] == ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq']
+    # Names only: no exact version, and no repository or key is added by this role.
+    assert all('=' not in name for name in apt[0]['name'])
+    assert module_arguments('ansible.builtin.apt_repository') == []
+    assert module_arguments('ansible.builtin.apt_key') == []
+    assert module_arguments('ansible.builtin.package_facts') == [{'manager': 'apt'}]
+    copies = {args['dest']: args for args in module_arguments('ansible.builtin.copy')}
+    pref = copies['/etc/apt/preferences.d/gh-operations-archive-only.pref']
+    assert (pref['owner'], pref['group'], pref['mode']) == ('root', 'root', '0644')
+    assert 'Package: git openssh-client rsync python3 curl jq\nPin: origin pkgs.tailscale.com\nPin-Priority: -1\n' in pref['content']
+    manifest = copies['/opt/gh-operations/package-manifest.txt']
+    assert (manifest['owner'], manifest['group'], manifest['mode']) == ('root', 'root', '0644')
+    lines = manifest['content'].splitlines()
+    assert lines[0].startswith('# Installed by Ansible') and 'not a pin' in lines[0]
+    assert lines[1:] == ['curl 8.5.0-2ubuntu10.17', 'git 1:2.43.0-1ubuntu7.5', 'jq 1.7.1-3ubuntu0.24.04.2',
+                         'openssh-client 1:9.6p1-3ubuntu13.20', 'python3 3.12.3-0ubuntu2.1', 'rsync 3.2.7-1ubuntu1.5']
     templates = {args['dest']: args for args in module_arguments('ansible.builtin.template')}
     assert templates == {
         '/opt/gh-operations/bin/launch.sh': {'src': 'operations-launcher.sh.j2',
@@ -190,7 +212,7 @@ def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_p
         'name': 'gh-operations.service', 'enabled': False, 'state': 'stopped'}]
     assert module_arguments('ansible.builtin.command') == []
     assert module_arguments('ansible.builtin.shell') == []
-    assert 'ansible.builtin.apt' in output and 'git=1.0-1' in output
+    assert 'ansible.builtin.apt' in output and '1:2.43.0-1ubuntu7.5' in output
     assert 'root' in output and '0755' in output and '0700' in output
     assert 'gh-runner-issuer' in output and 'gh-operations-poller' in output
     assert '"enabled": false' in output and '"state": "stopped"' in output
@@ -239,12 +261,59 @@ def test_selector_rejects_ci_on_operations_target(tmp_path, hostname, groups, ex
 
 @pytest.mark.parametrize('package', ['nodejs', 'docker.io', 'unapproved-tool'])
 def test_package_manifest_rejects_unapproved_additions_before_mutation(tmp_path, package):
-    pins = values()['github_runner_operations_package_pins']
-    pins[package] = package + '=1.0-1'
-    code, output = run_role(tmp_path, {'github_runner_operations_package_pins': pins})
+    packages = values()['github_runner_operations_packages'] + [package]
+    code, output = run_role(tmp_path, {'github_runner_operations_packages': packages})
     assert code != 0, output
-    assert 'reject' in output and 'github_runner_operations_package_pins.keys()' in output
+    assert 'reject' in output and 'github_runner_operations_packages' in output
     assert 'mock_module' not in output
+
+
+def test_manifest_lists_every_default_package_with_its_installed_version(tmp_path):
+    names = DEFAULTS['github_runner_operations_packages']
+    facts = {'services': {}, 'packages': {name: [{'name': name, 'version': f'9.{i}-0ubuntu1'} for _ in [0]]
+                                          for i, name in enumerate(names)}}
+    del facts['packages'][names[-1]]  # one name not installed: it must show up as not-installed, not vanish
+    code, output = run_role(tmp_path, {'github_runner_operations_packages': names, 'ansible_facts': facts})
+    assert code == 0, output
+    decoder = json.JSONDecoder()
+    contents = []
+    for start in re.finditer(r'=> (\{)', output):
+        data, _ = decoder.raw_decode(output[start.start(1):])
+        msg = data.get('msg')
+        if isinstance(msg, dict) and msg.get('mock_module') == 'ansible.builtin.copy' \
+                and msg['arguments']['dest'].endswith('package-manifest.txt'):
+            contents.append(msg['arguments']['content'])
+    assert len(contents) == 1
+    lines = contents[0].splitlines()[1:]
+    assert [line.split(' ')[0] for line in lines] == sorted(names)
+    assert f'{names[-1]} not-installed' in lines
+    assert all(line.split(' ')[1] for line in lines)
+    versions = dict(line.split(' ', 1) for line in lines)
+    assert versions[names[0]] == '9.0-0ubuntu1'
+
+
+def test_no_task_of_the_operations_profile_writes_an_apt_source():
+    # Not only the repository modules: any task naming an apt source location (a lineinfile/copy/template into
+    # sources.list.d, trusted.gpg.d, keyrings) is refused. The one apt file the role writes is the preference below.
+    for task in OPS:
+        blob = json.dumps(task)
+        for forbidden in ('sources.list', 'trusted.gpg', 'apt/keyrings', 'apt/sources'):
+            assert forbidden not in blob, (task.get('name'), forbidden)
+    writers = [task['name'] for task in OPS if '/etc/apt/' in json.dumps(task)]
+    assert writers == ['Deny third-party apt origins for the operations runtime package names']
+
+
+def test_packages_are_unpinned_and_the_manifest_is_recorded_only_outside_check_mode():
+    tasks = {task.get('name'): task for task in OPS}
+    install = tasks['Install operations runtime packages from the configured Ubuntu archive']
+    assert install['ansible.builtin.apt']['state'] == 'present'
+    assert install['ansible.builtin.apt']['name'] == '{{ github_runner_operations_packages }}'
+    record = tasks['Record the operations runtime package manifest']
+    assert record['when'] == 'not ansible_check_mode'
+    # No task of the operations profile adds a repository or a key: archive packages only.
+    modules = {key for task in OPS for key in task if key.startswith('ansible.builtin.')}
+    assert not modules & {'ansible.builtin.apt_repository', 'ansible.builtin.apt_key', 'ansible.builtin.deb822_repository'}
+    assert 'github_runner_operations_package_pins' not in (ROLE / 'tasks/operations.yml').read_text(encoding='utf-8')
 
 
 def test_running_slot_is_rejected_before_any_provisioning_module(tmp_path):

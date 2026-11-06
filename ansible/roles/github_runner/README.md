@@ -6,16 +6,21 @@ in its service. The JIT template remains unchanged. No WFT-CI-43 hardening is im
 dropped that WO on 2026-10-19. Base-image freshness remains WFT-CI-45 work.
 
 `operations` is an opt-in profile for the isolated `ops` inventory host in the
-`operations` group, outside `runners`. Set both slot counts to integer 1 and
-supply the verified target OS/runtime package manifest with exact `name=version`
-pins, including Git, SSH, rsync, Python, curl and jq. Only those tools and the
-explicitly allowlisted certificate/timezone and runtime-library packages are
-accepted; a verified flag cannot add Docker, Node/npm or arbitrary tools. Other
-deployment clients need a reviewed toolchain change under WFT-CI-45. Target OS/runtime-library
-pins are not guessed here. The separate runner archive is pinned at 2.338.2 and
-its SHA256; CI's existing runner pin is unaffected. Missing package evidence
-fails before any provisioning. The role refuses provisioning an active slot;
-use the separately approved drain/recovery lifecycle first.
+`operations` group, outside `runners`. Set both slot counts to integer 1. The role
+installs its distro packages (`github_runner_operations_packages`: Git, SSH, rsync,
+Python, curl, jq and the certificate/timezone and runtime-library packages) with
+`state: present` from the Ubuntu archive; it adds no repository and no key, and an apt
+preference (`/etc/apt/preferences.d/gh-operations-archive-only.pref`, priority -1 for
+exactly these package names) denies the other origin the host carries, the Tailscale
+repository (`github_runner_operations_denied_apt_origins`). There are no exact version pins: the archive keeps only the
+newest version, so an exact pin breaks on the next Ubuntu security update. Only the
+allowlisted names are accepted; the list cannot add Docker, Node/npm or arbitrary
+tools. Other deployment clients need a reviewed toolchain change under WFT-CI-45.
+Every run records what is actually installed: the versions are printed and written to
+the root-owned `package-manifest.txt` in the operations base directory (evidence, not
+a pin; the write is skipped under `--check`). The separate runner archive is pinned at
+2.338.2 and its SHA256; CI's existing runner pin is unaffected. The role refuses
+provisioning an active slot; use the separately approved drain/recovery lifecycle first.
 
 The protected download cache has one fixed `runner.tar.gz` path. A new verified
 pin replaces that file instead of accumulating a versioned archive on every

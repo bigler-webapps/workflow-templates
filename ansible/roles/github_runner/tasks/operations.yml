@@ -20,12 +20,11 @@
       - github_runner_operations_active is sameas false
       - github_runner_operations_runner_sha256 is match('^sha256:[0-9a-f]{64}$')
       - github_runner_operations_runner_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
-      - github_runner_operations_package_manifest_verified | bool
-      - github_runner_operations_package_pins is mapping
-      - github_runner_operations_package_pins | length > 0
-      - github_runner_operations_package_pins.values() | select('match', '^[A-Za-z0-9.+:-]+=[0-9][A-Za-z0-9.+:~_-]*$') | list | length == github_runner_operations_package_pins | length
-      - "['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq'] | difference(github_runner_operations_package_pins.keys() | list) | length == 0"
-      - github_runner_operations_package_pins.keys() | reject('match', '^(git|openssh-client|rsync|python3|curl|jq|ca-certificates|tzdata|libc6|libgcc-s1|libstdc\+\+6|zlib1g|libicu[0-9]+|libssl[0-9]+(t64)?|libkrb5-3|libgssapi-krb5-2|liblttng-ust[0-9]+(t64)?|libunwind[0-9]+|libcurl[34](t64)?)$') | list | length == 0
+      - github_runner_operations_packages is sequence and github_runner_operations_packages is not string
+      - github_runner_operations_packages | length > 0
+      - github_runner_operations_packages | unique | list | length == github_runner_operations_packages | length
+      - "['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq'] | difference(github_runner_operations_packages) | length == 0"
+      - github_runner_operations_packages | reject('match', '^(git|openssh-client|rsync|python3|curl|jq|ca-certificates|tzdata|libc6|libgcc-s1|libstdc\+\+6|zlib1g|libicu[0-9]+|libssl[0-9]+(t64)?|libkrb5-3|libgssapi-krb5-2|liblttng-ust[0-9]+(t64)?|libunwind[0-9]+|libcurl[34](t64)?)$') | list | length == 0
       - not (github_runner_app_id | string | length > 0)
       - not (github_runner_app_private_key | string | length > 0)
       - not (github_runner_app_installation_id | string | length > 0)
@@ -35,15 +34,9 @@
       - github_runner_operations_state_size_bytes is integer and 0 < github_runner_operations_state_size_bytes <= 536870912
     fail_msg: >-
       Operations profile requires a separate one-slot ops identity, the exact
-      private repository, exact package pins, no CI App credentials, and an
-      inactive scaffolding. This batch cannot activate a runner, regardless
+      private repository, only allowlisted distro packages, no CI App credentials,
+      and an inactive scaffolding. This batch cannot activate a runner, regardless
       of inventory flags; WM-SEC-18 owns the separately gated activation.
-
-- name: Assert operations package manifest keys match pinned package names
-  ansible.builtin.assert:
-    that:
-      - item.value.split('=')[0] == item.key
-  loop: "{{ github_runner_operations_package_pins | dict2items }}"
 
 - name: Inspect operations service state before provisioning
   ansible.builtin.service_facts:
@@ -154,12 +147,51 @@
     - { path: "{{ github_runner_operations_runtime_dir }}/issuer", owner: "{{ github_runner_operations_issuer_user }}", group: "{{ github_runner_operations_issuer_user }}", mode: "0700" }
     - { path: "{{ github_runner_operations_runtime_dir }}/poller", owner: "{{ github_runner_operations_poller_user }}", group: "{{ github_runner_operations_poller_user }}", mode: "0700" }
 
-- name: Install exact operations runtime package versions
+# Packages come from the host's configured, signed Ubuntu archive only: no repository or key is added anywhere in this
+# role. `present`, not `latest`: a run never upgrades what is already installed; security updates arrive through the
+# operating system's own update path, and what is installed is recorded below on every run.
+- name: Deny third-party apt origins for the operations runtime package names
+  become: true
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible (github_runner operations profile). The operations runtime packages come from the Ubuntu
+      # archive only: a repository added for another purpose (the Tailscale one) must never supply them.
+      {% for origin in github_runner_operations_denied_apt_origins %}
+      Package: {{ github_runner_operations_packages | join(' ') }}
+      Pin: origin {{ origin }}
+      Pin-Priority: -1
+
+      {% endfor %}
+    dest: /etc/apt/preferences.d/gh-operations-archive-only.pref
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install operations runtime packages from the configured Ubuntu archive
   become: true
   ansible.builtin.apt:
-    name: "{{ github_runner_operations_package_pins | dict2items | map(attribute='value') | list }}"
+    name: "{{ github_runner_operations_packages }}"
     state: present
     update_cache: true
+
+- name: Read the installed operations runtime package versions
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Show the installed operations runtime package versions
+  ansible.builtin.debug:
+    msg: "{{ github_runner_operations_package_manifest.splitlines() }}"
+
+# Skipped under --check: on a fresh host the parent directory only exists after a real run.
+- name: Record the operations runtime package manifest
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_operations_package_manifest }}\n"
+    dest: "{{ github_runner_operations_base_dir }}/package-manifest.txt"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not ansible_check_mode
 
 - name: Download pinned operations runner archive
   become: true

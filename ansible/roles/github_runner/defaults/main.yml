@@ -68,10 +68,39 @@ github_runner_operations_max_job_seconds: 3600
 # All writable job/configuration/diagnostic/temp data shares this capped,
 # service-private tmpfs; it disappears on stop, including after SIGKILL.
 github_runner_operations_state_size_bytes: 268435456
-github_runner_operations_package_manifest_verified: false
-# Exact distro package pins are intentionally unset until the target OS and
-# package versions are verified. Inventory must supply a name:version mapping.
-github_runner_operations_package_pins: {}
+# Distro packages of the operations runtime, installed `state: present` from the Ubuntu archive (the role adds no
+# repository and no key; the Tailscale origin is denied for these names, see github_runner_operations_denied_apt_origins). There are NO exact version pins: the archive keeps only the
+# newest version of a package, so an exact pin breaks on the next Ubuntu security update (WM-SEC-18, 2026-11-06). The
+# versions actually installed are recorded on every run (a root-owned manifest and the run output). The list is
+# bounded by an allowlist in tasks/operations.yml: Docker, Node/npm or arbitrary tools cannot be added.
+github_runner_operations_packages:
+  - git
+  - openssh-client
+  - rsync
+  - python3
+  - curl
+  - jq
+  - ca-certificates
+  - tzdata
+  - libc6
+  - libgcc-s1
+  - libstdc++6
+  - zlib1g
+  - libicu74
+  - libssl3t64
+  - libkrb5-3
+  - libgssapi-krb5-2
+  - liblttng-ust1t64
+  - libunwind8
+  - libcurl4t64
+# Third-party apt origins that must never supply the packages above (an apt preference with priority -1, for exactly
+# those package names). The operations host also carries the signed Tailscale repository, added by the tailscale
+# role; without this a higher version of a same-named package there would win.
+github_runner_operations_denied_apt_origins:
+  - pkgs.tailscale.com
+# Evidence of the installed versions, rendered lazily from the package facts read after the install (a name that is
+# not installed, as under --check on a fresh host, shows `not-installed`).
+github_runner_operations_package_manifest: "{% set ns = namespace(lines=['# Installed by Ansible from the configured Ubuntu archive. Evidence of what is installed, not a pin.']) %}{% for name in github_runner_operations_packages | sort %}{% set ns.lines = ns.lines + [name ~ ' ' ~ (ansible_facts.packages.get(name, [{'version': 'not-installed'}]) | first).version] %}{% endfor %}{{ ns.lines | join('\n') }}"
 
 # GitHub App credentials — REQUIRED, set via host_vars / sync-secrets
 github_runner_app_id: ""
