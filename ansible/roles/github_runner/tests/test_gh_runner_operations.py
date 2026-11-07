@@ -550,12 +550,27 @@ def parse_protected_unit(unit):
     return parsed
 
 
-@pytest.mark.parametrize('directive,value', [('ReadWritePaths', '/'), ('RestrictAddressFamilies', 'AF_PACKET')])
+@pytest.mark.parametrize('directive,value', [('ProtectSystem', 'full'), ('RestrictAddressFamilies', 'AF_PACKET')])
 def test_duplicate_security_directives_cannot_hide_permissive_values(directive, value):
     unit = render('gh-operations.service.j2')
     unit = unit.replace(directive + '=', directive + '=' + value + '\n' + directive + '=', 1)
     with pytest.raises(configparser.DuplicateOptionError):
         parse_protected_unit(unit)
+
+
+def test_the_slot_path_is_only_a_tmpfs_and_never_also_bound_or_made_writable():
+    """Pin the slot to one tmpfs: the 2026-11-07 finding showed a same-path write rule binds disk instead, blocking launcher directory creation."""
+    parsed = parse_protected_unit(render('gh-operations.service.j2'))
+    service = parsed['Service']
+    slot = '/var/lib/gh-operations/slot'
+
+    assert service['TemporaryFileSystem'].split()[0].split(':', 1)[0] == slot
+    for directive in ('ReadWritePaths', 'BindPaths', 'InaccessiblePaths'):
+        assert directive not in service
+    assert slot not in service.get('ReadOnlyPaths', '').split()
+    bind_read_only_targets = [mapping.rsplit(':', 1)[-1]
+                              for mapping in service.get('BindReadOnlyPaths', '').split()]
+    assert slot not in bind_read_only_targets
 
 
 def test_service_caps_state_and_mounts_root_owned_executables_read_only():
@@ -582,7 +597,7 @@ def test_service_caps_state_and_mounts_root_owned_executables_read_only():
     assert service['Restart'] == 'always' and 30 <= service.getint('RestartSec') <= 60
     assert 0 < service.getint('TimeoutStopSec') <= 120
     assert service.getint('RuntimeMaxSec') == 3600
-    assert service['ReadWritePaths'] == '/var/lib/gh-operations/slot'
+    assert 'ReadWritePaths' not in service
     assert 'docker.service' not in ' '.join(parsed['Unit'].get(name, '') for name in ('After', 'Wants', 'Requires')).split()
     assert service.get('PrivateTmp', 'false') == 'false'
     launcher = render('operations-launcher.sh.j2')

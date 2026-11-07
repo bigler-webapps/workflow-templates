@@ -35,9 +35,11 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadOnlyPaths={{ github_runner_operations_base_dir }}
+# The slot exists only as this tmpfs. Do not add ReadWritePaths or BindPaths for the slot path itself:
+# systemd then binds the on-disk directory instead of the tmpfs, and the launcher cannot create its directories.
+# The tmpfs is writable under ProtectSystem=strict.
 TemporaryFileSystem={{ github_runner_operations_runtime_dir }}/slot:rw,nosuid,nodev,size={{ github_runner_operations_state_size_bytes }},nr_inodes=32768,mode=0700,uid={{ getent_passwd[github_runner_operations_user][1] }},gid={{ getent_passwd[github_runner_operations_user][2] }} /tmp:rw,nosuid,nodev,size=16777216,nr_inodes=4096,mode=1777 /var/tmp:rw,nosuid,nodev,size=16777216,nr_inodes=4096,mode=1777 /dev/shm:rw,nosuid,nodev,noexec,size=16777216,nr_inodes=4096,mode=1777
 BindReadOnlyPaths={{ github_runner_operations_base_dir }}/runner/bin:{{ github_runner_operations_runtime_dir }}/slot/bin {{ github_runner_operations_base_dir }}/runner/externals:{{ github_runner_operations_runtime_dir }}/slot/externals
-ReadWritePaths={{ github_runner_operations_runtime_dir }}/slot
 StandardOutput=null
 StandardError=null
 LimitNOFILE=65536
