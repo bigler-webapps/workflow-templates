@@ -184,7 +184,9 @@
   register: _mgmt_status_post
   changed_when: false
   failed_when: false
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - not ansible_check_mode
+    - tailscale_mgmt_authkey | string | length > 0
 
 - name: Assert mgmt tailscaled daemon responded with valid JSON
   ansible.builtin.assert:
@@ -194,7 +196,9 @@
     fail_msg: >-
       tailscaled-mgmt daemon did not respond to status query after up
       (rc={{ _mgmt_status_post.rc }}).
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - not ansible_check_mode
+    - tailscale_mgmt_authkey | string | length > 0
 
 - name: Assert mgmt tailscaled BackendState is Running
   ansible.builtin.assert:
@@ -204,7 +208,9 @@
       tailscaled-mgmt BackendState is
       {{ (_mgmt_status_post.stdout | from_json).BackendState }},
       expected Running.
-  when: tailscale_mgmt_authkey | string | length > 0
+  when:
+    - not ansible_check_mode
+    - tailscale_mgmt_authkey | string | length > 0
 
 # INF-67: pin 100.64.0.0/10 routing to tsmgmt0 at the kernel level (both
 # tailscaled instances share table 52 — see defaults/main.yml and

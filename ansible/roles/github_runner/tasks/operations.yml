@@ -124,10 +124,29 @@
     - "{{ github_runner_operations_issuer_user }}"
     - "{{ github_runner_operations_poller_user }}"
 
+# Under --check the identities above are only simulated, so on a fresh host the account does not exist yet and a
+# real read would fail. A real run still fails when the account is missing (fail_key).
 - name: Read operations numeric service identity for private state mount
   ansible.builtin.getent:
     database: passwd
     key: "{{ github_runner_operations_user }}"
+    fail_key: "{{ not ansible_check_mode }}"
+
+- name: Report where the check run of the operations profile stops on a host without its service identities
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: the operations service identities do not exist on this host yet, so everything after their
+      creation (directories, units, packages, runner) cannot be simulated truthfully and is not checked here.
+      A real run creates them.
+  when:
+    - ansible_check_mode
+    - getent_passwd.get(github_runner_operations_user) is none
+
+- name: End the check run for this host where it cannot continue truthfully
+  ansible.builtin.meta: end_host
+  when:
+    - ansible_check_mode
+    - getent_passwd.get(github_runner_operations_user) is none
 
 - name: Create protected operations directories
   become: true

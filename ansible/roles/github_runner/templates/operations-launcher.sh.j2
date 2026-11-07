@@ -68,7 +68,10 @@ try:
     settings = {name.lower(): value for name, value in original.items()}
     if len(settings) != len(original):
         raise ValueError()
-    if (settings.get("ephemeral") is not True or settings.get("disableupdate") is not True
+    def flag(value):
+        # GitHub writes the generated .runner values as strings ("True"); a JSON true is accepted too.
+        return value is True or (type(value) is str and value.lower() == "true")
+    if (not flag(settings.get("ephemeral")) or not flag(settings.get("disableupdate"))
         or settings.get("workfolder") != "work" or settings.get("agentname") != "ops-slot-1"
         or settings.get("githuburl") not in (None, "", "https://github.com/bigler-webapps-ops/webapp-operations")):
         raise ValueError()

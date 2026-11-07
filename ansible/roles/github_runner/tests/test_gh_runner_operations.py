@@ -81,7 +81,7 @@ def instrument(tasks):
     for source in tasks:
         task = dict(source)
         key = next(k for k in task if k.startswith('ansible.builtin.'))
-        if key in ('ansible.builtin.assert', 'ansible.builtin.include_tasks'):
+        if key in ('ansible.builtin.assert', 'ansible.builtin.include_tasks', 'ansible.builtin.meta'):
             result.append(task)
             continue
         args = task.pop(key)
@@ -94,7 +94,7 @@ def instrument(tasks):
     return result
 
 
-def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False):
+def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False, check=False):
     fixture = tmp_path / 'fixture'
     tasks = fixture / 'tasks'
     tasks.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,7 @@ def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False
     config = fixture / 'ansible.cfg'
     config.write_text('[defaults]\nhost_key_checking=True\nretry_files_enabled=False\n', encoding='utf-8')
     proc = subprocess.run([sys.executable, '-I', '-m', 'ansible.cli.playbook', '-i', str(fixture / 'hosts.yml'),
-                           str(fixture / 'play.yml')], cwd=fixture,
+                           *(['--check'] if check else []), str(fixture / 'play.yml')], cwd=fixture,
                           env={**os.environ, 'ANSIBLE_CONFIG': str(config), 'ANSIBLE_NOCOLOR': '1'},
                           text=True, capture_output=True, timeout=60)
     return proc.returncode, proc.stdout + proc.stderr
@@ -434,7 +434,8 @@ def test_service_caps_state_and_mounts_root_owned_executables_read_only():
     assert 'exec "$STATE/bin/Runner.Listener" run' in launcher
 
 
-@pytest.mark.parametrize('corruption', [None, 'empty', 'path', 'non_ephemeral', 'update', 'work', 'repo',
+@pytest.mark.parametrize('corruption', [None, 'real_string_flags', 'string_false', 'string_yes', 'empty', 'path',
+    'non_ephemeral', 'update', 'work', 'repo',
     'bad_owner', 'bad_group', 'bad_mode', 'bad_hash', 'bad_parent_owner', 'bad_parent_mode',
     'docker', 'sudo', 'root_user', 'wrong_user'])
 def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_path, corruption):
@@ -448,6 +449,13 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
         return base64.b64encode(json.dumps(data).encode()).decode()
     settings = {'agentName': 'ops-slot-1', 'ephemeral': True,
         'disableUpdate': True, 'workFolder': 'work'}
+    if corruption == 'real_string_flags':
+        # Measured on the live generate-jitconfig API (2026-11-07): every value of the file is a string.
+        settings.update({'ephemeral': 'True', 'disableUpdate': 'True'})
+    if corruption == 'string_false':
+        settings.update({'ephemeral': 'False', 'disableUpdate': 'True'})
+    if corruption == 'string_yes':
+        settings.update({'ephemeral': 'True', 'disableUpdate': 'yes'})
     if corruption == 'non_ephemeral':
         settings['ephemeral'] = False
     if corruption == 'update':
@@ -519,7 +527,7 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
     launcher.write_text(rendered.replace('/usr/bin/python3', str(fakebin / 'python3')), encoding='utf-8')
     env = {**os.environ, 'PATH': str(fakebin) + os.pathsep + os.environ['PATH']}
     result = subprocess.run(['bash', str(launcher)], env=env, text=True, capture_output=True, timeout=10)
-    if corruption:
+    if corruption and corruption != 'real_string_flags':
         assert result.returncode != 0
         assert not (runtime / 'slot/.credentials').exists()
         assert not (runtime / 'escape').exists()
@@ -535,6 +543,25 @@ def test_launcher_real_shell_keeps_jit_off_argv_and_rejects_invalid_config(tmp_p
     issuer.unlink()  # Own synthetic fixture only.
     result = subprocess.run(['bash', str(launcher)], env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode != 0 and 'unavailable' in result.stderr
+
+
+def test_check_mode_on_a_host_without_the_service_identities_ends_the_profile_instead_of_failing(tmp_path):
+    """WM-INF-108: the getent read cannot find an account that a check run only simulates."""
+    task = next(t for t in OPS if t.get('name', '').startswith('Read operations numeric service identity'))
+    assert task['ansible.builtin.getent']['fail_key'] == '{{ not ansible_check_mode }}'
+    code, output = run_role(tmp_path, {'getent_passwd': {}}, check=True)
+    assert code == 0, output
+    assert 'Check mode: the operations service identities do not exist' in output
+    assert 'Create protected operations directories' not in output
+    assert 'Install operations runtime packages' not in output
+    # The account exists (a later check run): the profile is checked to the end.
+    code, output = run_role(tmp_path / 'present', {}, check=True)
+    assert code == 0, output
+    assert 'Check mode: the operations service identities do not exist' not in output
+    assert 'Create protected operations directories' in output
+    # A real run is never cut short: a missing account stays a failure of the getent read itself.
+    code, output = run_role(tmp_path / 'real', {'getent_passwd': {}})
+    assert 'Check mode: the operations service identities do not exist' not in output
 
 
 def test_the_operations_repository_is_named_with_its_new_organization_everywhere_in_the_role():
