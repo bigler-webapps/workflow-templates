@@ -17,7 +17,7 @@
       - github_runner_operations_base_dir == '/opt/gh-operations'
       - github_runner_operations_runtime_dir == '/var/lib/gh-operations'
       - github_runner_operations_issuer_client == '/usr/local/libexec/wm-sec18/issue-runner-jit'
-      - github_runner_operations_active is sameas false
+      - github_runner_operations_active is boolean
       - github_runner_operations_runner_sha256 is match('^sha256:[0-9a-f]{64}$')
       - github_runner_operations_runner_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
       - github_runner_operations_packages is sequence and github_runner_operations_packages is not string
@@ -35,10 +35,61 @@
     fail_msg: >-
       Operations profile requires a separate one-slot ops identity, the exact
       private repository, only allowlisted distro packages, no CI App credentials,
-      and an inactive scaffolding. This batch cannot activate a runner, regardless
-      of inventory flags; WM-SEC-18 owns the separately gated activation.
+      and a real boolean activation selector. Activation requires the separate
+      run-time evidence gate below; committed inventory values cannot satisfy it.
+
+- name: Require operator approval for operations runner activation
+  ansible.builtin.assert:
+    that:
+      - github_runner_operations_activation_authorized is sameas true
+    fail_msg: >-
+      Operations runner activation refused: github_runner_operations_activation_authorized must be the operator's
+      run-time approval supplied as a JSON boolean.
+  when: github_runner_operations_active is sameas true
+
+- name: Require operations runner containment statement for activation
+  ansible.builtin.assert:
+    that:
+      - github_runner_operations_containment_verified is sameas true
+    fail_msg: >-
+      Operations runner activation refused: github_runner_operations_containment_verified must state that P2b was
+      re-read and the credentials directory is placed as required in W2.
+  when: github_runner_operations_active is sameas true
+
+- name: Require verified operations issuer client statement for activation
+  ansible.builtin.assert:
+    that:
+      - github_runner_operations_issuer_client_verified is sameas true
+    fail_msg: >-
+      Operations runner activation refused: github_runner_operations_issuer_client_verified must be the operator's
+      run-time statement that the issuer client was verified.
+  when: github_runner_operations_active is sameas true
+
+- name: Require pinned operations issuer client digest for activation
+  ansible.builtin.assert:
+    that:
+      - github_runner_operations_issuer_client_sha256 | string is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      Operations runner activation refused: github_runner_operations_issuer_client_sha256 must contain the known
+      pinned SHA256 digest.
+  when: github_runner_operations_active is sameas true
 
 - name: Inspect operations service state before provisioning
+  ansible.builtin.service_facts:
+
+# Disabled as well as stopped: a reboot during the rest of the apply must not start the runner again while its files
+# and unit are being changed. The activation block below enables and starts it once every precondition holds.
+- name: Stop the operations runner with explicit drain approval
+  become: true
+  ansible.builtin.systemd:
+    name: gh-operations.service
+    enabled: false
+    state: stopped
+  when:
+    - github_runner_operations_drain_approved is sameas true
+    - ansible_facts.services.get('gh-operations.service', {}).get('state', 'stopped') == 'running'
+
+- name: Refresh operations service state after approved drain
   ansible.builtin.service_facts:
 
 - name: Refuse changes to an active operations slot
@@ -258,4 +309,79 @@
     name: gh-operations.service
     enabled: false
     state: stopped
+  when: github_runner_operations_active is sameas false
+
+- name: Read the runner issuer socket state before the operations runner starts
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - is-active
+      - ops-runner-issuer.socket
+  register: _operations_issuer_socket
+  changed_when: false
+  failed_when: false
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Require the runner issuer socket to be active before the operations runner starts
+  ansible.builtin.assert:
+    that:
+      - _operations_issuer_socket.stdout | trim == 'active'
+    fail_msg: "Operations runner activation refused: the runner issuer socket on ops is not active."
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Inspect the pinned runner issuer client before the operations runner starts
+  ansible.builtin.stat:
+    path: "{{ github_runner_operations_issuer_client }}"
+    follow: false
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: _operations_issuer_client_stat
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Require the runner issuer client to match its pinned digest
+  ansible.builtin.assert:
+    that:
+      - _operations_issuer_client_stat.stat.exists
+      - _operations_issuer_client_stat.stat.isreg
+      - _operations_issuer_client_stat.stat.pw_name == 'root'
+      - _operations_issuer_client_stat.stat.checksum == github_runner_operations_issuer_client_sha256
+    fail_msg: >-
+      Operations runner activation refused: the issuer client must be a root-owned regular file whose SHA256 matches
+      github_runner_operations_issuer_client_sha256.
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Inspect the unpacked runner before the operations runner starts
+  ansible.builtin.stat:
+    path: "{{ github_runner_operations_base_dir }}/runner/bin/Runner.Listener"
+    follow: false
+  register: _operations_runner_stat
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Require the unpacked runner to be present
+  ansible.builtin.assert:
+    that:
+      - _operations_runner_stat.stat.exists
+      - _operations_runner_stat.stat.isreg
+    fail_msg: "Operations runner activation refused: the pinned runner archive is not unpacked."
+  when:
+    - github_runner_operations_active is sameas true
+    - not ansible_check_mode
+
+- name: Start the operations runner through the activation gate
+  become: true
+  ansible.builtin.systemd:
+    name: gh-operations.service
+    enabled: true
+    state: started
+  when: github_runner_operations_active is sameas true
 

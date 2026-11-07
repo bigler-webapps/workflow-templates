@@ -48,12 +48,19 @@ github_runner_issuer_caller: ""
 # sync-secrets, never committed.
 github_runner_issuer_key: ""
 
-# Select the existing CI profile unless an inventory explicitly opts into the
-# isolated operations profile. This scaffolding never enables its service.
+# Select the existing CI profile by default. The isolated operations profile
+# defaults inactive; activation requires its separate run-time evidence gate.
 github_runner_profile: ci
 github_runner_operations_repository: bigler-webapps-ops/webapp-operations
 github_runner_operations_slots: 1
 github_runner_operations_active: false
+# Run-time statements only: supply each as a JSON boolean with -e (for example,
+# -e '{"github_runner_operations_activation_authorized": true}'). Never set
+# these evidence inputs in committed inventory; committed values cannot satisfy the activation gate.
+github_runner_operations_activation_authorized: false
+github_runner_operations_containment_verified: false
+github_runner_operations_issuer_client_verified: false
+github_runner_operations_drain_approved: false
 # Always bump version and checksum together; the checksum is the linux-x64 line of the actions/runner release body.
 github_runner_operations_runner_version: "2.338.2"
 github_runner_operations_runner_sha256: "sha256:baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"

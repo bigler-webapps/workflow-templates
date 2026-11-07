@@ -50,11 +50,23 @@ the separate issuer policy. Persistent local stdout/stderr is disabled; runner d
 share the tmpfs cap. These limits bound storage, not measured host suitability:
 representative deployment/remote-backup memory and recovery proofs remain due.
 
-This scaffolding always disables/stops the service and rejects activation even
-if inventory flags claim authorization or containment. WM-SEC-18 must implement
-the separate activation path after recorded authorization, effective early
-containment and a verified, exact-version,
-exact-digest trusted client at `/usr/local/libexec/wm-sec18/issue-runner-jit`.
+The operations service defaults to disabled and stopped. Activation requires
+three run-time `-e` JSON boolean statements: operator approval, containment
+verified after re-reading P2b and confirming the W2 credentials directory
+placement, and the issuer client verified statement, plus the known client
+SHA256 pin. These inputs are not committed inventory; committed defaults cannot
+satisfy the gate. A separately approved `github_runner_operations_drain_approved: true`
+stops a running slot before provisioning; without it, a running slot is refused.
+Before enabling or starting the unit, the role checks that `ops-runner-issuer.socket`
+is active, then checks the root-owned regular issuer client against its pinned
+digest, then checks that the pinned runner archive is unpacked. The launcher
+checks the client digest again before executing it.
+
+The unit uses `Restart=always`, so after each ephemeral job exits it registers
+again through the issuer for the next one, subject to the issuer's one-slot
+capacity and GitHub's removal of the prior runner registration. The issuer's
+absence-based release remains the recovery path for stale or uncertain slot
+reservations; operators do not edit issuer state manually.
 That client must be root-owned, group `gh-operations`, mode 0750, in root-owned
 non-writable, non-symlink ancestors. The launcher checks every ancestor through
 the root directory before executing the client. The group permits the unprivileged runner to execute

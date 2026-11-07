@@ -18,6 +18,7 @@ ROLE = Path(__file__).resolve().parents[1]
 DEFAULTS = yaml.safe_load((ROLE / 'defaults/main.yml').read_text(encoding='utf-8'))
 MAIN = yaml.safe_load((ROLE / 'tasks/main.yml').read_text(encoding='utf-8'))
 OPS = yaml.safe_load((ROLE / 'tasks/operations.yml').read_text(encoding='utf-8'))
+ACTIVATION_SHA256 = 'a' * 64
 
 
 def values(**overrides):
@@ -34,6 +35,12 @@ def values(**overrides):
             'python3': [{'name': 'python3', 'version': '3.12.3-0ubuntu2.1'}],
             'openssh-client': [{'name': 'openssh-client', 'version': '1:9.6p1-3ubuntu13.20'}],
         }},
+        'mock_registers': {
+            '_operations_issuer_socket': {'stdout': 'active'},
+            '_operations_issuer_client_stat': {'stat': {
+                'exists': True, 'isreg': True, 'pw_name': 'root', 'checksum': ACTIVATION_SHA256}},
+            '_operations_runner_stat': {'stat': {'exists': True, 'isreg': True}},
+        },
     }
     result.update(overrides)
     return result
@@ -71,11 +78,11 @@ def test_unchanged_jit_template_remains_exact_baseline():
 
 
 def instrument(tasks):
-    """Keep real assertions/includes/loops/when; replace all host modules with debug.
+    """Keep real assertions/includes/loops/when; replace host actions with safe fixtures.
 
-    No user/file/apt/service/network module can run in this fixture. The replaced
-    module arguments still pass through real Ansible templating and are retained
-    in stdout for ownership/package/service assertions.
+    No user/file/apt/service/network module can run in this fixture. Most replaced
+    module arguments pass through real Ansible templating and are retained in
+    stdout; registered command/stat tasks receive the supplied fixture results.
     """
     result = []
     for source in tasks:
@@ -87,10 +94,24 @@ def instrument(tasks):
         args = task.pop(key)
         task.pop('become', None)
         task.pop('notify', None)
+        if key in ('ansible.builtin.command', 'ansible.builtin.stat') and 'register' in task:
+            register = task.pop('register')
+            task['ansible.builtin.set_fact'] = {
+                register: "{{ mock_registers['" + register + "'] }}"}
+            result.append(task)
+            continue
         task['ansible.builtin.debug'] = {'msg': {'mock_module': key, 'arguments': args}}
         if key == 'ansible.builtin.get_url':
             task['changed_when'] = True
         result.append(task)
+        if key == 'ansible.builtin.systemd' and task.get('name') == 'Stop the operations runner with explicit drain approval':
+            fact_task = {
+                'name': 'Mark the fixture operations service stopped after approved drain',
+                'ansible.builtin.set_fact': {'_mock_operations_service_drain_complete': True},
+            }
+            if 'when' in task:
+                fact_task['when'] = task['when']
+            result.append(fact_task)
     return result
 
 
@@ -104,7 +125,13 @@ def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False
     inventory = {'all': {'children': {group: {'hosts': {hostname: {'ansible_connection': 'local'}}}
                                      for group in (groups or ['operations'])}}}
     (fixture / 'hosts.yml').write_text(yaml.safe_dump(inventory), encoding='utf-8')
-    play = [{'hosts': 'all', 'gather_facts': False, 'vars': values(**overrides),
+    variables = values(**overrides)
+    service = variables['ansible_facts']['services'].get('gh-operations.service')
+    if service and service.get('state') == 'running':
+        # The mock systemd stop sets this marker; keep the fixture fact dynamic
+        # so the unchanged post-drain refusal assertion sees the stopped state.
+        service['state'] = "{{ 'stopped' if _mock_operations_service_drain_complete | default(false) else 'running' }}"
+    play = [{'hosts': 'all', 'gather_facts': False, 'vars': variables,
              'tasks': [{'ansible.builtin.include_tasks': str(tasks / 'main.yml')}]}]
     (fixture / 'play.yml').write_text(yaml.safe_dump(play), encoding='utf-8')
     config = fixture / 'ansible.cfg'
@@ -114,6 +141,28 @@ def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False
                           env={**os.environ, 'ANSIBLE_CONFIG': str(config), 'ANSIBLE_NOCOLOR': '1'},
                           text=True, capture_output=True, timeout=60)
     return proc.returncode, proc.stdout + proc.stderr
+
+
+def activation_inputs(**overrides):
+    result = {
+        'github_runner_operations_active': True,
+        'github_runner_operations_activation_authorized': True,
+        'github_runner_operations_containment_verified': True,
+        'github_runner_operations_issuer_client_verified': True,
+        'github_runner_operations_issuer_client_sha256': ACTIVATION_SHA256,
+    }
+    result.update(overrides)
+    return result
+
+
+def mocked_modules(output):
+    messages = []
+    decoder = json.JSONDecoder()
+    for start in re.finditer(r'=> (\{)', output):
+        data, _ = decoder.raw_decode(output[start.start(1):])
+        if isinstance(data.get('msg'), dict) and 'mock_module' in data['msg']:
+            messages.append(data['msg'])
+    return messages
 
 
 @pytest.mark.parametrize('changes,hostname,groups', [
@@ -132,10 +181,6 @@ def run_role(tmp_path, overrides, *, hostname='ops', groups=None, ci_probe=False
     ({'github_runner_operations_packages': ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq', 'curl=8.5.0']}, 'ops', ['operations']),
     ({'github_runner_operations_packages': ['git', 'openssh-client', 'rsync', 'python3', 'curl', 'jq', 'jq']}, 'ops', ['operations']),
     ({'github_runner_operations_active': True}, 'ops', ['operations']),
-    ({'github_runner_operations_active': True, 'github_runner_operations_activation_authorized': True,
-      'github_runner_operations_containment_verified': True, 'github_runner_operations_issuer_client_verified': True,
-      'github_runner_operations_issuer_client_version': '1.0.0',
-      'github_runner_operations_issuer_client_sha256': 'a' * 64}, 'ops', ['operations']),
     ({}, 'ci-host', ['operations']),
     ({}, 'ops', ['operations', 'runners']),
 ])
@@ -145,8 +190,99 @@ def test_real_ansible_rejects_invalid_profile_before_any_host_module(tmp_path, c
     assert 'mock_module' not in output, output
     failed = re.search(r'"assertion": ("(?:\\.|[^"\\])*")', output)
     assert failed, output
-    expected = next(iter(changes)) if changes else ('inventory_hostname' if hostname != 'ops' else 'group_names')
+    expected = ('github_runner_operations_activation_authorized'
+                if changes == {'github_runner_operations_active': True}
+                else next(iter(changes)) if changes else ('inventory_hostname' if hostname != 'ops' else 'group_names'))
     assert expected in json.loads(failed.group(1)), output
+
+
+def test_activation_defaults_cannot_satisfy_the_gate(tmp_path):
+    """The committed selector/evidence defaults keep operations inactive and cannot authorize activation."""
+    assert DEFAULTS['github_runner_operations_active'] is False
+    for name in ('github_runner_operations_activation_authorized',
+                 'github_runner_operations_containment_verified',
+                 'github_runner_operations_issuer_client_verified',
+                 'github_runner_operations_drain_approved'):
+        assert DEFAULTS[name] is False
+    assert DEFAULTS['github_runner_operations_issuer_client_sha256'] == ''
+    code, output = run_role(tmp_path, {})
+    assert code == 0, output
+    modules = mocked_modules(output)
+    assert [message['arguments'] for message in modules
+            if message['mock_module'] == 'ansible.builtin.systemd'] == [
+                {'name': 'gh-operations.service', 'enabled': False, 'state': 'stopped'}]
+    assert not [message for message in modules if message['mock_module'] == 'ansible.builtin.command']
+
+
+@pytest.mark.parametrize('changes,expected', [
+    ({'github_runner_operations_activation_authorized': False}, 'github_runner_operations_activation_authorized'),
+    ({'github_runner_operations_containment_verified': False}, 'github_runner_operations_containment_verified'),
+    ({'github_runner_operations_issuer_client_verified': False}, 'github_runner_operations_issuer_client_verified'),
+    ({'github_runner_operations_issuer_client_sha256': ''}, 'github_runner_operations_issuer_client_sha256'),
+    ({'github_runner_operations_issuer_client_sha256': 'not-a-digest'}, 'github_runner_operations_issuer_client_sha256'),
+    ({'github_runner_operations_activation_authorized': 'true'}, 'github_runner_operations_activation_authorized'),
+])
+def test_activation_missing_or_non_boolean_evidence_refuses_before_host_modules(tmp_path, changes, expected):
+    """Each activation evidence input must be present and strictly valid before any host module runs."""
+    code, output = run_role(tmp_path, activation_inputs(**changes))
+    assert code != 0, output
+    assert 'Operations runner activation refused:' in output
+    assert expected in output
+    assert 'mock_module' not in output
+
+
+def test_activation_selector_must_be_a_real_boolean(tmp_path):
+    """A string-valued activation selector is rejected before host modules run."""
+    code, output = run_role(tmp_path, activation_inputs(github_runner_operations_active='true'))
+    assert code != 0, output
+    assert 'github_runner_operations_active is boolean' in output
+    assert 'mock_module' not in output
+
+
+def test_activation_issuer_client_digest_mismatch_refuses_before_start(tmp_path):
+    """The installed issuer client checksum must match its pinned digest before systemd starts the runner."""
+    registers = values()['mock_registers']
+    registers['_operations_issuer_client_stat']['stat']['checksum'] = 'b' * 64
+    code, output = run_role(tmp_path, activation_inputs(mock_registers=registers))
+    assert code != 0, output
+    assert 'the issuer client must be a root-owned regular file' in output
+    assert 'Start the operations runner through the activation gate' not in output
+
+
+@pytest.mark.parametrize('registers,expected', [
+    ({'_operations_issuer_socket': {'stdout': 'inactive'}}, 'the runner issuer socket on ops is not active'),
+    ({'_operations_issuer_socket': {'stdout': 'active'},
+      '_operations_issuer_client_stat': {'stat': {
+          'exists': True, 'isreg': True, 'pw_name': 'root', 'checksum': ACTIVATION_SHA256}},
+      '_operations_runner_stat': {'stat': {'exists': False, 'isreg': False}}},
+     'the pinned runner archive is not unpacked'),
+])
+def test_activation_requires_live_issuer_socket_and_unpacked_runner(tmp_path, registers, expected):
+    """Activation stops when the issuer socket is inactive or the pinned runner archive is absent."""
+    code, output = run_role(tmp_path, activation_inputs(mock_registers=registers))
+    assert code != 0, output
+    assert expected in output
+    assert 'Start the operations runner through the activation gate' not in output
+
+
+def test_activation_starts_only_after_ordered_precondition_checks(tmp_path):
+    """The issuer socket, pinned client and unpacked runner are checked before the enabled service starts."""
+    code, output = run_role(tmp_path, activation_inputs())
+    assert code == 0, output
+    modules = mocked_modules(output)
+    systemd = [message['arguments'] for message in modules
+               if message['mock_module'] == 'ansible.builtin.systemd']
+    assert systemd == [{'name': 'gh-operations.service', 'enabled': True, 'state': 'started'}]
+    names = [
+        'Require the runner issuer socket to be active before the operations runner starts',
+        'Inspect the pinned runner issuer client before the operations runner starts',
+        'Require the runner issuer client to match its pinned digest',
+        'Inspect the unpacked runner before the operations runner starts',
+        'Require the unpacked runner to be present',
+        'Start the operations runner through the activation gate',
+    ]
+    positions = [output.index(name) for name in names]
+    assert positions == sorted(positions)
 
 
 def test_real_ansible_valid_profile_renders_isolated_inactive_installation(tmp_path):
@@ -323,6 +459,27 @@ def test_running_slot_is_rejected_before_any_provisioning_module(tmp_path):
     assert 'Drain and verify the operations slot' in output
     assert 'Ensure separate operations service groups exist' not in output
     assert 'ansible.builtin.apt' not in output
+
+
+def test_activation_drain_approval_stops_a_running_slot_and_allows_provisioning(tmp_path):
+    """Explicit drain approval stops a running service and refreshes its fixture state before provisioning."""
+    facts = values()['ansible_facts']
+    facts['services'] = {'gh-operations.service': {'state': 'running'}}
+    code, output = run_role(tmp_path, {
+        'github_runner_operations_drain_approved': True,
+        'ansible_facts': facts,
+    })
+    assert code == 0, output
+    modules = mocked_modules(output)
+    systemd = [message['arguments'] for message in modules
+               if message['mock_module'] == 'ansible.builtin.systemd']
+    assert systemd[0] == {'name': 'gh-operations.service', 'enabled': False, 'state': 'stopped'}
+    assert 'Create protected operations directories' in output
+    assert output.index('Stop the operations runner with explicit drain approval') \
+        < output.index('Create protected operations directories')
+    assert output.index('Stop the operations runner with explicit drain approval') \
+        < output.index('Refresh operations service state after approved drain') \
+        < output.index('Refuse changes to an active operations slot')
 
 
 def test_existing_ci_uid_cannot_be_reused_by_operations(tmp_path):
