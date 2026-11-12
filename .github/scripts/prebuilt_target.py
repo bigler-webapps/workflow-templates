@@ -26,6 +26,9 @@ from typing import Callable, Mapping, Protocol
 
 import release_manifest
 
+if os.name != "nt":
+    import fcntl
+
 
 MAX_CONTROL_BYTES = 256 * 1024
 MAX_METADATA_BYTES = 1024 * 1024
@@ -46,11 +49,15 @@ _SAFE_COMPOSE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.ya?ml\Z")
 _ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "DOCKER_CONFIG"}
 _DOCKER = ("docker", "--host", "unix:///var/run/docker.sock")
 _PROCESS_READER_GATE = threading.Lock()
+_DEPLOYED_COMPOSE = "compose.json"
+_RENDER_OVERRIDE = "override.yaml"
 _INSPECT_TEMPLATE = (
     "{{json .Config.Image}}\n{{json .State.Status}}\n"
     "{{json .State.Restarting}}\n{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}\n"
     '{{json (index .Config.Labels "com.docker.compose.project")}}\n'
     '{{json (index .Config.Labels "com.docker.compose.service")}}\n'
+    '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}\n'
+    '{{json (index .Config.Labels "com.docker.compose.project.config_files")}}\n'
 )
 
 
@@ -167,6 +174,8 @@ def _validate_target(target: object, expected: object) -> tuple[Path, Path, Path
     runtime = _absolute_path(target.runtime_env_path)
     docker_config = _absolute_path(target.docker_config_dir)
     temp_parent = _absolute_path(target.temporary_parent)
+    if "," in str(temp_parent):
+        _fail("target_path_invalid")
     if any(path == app or app in path.parents for path in (runtime, docker_config, temp_parent)):
         _fail("runtime_scope_invalid")
     if runtime == docker_config / "config.json":
@@ -583,6 +592,64 @@ def _now(clock):
     return float(value)
 
 
+def _lock_configurations(parent: Path, identity: tuple[int, ...]) -> int | None:
+    if os.name == "nt":
+        # The real executor requires the Linux Docker socket. Windows runs the offline tests.
+        return None
+    fd = None
+    try:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != identity[:2]:
+            _fail("configuration_directory_changed")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, PrebuiltTargetError):
+        if fd is not None:
+            os.close(fd)
+        _fail("configuration_lock_unavailable")
+    return fd
+
+
+def _write_private_file(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        stream = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _older_configurations(parent: Path, prefix: str) -> dict[Path, tuple[int, ...]]:
+    older = {}
+    for directory in parent.iterdir():
+        suffix = directory.name.removeprefix(prefix)
+        if suffix == directory.name or not re.fullmatch(r"[a-z0-9_]{8}", suffix):
+            continue
+        try:
+            older[directory] = _identity(directory, kind="dir", required_mode=0o700)
+        except PrebuiltTargetError:
+            continue
+    return older
+
+
+def _discard_older_configurations(older: dict[Path, tuple[int, ...]]) -> None:
+    for directory, identity in older.items():
+        if _identity(directory, kind="dir", required_mode=0o700) != identity:
+            _fail("cleanup_identity_changed")
+        files = list(directory.iterdir())
+        if any(path.name not in {_DEPLOYED_COMPOSE, _RENDER_OVERRIDE} for path in files):
+            continue
+        for path in files:
+            _identity(path, kind="file", required_mode=0o600)
+        for path in files:
+            path.unlink()
+        directory.rmdir()
+
+
 def execute_image_deployment(
     raw_manifest: bytes,
     *,
@@ -662,41 +729,36 @@ def execute_image_deployment(
         _fail("environment_ref_mismatch")
     output_dir: Path | None = None
     output_identity = None
+    configuration_lock = None
+    activation_attempted = False
     failure: PrebuiltTargetError | None = None
     deployment_result: DeploymentResult | None = None
     try:
         if _now(clock) >= whole_deadline:
             _fail("deadline_exceeded")
-        output_dir = Path(tempfile.mkdtemp(prefix="prebuilt-target-", dir=temp_parent))
+        configuration_lock = _lock_configurations(temp_parent, snapshots[temp_parent])
+        prefix = f"prebuilt-target-config-{target.project_name}-"
+        older_configurations = _older_configurations(temp_parent, prefix)
+        output_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=temp_parent))
         output_identity = _identity(output_dir, kind="dir", required_mode=0o700)
-        override = output_dir / "override.yaml"
+        override = output_dir / _RENDER_OVERRIDE
         # !reset removes a base build mapping; plain null would inherit it.
         override_data = ("services:\n" + "".join(
             f"  {service}:\n    image: {json.dumps(image)}\n    build: !reset null\n"
             f"    env_file: [{json.dumps(str(runtime))}]\n"
             for service in target.image_services)).encode("ascii")
-        fd = os.open(override, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(override_data)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            try:
-                os.close(fd)
-            except BaseException:
-                pass
-            raise
+        _write_private_file(override, override_data)
         override_identity = _identity(override, kind="file")
         snapshots[output_dir] = output_identity
         snapshots[override] = override_identity
-        compose_prefix = [*_DOCKER, "compose", "--project-name", target.project_name,
-                          "--project-directory", str(app)]
+        compose_base = (*_DOCKER, "compose", "--project-name", target.project_name,
+                        "--project-directory", str(app))
+        compose_prefix = list(compose_base)
         for control in target.compose:
             compose_prefix.extend(("--file", control.filename))
         compose_prefix.extend(("--file", str(override)))
         compose_prefix.extend(("--env-file", str(runtime)))
-        command_prefix = tuple(compose_prefix)
+        render_prefix = tuple(compose_prefix)
         child_env = {"PATH": os.defpath, "HOME": str(Path.home()), "LANG": "C.UTF-8",
                      "LC_ALL": "C.UTF-8", "DOCKER_CONFIG": str(docker_config)}
         selected_executor = executor if executor is not None else _SubprocessExecutor()
@@ -705,7 +767,7 @@ def execute_image_deployment(
             timeout=whole_deadline - _now(clock), capture=capture,
             deadline=whole_deadline, clock=clock, snapshots=snapshots,
         )
-        config_raw = run(command_prefix + ("config", "--format", "json"), capture=True)
+        config_raw = run(render_prefix + ("config", "--format", "json"), capture=True)
         config = _safe_json(config_raw)
         if type(config) is not dict or type(config.get("services")) is not dict:
             _fail("compose_config_invalid")
@@ -718,6 +780,8 @@ def execute_image_deployment(
         for service, rendered in service_config.items():
             if type(rendered) is not dict or "build" in rendered:
                 _fail("compose_build_rejected")
+            if "env_file" in rendered:
+                _fail("compose_configuration_not_reusable")
             wanted = image if service in target.image_services else sidecar_map[service]
             if rendered.get("image") != wanted:
                 _fail("compose_image_mismatch")
@@ -728,38 +792,74 @@ def execute_image_deployment(
                     _fail("compose_healthcheck_invalid")
                 if healthcheck.get("disable") is not True and healthcheck.get("test") != ["NONE"]:
                     health_required.add(service)
+
+        # The canonical Compose model embeds the resolved environment. Recovery
+        # receives only the label paths, so it must be able to reload this model
+        # with no dependency on the provider's current runtime input.
+        deployed_config = output_dir / _DEPLOYED_COMPOSE
+        _write_private_file(deployed_config, config_raw)
+        snapshots[deployed_config] = _identity(deployed_config, kind="file", required_mode=0o600)
+        command_prefix = (*compose_base, "--file", str(deployed_config))
+        child_env["COMPOSE_DISABLE_ENV_FILE"] = "1"
+        reloaded = run(command_prefix + ("config", "--format", "json"), capture=True)
+        if _safe_json(reloaded) != config:
+            _fail("compose_configuration_not_reusable")
+        override.unlink()
+        del snapshots[override]
+        if configuration_lock is not None:
+            output_fd = os.open(output_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(output_fd)
+                os.fsync(configuration_lock)
+            finally:
+                os.close(output_fd)
+
         run(command_prefix + ("pull",))
+        # A failed or interrupted up can already have created some containers.
+        # Keep both generations until a later complete deployment replaces them.
+        activation_attempted = True
         run(command_prefix + ("up", "--detach", "--no-build", "--pull", "never",
                               "--force-recreate", "--remove-orphans"))
         migrated = target.migrate_service is not None
         if migrated:
             run(command_prefix + ("exec", "-T", target.migrate_service, "python", "manage.py",
                                   "migrate", "--noinput"))
-        ps_raw = run(command_prefix + ("ps", "--all", "--format", "json"), capture=True)
+        ps_raw = run(command_prefix + ("ps", "--all", "--format", "json", "--no-trunc"), capture=True)
         observed = _decode_ps(ps_raw, expected_services, target.project_name)
         for service in sorted(expected_services):
             cid, _, _ = observed[service]
             inspect_raw = _run(
                 selected_executor,
                 _DOCKER + ("inspect", "--format", _INSPECT_TEMPLATE, cid),
-                cwd=str(app), env={"PATH": os.defpath, "HOME": str(Path.home()), "LANG": "C.UTF-8",
-                                   "LC_ALL": "C.UTF-8", "DOCKER_CONFIG": str(docker_config)},
+                cwd=str(app), env=child_env,
                 timeout=min(MAX_COMMAND_SECONDS, whole_deadline - _now(clock)), capture=True,
                 deadline=whole_deadline, clock=clock, snapshots=snapshots,
             )
             fields = inspect_raw.decode("utf-8", errors="strict").splitlines()
-            if len(fields) != 6:
+            if len(fields) != 8:
                 _fail("container_inspect_invalid")
             values = [_safe_json((field + "\n").encode("utf-8")) for field in fields]
-            actual_image, state, restarting, health, actual_project, actual_service = values
+            (actual_image, state, restarting, health, actual_project, actual_service,
+             working_directory, configuration_files) = values
             wanted = image if service in target.image_services else sidecar_map[service]
             if actual_image != wanted or actual_project != target.project_name or actual_service != service:
                 _fail("container_identity_mismatch")
+            if working_directory != str(app) or configuration_files != str(deployed_config):
+                _fail("container_configuration_mismatch")
             if (state != "running" or restarting is not False or health not in (None, "healthy")
                     or (service in health_required and health != "healthy")):
                 _fail("container_unhealthy")
+        # Compose ps can omit project containers without a Compose config hash.
+        # Verify the complete Engine inventory before deleting any older model.
+        project_ids = run(_DOCKER + (
+            "ps", "--all", "--quiet", "--no-trunc",
+            "--filter", f"label=com.docker.compose.project={target.project_name}",
+        ), capture=True)
+        if sorted(project_ids.splitlines()) != sorted(cid.encode("ascii") for cid, _, _ in observed.values()):
+            _fail("container_inventory_mismatch")
         if _now(clock) >= whole_deadline:
             _fail("deadline_exceeded")
+        _discard_older_configurations(older_configurations)
         deployment_result = DeploymentResult(
             image=image, project_name=target.project_name, environment=target.environment,
             source_repository=expected_identity.repository, source_sha=expected_identity.sha,
@@ -771,8 +871,8 @@ def execute_image_deployment(
     except BaseException:
         failure = PrebuiltTargetError("execution_failed")
     finally:
-        if output_dir is not None:
-            try:
+        try:
+            if output_dir is not None and not activation_attempted:
                 _check_snapshots({temp_parent: snapshots[temp_parent]})
                 if output_identity is None:
                     # No payload exists before identity validation. Only remove
@@ -783,10 +883,13 @@ def execute_image_deployment(
                     if current != output_identity:
                         _fail("cleanup_identity_changed")
                     shutil.rmtree(output_dir)
-            except PrebuiltTargetError as exc:
-                failure = exc
-            except BaseException:
-                failure = PrebuiltTargetError("cleanup_failed")
+        except PrebuiltTargetError as exc:
+            failure = exc
+        except BaseException:
+            failure = PrebuiltTargetError("cleanup_failed")
+        finally:
+            if configuration_lock is not None:
+                os.close(configuration_lock)
     if failure is not None:
         raise PrebuiltTargetError(failure.code) from None
     if deployment_result is None:

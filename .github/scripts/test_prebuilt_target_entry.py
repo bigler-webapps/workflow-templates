@@ -167,7 +167,7 @@ class ImageTargetEntryTests(unittest.TestCase):
         self.assertEqual(frame[:18], b"PTARGET1\x01\x01" + struct.pack("!II", len(self.fixture.raw), 0))
         overrides = []
         def observe_override(argv):
-            if argv[-3:] == ("config", "--format", "json"):
+            if argv[-3:] == ("config", "--format", "json") and "--env-file" in argv:
                 files = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--file"]
                 overrides.append(Path(files[-1]).read_text(encoding="utf-8"))
         executor = image_fixtures.FakeExecutor(hook=observe_override)
@@ -668,7 +668,7 @@ def test_pre_sdk_refusal_output_deadline_is_enforced_without_effect_or_second_re
 
 def test_actual_sdk_cleanup_failure_cannot_be_reported_as_success(image_case):
     executor, sink = image_fixtures.FakeExecutor(), Capture()
-    with mock.patch.object(pt.shutil, "rmtree", side_effect=OSError("synthetic_secret_cleanup")):
+    with mock.patch.object(pt, "_discard_older_configurations", side_effect=OSError("synthetic_secret_cleanup")):
         entry.run_target_stream(image_invocation(image_case, executor=executor),
             GuardedReader(image_frame(image_case.raw)), sink)
     assert any("up" in call[0] for call in executor.calls)

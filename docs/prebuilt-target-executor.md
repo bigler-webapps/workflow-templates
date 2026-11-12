@@ -30,7 +30,7 @@ resolver; the target executor always performs that full validation afterward.
 | `sidecar_images` | Tuple of `(service, image@sha256)` pairs for all other expected services. |
 | `runtime_env_path` | Provider-created private runtime input. The executor only checks identity, owner and mode; it never reads its contents. |
 | `docker_config_dir` | Existing private provider-created directory containing only the scoped `config.json` profile below. |
-| `temporary_parent` | Existing private directory for the executor's owned override directory. |
+| `temporary_parent` | Existing private directory for generated Compose inputs and retained deployment configurations. |
 | `migrate_service` | Optional reviewed application service for the fixed Django migration command. |
 
 Call `execute_image_deployment(raw_manifest, *, expected_identity,
@@ -104,14 +104,19 @@ Every Docker invocation starts with the fixed target-local endpoint
 select another engine and inherited Docker host/context variables are absent.
 The target's reviewed toolchain must provide this local rootful socket.
 
-1. `docker --host unix:///var/run/docker.sock compose ... config --format json`; privately parse the bounded result
-and require the exact reviewed services, images and no build configuration.
+1. `docker --host unix:///var/run/docker.sock compose ... config --format json`. Privately parse the bounded result,
+   require the exact reviewed services and images, and refuse build configuration. Write the resolved
+   model to a target-owned `0600` file in the private generation directory. Reload it without the
+   provider's runtime input, require the same Compose model, and remove the render-only override.
 2. `docker compose ... pull`.
 3. `docker compose ... up --detach --no-build --pull never --force-recreate --remove-orphans`.
 4. Optionally, `docker compose ... exec -T <service> python manage.py migrate --noinput`.
 5. `docker compose ... ps --all --format json`, followed by fixed narrow
    `docker inspect` templates for image, state, restart flag, health, project
-   label and service label.
+   and service labels, plus the Compose project working directory and config-file labels.
+   The latter must identify the application directory and the retained model used for activation.
+6. Compare those IDs with the Engine's complete project-label inventory before
+   removing older configurations.
 
 Rendered application images and post-up observed container images must both
 equal the immutable selected digest. Sidecars must match their reviewed pinned
@@ -138,10 +143,15 @@ its read actually exits; another capture fails before spawning a child.
 
 The whole operation uses a finite monotonic deadline, checked immediately
 before and after the registry callback as well as manifest validation
-and processes. Failure, exception and Python cancellation paths attempt to
-remove only the executor-owned override directory; cleanup failure returns a
-safe error. This source does not claim hard-kill cleanup or installed signal
-handling. It never builds, logs in, accepts a caller-selected Docker endpoint, joins a
+and processes. The target directory lock serializes SDK activations for that
+target. A failure before activation removes the candidate. Once `up` is
+attempted, both the candidate and earlier configurations remain available
+because a partial recreation can leave containers with different labels.
+After a complete deployment confirms the new labels, older configurations
+created by this SDK for the same project are removed. The retained model
+contains resolved runtime values and must stay private. Recovery can reuse
+it even after the provider rotates its input. The executor never builds,
+logs in, accepts a caller-selected Docker endpoint, joins a
 network, uses SSH/sudo, installs tools, checks out source, executes artifact
 code, rolls back, prunes old images or retires app files.
 

@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ def registry_read(namespace, tag):
 
 
 class FakeExecutor:
-    def __init__(self, *, config=None, ps=None, inspect=None, fail_at=None, hook=None):
+    def __init__(self, *, config=None, ps=None, inspect=None, fail_at=None, hook=None, extra_project_ids=()):
         self.calls = []
         self.fail_at = fail_at
         self.hook = hook
@@ -52,16 +53,25 @@ class FakeExecutor:
         }
         self.ps = ps
         self.inspect = inspect
+        self.activated = None
+        self.inspected = []
+        self.extra_project_ids = extra_project_ids
 
     def run(self, argv, *, cwd, env, timeout, capture=False):
         self.calls.append((argv, cwd, dict(env), timeout, capture))
+        if "up" in argv:
+            self.activated = Path(argv[argv.index("--file") + 1])
+            self.inspected.clear()
         if self.hook:
             self.hook(argv)
         if self.fail_at and self.fail_at(argv):
             return pt._CommandResult(17, b"synthetic-secret-child-output")
         joined = " ".join(argv)
         if "config --format json" in joined:
-            data = json.dumps(self.config, separators=(",", ":")).encode()
+            if "--env-file" in argv:
+                data = json.dumps(self.config, separators=(",", ":")).encode()
+            else:
+                data = Path(argv[argv.index("--file") + 1]).read_bytes()
             return pt._CommandResult(0, data)
         if "ps --all --format json" in joined:
             rows = self.ps if self.ps is not None else [
@@ -79,12 +89,18 @@ class FakeExecutor:
                 data = json.dumps(rows, separators=(",", ":")).encode()
             return pt._CommandResult(0, data)
         if "inspect" in argv:
+            self.inspected.append(argv[-1])
             service = "web" if argv[-1] == "a" * 64 else "worker" if argv[-1] == "c" * 64 else "db"
             values = self.inspect(service) if callable(self.inspect) else self.inspect
             values = values or (IMAGE if service in ("web", "worker") else SIDECAR,
                                 "running", False, "healthy" if service != "worker" else None,
                                 "sample", service)
+            if len(values) == 6:
+                values = (*values, cwd, str(self.activated))
             return pt._CommandResult(0, "".join(json.dumps(value) + "\n" for value in values).encode())
+        if argv[3] == "ps":
+            data = "\n".join([*self.inspected, *self.extra_project_ids]).encode("ascii")
+            return pt._CommandResult(0, data)
         return pt._CommandResult(0, b"")
 
 
@@ -144,6 +160,18 @@ class TargetFixture(unittest.TestCase):
     def assert_private_temp_empty(self):
         self.assertEqual(list(self.tmp.iterdir()), [])
 
+    def assert_retained_configuration(self, executor):
+        configuration = executor.activated
+        self.assertIsNotNone(configuration)
+        self.assertEqual(configuration.parent.parent, self.tmp)
+        self.assertEqual(list(configuration.parent.iterdir()), [configuration])
+        self.assertEqual(json.loads(configuration.read_bytes()), executor.config)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(configuration.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(configuration.stat().st_mode), 0o600)
+            self.assertEqual(configuration.stat().st_uid, os.geteuid())
+        return configuration
+
 
 class PrebuiltTargetTests(TargetFixture):
     def test_falsey_explicit_executor_does_not_select_real_default(self):
@@ -154,7 +182,7 @@ class PrebuiltTargetTests(TargetFixture):
             result = self.execute(executor=executor)
         self.assertEqual(result.image, IMAGE)
         self.assertTrue(any('up' in call[0] for call in executor.calls))
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
 
     def test_success_uses_validated_digest_and_observed_services(self):
         executor = FakeExecutor()
@@ -165,18 +193,25 @@ class PrebuiltTargetTests(TargetFixture):
                          (IDENTITY.repository, IDENTITY.sha, IDENTITY.run_id, IDENTITY.attempt))
         self.assertTrue(result.migrated)
         self.assertEqual(self.resolver_calls, [(NAMESPACE, TAG)])
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
         commands = [call[0] for call in executor.calls]
         up = next(command for command in commands if "up" in command)
         self.assertEqual(up[up.index("up"):],
                          ("up", "--detach", "--no-build", "--pull", "never", "--force-recreate", "--remove-orphans"))
         phases = ["inspect" if "inspect" in c else next(p for p in ("config", "pull", "up", "exec", "ps") if p in c) for c in commands]
-        self.assertEqual(phases, ["config", "pull", "up", "exec", "ps", "inspect", "inspect", "inspect"])
+        self.assertEqual(phases, ["config", "config", "pull", "up", "exec", "ps", "inspect", "inspect", "inspect", "ps"])
+        self.assertEqual(commands[-1][3:], (
+            "ps", "--all", "--quiet", "--no-trunc", "--filter", "label=com.docker.compose.project=sample",
+        ))
         self.assertTrue(all(c[:3] == ("docker", "--host", "unix:///var/run/docker.sock") for c in commands))
         self.assertTrue(any("migrate" in command and "--noinput" in command for command in commands))
         self.assertTrue(all("build" not in command for command in commands if command is not up))
-        for _, _, child_env, _, _ in executor.calls:
-            self.assertEqual(set(child_env), {"PATH", "HOME", "LANG", "LC_ALL", "DOCKER_CONFIG"})
+        for command, _, child_env, _, _ in executor.calls:
+            keys = {"PATH", "HOME", "LANG", "LC_ALL", "DOCKER_CONFIG"}
+            if "--env-file" not in command:
+                keys.add("COMPOSE_DISABLE_ENV_FILE")
+                self.assertEqual(child_env["COMPOSE_DISABLE_ENV_FILE"], "1")
+            self.assertEqual(set(child_env), keys)
             self.assertEqual(child_env["DOCKER_CONFIG"], str(self.docker))
 
     def test_varied_release_identity_digest_and_service_are_not_constants(self):
@@ -200,7 +235,7 @@ class PrebuiltTargetTests(TargetFixture):
                           result.attempt, result.services, result.migrated),
             (image, "other/service", "f"*40, 76543, 7, ("api",), False))
         self.assertFalse(any("exec" in call[0] for call in executor.calls))
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
 
     def test_runtime_contents_are_never_opened_and_inspect_is_narrow(self):
         original = os.open
@@ -252,7 +287,7 @@ class PrebuiltTargetTests(TargetFixture):
             with self.assertRaises(pt.PrebuiltTargetError): self.execute(executor=executor)
             self.assertTrue(any("up" in call[0] for call in executor.calls))
             self.assertFalse(any("inspect" in call[0] for call in executor.calls))
-            self.assert_private_temp_empty()
+            self.assert_retained_configuration(executor)
 
     @unittest.skipIf(os.name == "nt", "target POSIX link semantics")
     def test_control_symlink_hardlink_and_writable_parent_reject_before_registry(self):
@@ -301,7 +336,7 @@ class PrebuiltTargetTests(TargetFixture):
         result = self.execute(executor=executor)
         self.assertEqual((result.image,result.services), (IMAGE,("db","web","worker")))
         self.assertEqual(sum("inspect" in call[0] for call in executor.calls), 3)
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
 
     def test_configured_health_requires_observed_healthy_state(self):
         for health, disabled, succeeds in ((None, False, False), ("healthy", False, True), (None, True, True)):
@@ -315,13 +350,13 @@ class PrebuiltTargetTests(TargetFixture):
                 with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_unhealthy"):
                     self.execute(executor=executor)
             self.assertTrue(any("inspect" in call[0] for call in executor.calls))
-            self.assert_private_temp_empty()
+            self.assert_retained_configuration(executor)
 
     def test_override_is_real_private_yaml_with_build_reset_then_removed(self):
         observed = []
 
         def inspect_command(argv):
-            if "config" in argv:
+            if "config" in argv and "--env-file" in argv:
                 override = Path(argv[argv.index("--file", argv.index("--file") + 1) + 1])
                 observed.append((override, override.stat().st_mode & 0o777, override.read_text(encoding="utf-8")))
         self.execute(executor=FakeExecutor(hook=inspect_command))
@@ -332,6 +367,112 @@ class PrebuiltTargetTests(TargetFixture):
             f'  {s}:\n    image: "{IMAGE}"\n    build: !reset null\n'
             f'    env_file: [{json.dumps(self.target.runtime_env_path)}]\n' for s in ('web', 'worker')))
         self.assertFalse(path.exists())
+
+    def test_redeploy_keeps_each_generation_until_the_new_labels_are_confirmed(self):
+        first = FakeExecutor()
+        first.config["services"]["web"]["environment"] = {"SETTING": "first"}
+        self.execute(executor=first)
+        previous = self.assert_retained_configuration(first)
+
+        def while_deploying(argv):
+            if "up" in argv or "inspect" in argv:
+                self.assert_retained_configuration(first)
+                self.assertNotEqual(second.activated, previous)
+                self.assert_retained_configuration(second)
+
+        second = FakeExecutor(hook=while_deploying, fail_at=lambda argv: "up" in argv)
+        second.config["services"]["web"]["environment"] = {"SETTING": "second"}
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "command_failed"):
+            self.execute(executor=second)
+        partial = self.assert_retained_configuration(second)
+        self.assert_retained_configuration(first)
+
+        interrupted = self.tmp / "prebuilt-target-config-sample-abandon0"
+        interrupted.mkdir(mode=0o700)
+        for filename in ("override.yaml", "compose.json"):
+            payload = interrupted / filename
+            payload.write_text("synthetic", encoding="utf-8")
+            payload.chmod(0o600)
+        def while_confirming(argv):
+            if "inspect" in argv:
+                self.assert_retained_configuration(first)
+                self.assert_retained_configuration(second)
+
+        final = FakeExecutor(hook=while_confirming)
+        final.config["services"]["web"]["environment"] = {"SETTING": "third"}
+        self.execute(executor=final)
+        current = self.assert_retained_configuration(final)
+        self.assertNotEqual(current, previous)
+        self.assertFalse(previous.exists())
+        self.assertFalse(partial.exists())
+        self.assertFalse(interrupted.exists())
+        self.assertEqual(list(self.tmp.iterdir()), [current.parent])
+
+    def test_retains_previous_configuration_if_container_reports_its_old_label(self):
+        first = FakeExecutor()
+        self.execute(executor=first)
+        previous = self.assert_retained_configuration(first)
+
+        def mixed_generation(service):
+            return (SIDECAR if service == "db" else IMAGE, "running", False, "healthy", "sample", service,
+                    str(self.app), str(previous))
+
+        second = FakeExecutor(inspect=mixed_generation)
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_configuration_mismatch"):
+            self.execute(executor=second)
+        self.assert_retained_configuration(first)
+        self.assert_retained_configuration(second)
+
+    def test_rejects_wrong_working_directory_even_with_the_current_config_label(self):
+        def wrong_directory(service):
+            return (SIDECAR if service == "db" else IMAGE, "running", False, "healthy", "sample", service,
+                    str(self.tmp), str(executor.activated))
+
+        executor = FakeExecutor(inspect=wrong_directory)
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_configuration_mismatch"):
+            self.execute(executor=executor)
+        self.assert_retained_configuration(executor)
+
+    def test_retains_older_configuration_when_compose_omits_a_project_container(self):
+        first = FakeExecutor()
+        self.execute(executor=first)
+        second = FakeExecutor(extra_project_ids=("f" * 64,))
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_inventory_mismatch"):
+            self.execute(executor=second)
+        self.assert_retained_configuration(first)
+        self.assert_retained_configuration(second)
+
+    @unittest.skipIf(os.name == "nt", "target uses POSIX flock")
+    def test_concurrent_activation_on_same_target_is_refused(self):
+        def concurrently_deploy(argv):
+            if "up" in argv:
+                parallel = FakeExecutor()
+                with self.assertRaisesRegex(pt.PrebuiltTargetError, "configuration_lock_unavailable"):
+                    self.execute(executor=parallel)
+                self.assertEqual(parallel.calls, [])
+
+        self.execute(executor=FakeExecutor(hook=concurrently_deploy))
+
+    def test_render_must_reload_without_the_provider_input(self):
+        class NonReusable(FakeExecutor):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if "config" in argv and "--env-file" not in argv:
+                    return pt._CommandResult(0, b'{"services":{}}')
+                return result
+
+        executor = NonReusable()
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "compose_configuration_not_reusable"):
+            self.execute(executor=executor)
+        self.assertFalse(any("pull" in call[0] for call in executor.calls))
+        self.assert_private_temp_empty()
+
+        executor = FakeExecutor()
+        executor.config["services"]["web"]["env_file"] = [self.target.runtime_env_path]
+        with self.assertRaisesRegex(pt.PrebuiltTargetError, "compose_configuration_not_reusable"):
+            self.execute(executor=executor)
+        self.assertEqual(len(executor.calls), 1)
+        self.assert_private_temp_empty()
 
     def test_initial_temp_identity_failure_cleans_empty_owned_directory(self):
         identity = pt._identity
@@ -356,7 +497,7 @@ class PrebuiltTargetTests(TargetFixture):
         self.assertTrue(executor.calls)
         self.assertTrue(all(c[0][:3] == ("docker", "--host", "unix:///var/run/docker.sock") for c in executor.calls))
         self.assertTrue(all("DOCKER_HOST" not in c[2] and "DOCKER_CONTEXT" not in c[2] for c in executor.calls))
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
 
     def test_docker_profile_rejects_helpers_plugins_contexts_and_unscoped_credentials(self):
         profile = self.docker/"config.json"
@@ -415,14 +556,15 @@ class PrebuiltTargetTests(TargetFixture):
         value = base64.b64encode(("fixture-user:"+sentinel).encode()).decode()
         (self.docker/"config.json").write_text(json.dumps({"auths":{"ghcr.io":{"auth":value}}}),encoding="utf-8")
         output,errors = io.StringIO(),io.StringIO()
+        executor = FakeExecutor()
         with contextlib.redirect_stdout(output),contextlib.redirect_stderr(errors):
-            result = self.execute(executor=FakeExecutor())
+            result = self.execute(executor=executor)
         self.assertEqual((output.getvalue(),errors.getvalue()),("",""))
         self.assertNotIn(sentinel,repr(result)); self.assertNotIn(value,repr(result))
         with patch.object(pt,"_docker_profile",side_effect=AssertionError("runtime alias must reject before read")):
             with self.assertRaisesRegex(pt.PrebuiltTargetError,"runtime_scope_invalid"):
                 self.execute(target=replace(self.target,runtime_env_path=str(self.docker/"config.json")),executor=FakeExecutor())
-        self.assert_private_temp_empty()
+        self.assert_retained_configuration(executor)
 
     def test_static_or_parsed_manifest_rejected_before_target_command(self):
         bundle = b"static target fixture"
@@ -565,7 +707,7 @@ class PrebuiltTargetTests(TargetFixture):
             with self.subTest(rows=type(rows).__name__, count=len(rows) if hasattr(rows, "__len__") else -1):
                 with self.assertRaises(pt.PrebuiltTargetError):
                     self.execute(executor=executor)
-            self.assert_private_temp_empty()
+            self.assert_retained_configuration(executor)
 
     def test_observed_container_image_project_service_and_health_are_authoritative(self):
         mutations = {
@@ -578,11 +720,12 @@ class PrebuiltTargetTests(TargetFixture):
         }
         for label, inspect in mutations.items():
             with self.subTest(label=label):
+                executor = FakeExecutor(inspect=inspect)
                 with self.assertRaises(pt.PrebuiltTargetError):
-                    self.execute(executor=FakeExecutor(inspect=inspect))
-                self.assert_private_temp_empty()
+                    self.execute(executor=executor)
+                self.assert_retained_configuration(executor)
 
-    def test_failure_at_each_command_cleans_only_owned_override(self):
+    def test_failure_at_each_command_retains_only_potentially_activated_configurations(self):
         predicates = [
             lambda a: "config" in a, lambda a: "pull" in a,
             lambda a: "up" in a, lambda a: "exec" in a,
@@ -594,7 +737,10 @@ class PrebuiltTargetTests(TargetFixture):
                 self.execute(executor=executor)
             self.assertEqual(caught.exception.__cause__, None)
             self.assertNotIn("synthetic-secret", str(caught.exception))
-            self.assert_private_temp_empty()
+            if executor.activated is None:
+                self.assert_private_temp_empty()
+            else:
+                self.assert_retained_configuration(executor)
 
     def test_deadline_blocks_commands_and_no_result_is_returned(self):
         now = [10.0]
@@ -664,7 +810,7 @@ class PrebuiltTargetTests(TargetFixture):
             executor = FakeExecutor(ps=raw)
             with self.assertRaises(pt.PrebuiltTargetError):
                 self.execute(executor=executor)
-            self.assert_private_temp_empty()
+            self.assert_retained_configuration(executor)
 
 
 class SubprocessAdapterTests(unittest.TestCase):
