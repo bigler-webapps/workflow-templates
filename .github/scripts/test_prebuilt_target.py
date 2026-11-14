@@ -56,6 +56,7 @@ class FakeExecutor:
         self.activated = None
         self.inspected = []
         self.extra_project_ids = extra_project_ids
+        self.inspect_suffix = b""
 
     def run(self, argv, *, cwd, env, timeout, capture=False):
         self.calls.append((argv, cwd, dict(env), timeout, capture))
@@ -97,7 +98,7 @@ class FakeExecutor:
                                 "sample", service)
             if len(values) == 6:
                 values = (*values, cwd, str(self.activated))
-            return pt._CommandResult(0, "".join(json.dumps(value) + "\n" for value in values).encode())
+            return pt._CommandResult(0, "".join(json.dumps(value) + "\n" for value in values).encode() + self.inspect_suffix)
         if argv[3] == "ps":
             data = "\n".join([*self.inspected, *self.extra_project_ids]).encode("ascii")
             return pt._CommandResult(0, data)
@@ -364,6 +365,28 @@ class PrebuiltTargetTests(TargetFixture):
         duplicate = (b'{"ID":"' + b"a"*64 + b'","ID":"' + b"a"*64 + b'","Project":"sample","Service":"web","State":"running"}\n')
         with self.assertRaises(pt.PrebuiltTargetError):
             pt._decode_ps(duplicate, {"web"}, "sample")
+
+    def test_docker_engines_extra_trailing_newline_after_the_inspect_template_is_accepted_exactly_once(self):
+        # Pilot step 8: Docker Engine 29.9.3 prints the template's own final newline plus one of its own, so the real
+        # output ends in "\n\n" and splitlines() gave 9 items; every real deployment failed container_inspect_invalid.
+        executor = FakeExecutor()
+        executor.inspect_suffix = b"\n"
+        result = self.execute(executor=executor)
+        self.assertEqual((result.image, result.services), (IMAGE, ("db", "web", "worker")))
+        self.assertEqual(sum("inspect" in call[0] for call in executor.calls), 3)
+        self.assert_retained_configuration(executor)
+        for suffix in (b"\n\n", b"\n\n\n"):
+            executor = FakeExecutor()
+            executor.inspect_suffix = suffix
+            with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_inspect_invalid"):
+                self.execute(executor=executor)
+        # The tolerance never turns a wrong field count into a pass, with or without Docker's extra newline.
+        for extra, suffix in ((("seventh",), b"\n"), (("seventh",), b""), (("a", "b", "c"), b"\n")):
+            executor = FakeExecutor(inspect=lambda service, extra=extra: (
+                IMAGE if service != "db" else SIDECAR, "running", False, None, "sample", service, "/x", "/y", *extra))
+            executor.inspect_suffix = suffix
+            with self.assertRaisesRegex(pt.PrebuiltTargetError, "container_inspect_invalid"):
+                self.execute(executor=executor)
 
     def test_configured_health_requires_observed_healthy_state(self):
         for health, disabled, succeeds in ((None, False, False), ("healthy", False, True), (None, True, True)):

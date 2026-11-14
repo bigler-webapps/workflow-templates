@@ -836,7 +836,13 @@ def execute_image_deployment(
                 timeout=min(MAX_COMMAND_SECONDS, whole_deadline - _now(clock)), capture=True,
                 deadline=whole_deadline, clock=clock, snapshots=snapshots,
             )
-            fields = inspect_raw.decode("utf-8", errors="strict").splitlines()
+            inspect_text = inspect_raw.decode("utf-8", errors="strict")
+            # The template ends in its own newline and Docker Engine 29 appends one more, so real output ends in "\n\n"
+            # (pilot step 8: 9 items, container_inspect_invalid on every real deployment). Exactly one extra newline is
+            # accepted; any further empty line or a missing field still fails the count below.
+            if inspect_text.endswith("\n\n"):
+                inspect_text = inspect_text[:-1]
+            fields = inspect_text.splitlines()
             if len(fields) != 8:
                 _fail("container_inspect_invalid")
             values = [_safe_json((field + "\n").encode("utf-8")) for field in fields]
