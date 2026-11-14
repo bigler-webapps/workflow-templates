@@ -557,9 +557,10 @@ def _decode_ps(raw: bytes, services: set[str], project: str) -> dict[str, tuple[
     if type(rows) is not list or not 1 <= len(rows) <= MAX_SERVICES:
         _fail("compose_ps_invalid")
     seen: dict[str, tuple[str, str, str]] = {}
-    allowed = {"ID", "Name", "Command", "Project", "Service", "State", "Health", "ExitCode", "Publishers"}
+    # Compose adds fields between versions (Image, Labels, Networks, Status, ...). Only the keys read below are trusted and
+    # validated; every other key is ignored, never interpreted or echoed. Duplicate keys were rejected by _safe_json.
     for row in rows:
-        if type(row) is not dict or set(row) - allowed:
+        if type(row) is not dict:
             _fail("compose_ps_invalid")
         cid, service, state, health = (row.get("ID"), row.get("Service"), row.get("State"), row.get("Health"))
         if (type(cid) is not str or not _CONTAINER_ID.fullmatch(cid) or type(service) is not str

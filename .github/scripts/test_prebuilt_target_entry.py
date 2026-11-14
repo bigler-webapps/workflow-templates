@@ -374,6 +374,33 @@ class ImageTargetEntryTests(unittest.TestCase):
             self.assertFalse(sink.receipt().get("migrated", False))
         positive_image(self.fixture)
 
+    def test_a_failed_deployment_receipt_names_the_failed_step_by_the_sdk_code(self):
+        # WFT-CI-50: this used to be the single bucket "deployment_failed" for every SDK failure.
+        for marker in ("pull", "up", "exec", "inspect"):
+            executor = image_fixtures.FakeExecutor(fail_at=lambda argv, phase=marker: phase in argv)
+            sink = Capture()
+            self.run_frame(image_frame(self.fixture.raw), image_invocation(self.fixture, executor=executor), sink=sink)
+            receipt = sink.receipt()
+            self.assertEqual((receipt["status"], receipt["effect"]), ("failed", "unknown"))
+            self.assertRegex(receipt["error_code"], r"[a-z][a-z0-9_]{0,47}\Z")
+            self.assertEqual(receipt["error_code"], "command_failed")
+        positive_image(self.fixture)
+
+    def test_only_an_exact_sdk_error_type_with_a_strict_code_names_the_failed_step(self):
+        self.assertEqual(entry._safe_sdk_code(pt.PrebuiltTargetError("compose_ps_invalid")), "compose_ps_invalid")
+        self.assertEqual(entry._safe_sdk_code(st.StaticTargetError("some_step_failed")), "some_step_failed")
+
+        class Subclass(pt.PrebuiltTargetError):
+            pass
+
+        retyped = pt.PrebuiltTargetError("compose_ps_invalid")
+        retyped.code = 5
+        for exc in (Subclass("compose_ps_invalid"), pt.PrebuiltTargetError("Bad Code"), pt.PrebuiltTargetError("a" * 60),
+                    pt.PrebuiltTargetError("synthetic-secret"), pt.PrebuiltTargetError("1abc"), retyped,
+                    RuntimeError("compose_ps_invalid"), ValueError("deployment_failed")):
+            with self.subTest(exc=repr(exc)[:40]):
+                self.assertEqual(entry._safe_sdk_code(exc), "deployment_failed")
+
     def test_writer_capability_checked_before_effect_and_lost_ack_is_not_retried(self):
         executor = image_fixtures.FakeExecutor()
         invocation = image_invocation(self.fixture, executor=executor)

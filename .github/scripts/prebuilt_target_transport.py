@@ -43,12 +43,20 @@ _REFUSAL_CODES = frozenset({
 })
 
 
-class TransportError(RuntimeError):
-    """Stable failure code; no raw route, path, exception, or peer text."""
+_DETAIL = re.compile(r"[a-z][a-z0-9_]{0,47}\Z")
 
-    def __init__(self, code: str, *, ambiguous: bool = False):
+
+class TransportError(RuntimeError):
+    """Stable failure code; no raw route, path, exception, or peer text.
+
+    ``detail`` is the one-line code the launcher reported (``{"code": "..."}``) when ssh exited non-zero, kept only when it has
+    the strict snake_case shape and otherwise ``None``; it never changes the classification of the failure.
+    """
+
+    def __init__(self, code: str, *, ambiguous: bool = False, detail: str | None = None):
         self.code = code
         self.ambiguous = ambiguous
+        self.detail = detail if type(detail) is str and _DETAIL.fullmatch(detail) else None
         super().__init__(code)
 
 
@@ -419,6 +427,16 @@ def _parse_receipt(raw: bytes, config: TransportConfig, services: tuple[str, ...
                 image=target.static_image, services=services,
                 artifact_id=config.selected_artifact.artifact_id, artifact_sha256=digest)
         expected_keys = common | {"error_code", "recovery_required"}
+        if value.get("status") == "failed" and value.get("effect") == "unknown":
+            # The launcher started the SDK and it failed: an effect may have happened. Returned instead of raised so the
+            # caller can name the step; callers must still treat it as ambiguous (it is neither verified nor refused).
+            if (set(value) != expected_keys or type(value.get("error_code")) is not str
+                    or not _DETAIL.fullmatch(value["error_code"]) or type(value.get("recovery_required")) is not bool):
+                raise ValueError
+            return DeploymentReceipt("failed", "unknown", config.correlation,
+                ident.repository, ident.sha, ident.run_id, ident.attempt,
+                target.environment, target.project_name, config.output_kind,
+                error_code=value["error_code"], recovery_required=value["recovery_required"])
         if (set(value) != expected_keys or value.get("status") != "failed"
                 or value.get("effect") != "none" or type(value.get("error_code")) is not str
                 or value["error_code"] not in _REFUSAL_CODES
@@ -431,6 +449,20 @@ def _parse_receipt(raw: bytes, config: TransportConfig, services: tuple[str, ...
             error_code="target_refused")
     except BaseException:
         raise TransportError("receipt_invalid", ambiguous=True) from None
+
+
+def _launcher_code(raw: bytes) -> str | None:
+    """The code of a launcher error line (`{"code":"<snake_case>"}\\n`, nothing else), else None; never raises."""
+    try:
+        if (type(raw) is not bytes or not raw or len(raw) > 128 or not raw.endswith(b"\n") or raw.count(b"\n") != 1):
+            return None
+        value = json.loads(raw[:-1].decode("ascii"), object_pairs_hook=_parse_pairs, parse_constant=_reject_constant)
+        if type(value) is not dict or set(value) != {"code"}:
+            return None
+        code = value["code"]
+        return code if type(code) is str and _DETAIL.fullmatch(code) else None
+    except BaseException:
+        return None
 
 
 def _same_snapshots(config: TransportConfig, before: tuple[_FileSnapshot, ...]) -> None:
@@ -507,7 +539,8 @@ def _run_process(argv: tuple[str, ...], payload: bytes, config: TransportConfig,
                         raise TransportError("ssh_completion_invalid", ambiguous=sent > 0) from None
                     if returncode is not None:
                         if type(returncode) is not int or returncode != 0:
-                            raise TransportError("ssh_failed", ambiguous=sent > 0) from None
+                            raise TransportError("ssh_failed", ambiguous=sent > 0,
+                                                 detail=_launcher_code(bytes(received))) from None
                         waited = process.wait(timeout=timer.remaining())
                         if type(waited) is not int or waited != 0:
                             raise TransportError("ssh_completion_invalid", ambiguous=True) from None
@@ -552,7 +585,7 @@ def _run_process(argv: tuple[str, ...], payload: bytes, config: TransportConfig,
         if not _reap(process):
             raise TransportError("ssh_cleanup_failed", ambiguous=True) from None
         if not exc.ambiguous:
-            raise TransportError(exc.code, ambiguous=True) from None
+            raise TransportError(exc.code, ambiguous=True, detail=exc.detail) from None
         raise
     except BaseException:
         _close_pipe(process.stdin)

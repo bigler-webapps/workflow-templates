@@ -357,6 +357,61 @@ class PrebuiltTargetTransportTests(TransportFixture):
         self.assertTrue(caught.exception.ambiguous)
         self.positive()
 
+    # --- WFT-CI-50: the failing step is named, the classification does not change ---
+
+    def test_launcher_error_line_on_nonzero_exit_is_surfaced_as_a_strict_detail(self):
+        def launcher_refusal(line):
+            def endpoint(source, sink):
+                source.read()
+                sink.write(line)
+                raise RuntimeError("synthetic launcher exit")
+            return endpoint
+
+        with self.assertRaises(transport.TransportError) as caught:
+            self.invoke(endpoint=launcher_refusal(b'{"code":"policy_invalid"}\n'))
+        self.assertEqual((caught.exception.code, caught.exception.ambiguous, caught.exception.detail),
+                         ("ssh_failed", True, "policy_invalid"))
+        for hostile in (b'{"code":"Bad Code!"}\n', b'{"code":"a"}\n{"code":"b"}\n', b'{"code":"a","x":1}\n',
+                        b'{"code":"a","code":"b"}\n', b'{"code":1}\n', b'not json\n', b'{"code":"policy_invalid"}',
+                        b'{"code":"' + b"a" * 200 + b'"}\n', b'{"code":"policy\xff"}\n'):
+            with self.subTest(line=hostile[:20]):
+                with self.assertRaises(transport.TransportError) as caught:
+                    self.invoke(endpoint=launcher_refusal(hostile))
+                self.assertEqual((caught.exception.code, caught.exception.detail), ("ssh_failed", None))
+                self.assertNotIn("Bad Code", str(caught.exception))
+        self.positive()
+
+    def test_detail_is_kept_only_in_the_strict_shape(self):
+        self.assertEqual(transport.TransportError("x", detail="compose_ps_invalid").detail, "compose_ps_invalid")
+        for bad in ("Compose", "1abc", "a b", "", "a" * 49, None, 5, b"abc"):
+            self.assertIsNone(transport.TransportError("x", detail=bad).detail, bad)
+
+    def test_failed_unknown_receipt_is_returned_with_its_strict_error_code_and_nothing_else(self):
+        self.executor.fail_at = lambda args: "up" in args
+
+        def mutated(**changes):
+            def transform(raw):
+                value = json.loads(raw)
+                value.update(changes)
+                return (json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True,
+                                   separators=(",", ":")) + "\n").encode("ascii")
+            return transform
+
+        result = self.invoke(endpoint=self.actual_endpoint(mutated()))
+        self.assertEqual((result.status, result.effect, result.error_code, result.recovery_required),
+                         ("failed", "unknown", "command_failed", False))
+        flagged = self.invoke(endpoint=self.actual_endpoint(mutated(recovery_required=True)))
+        self.assertTrue(flagged.recovery_required)
+        for changes in ({"error_code": "Command Failed"}, {"error_code": 5}, {"error_code": "a" * 49},
+                        {"recovery_required": "yes"}, {"extra": 1}, {"correlation": "deploy-" + "d" * 40}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(transport.TransportError) as caught:
+                    self.invoke(endpoint=self.actual_endpoint(mutated(**changes)))
+                self.assertEqual(caught.exception.code, "receipt_invalid")
+                self.assertTrue(caught.exception.ambiguous)
+        self.executor.fail_at = None
+        self.positive()
+
     def test_strict_route_config_and_deadline_groups_have_local_positive(self):
         class ForgedConfig(transport.TransportConfig):
             pass
@@ -618,9 +673,11 @@ class PrebuiltTargetTransportTests(TransportFixture):
         self.assertEqual(len(self.executor.calls), before)
         self.positive()
         self.executor.fail_at = lambda args: "up" in args
-        with self.assertRaises(transport.TransportError) as caught:
-            self.invoke()
-        self.assertTrue(caught.exception.ambiguous)
+        # The SDK failed after the launcher started it: a failed receipt with an unknown effect is returned (it used to be
+        # discarded as receipt_invalid) and names the step; it is neither verified nor refused.
+        result = self.invoke()
+        self.assertEqual((result.status, result.effect, result.recovery_required), ("failed", "unknown", False))
+        self.assertEqual(result.error_code, "command_failed")
         self.assertTrue(any("up" in args for args, *_ in self.executor.calls))
         self.executor.fail_at = None
         self.positive()

@@ -200,9 +200,18 @@ def _read_frame(stream: BinaryIO, inv: Invocation, previous: float,
     return manifest, bundle, previous
 
 
+_SDK_CODE = re.compile(r"[a-z][a-z0-9_]{0,47}\Z")
+
+
 def _safe_sdk_code(exc: BaseException) -> str:
-    # Exception messages and even exception attributes are untrusted output.
-    # Keep SDK failures in a single fixed bucket; never echo caller text.
+    # Exception messages and the attributes of any other exception are untrusted output and never echoed. The one
+    # exception to the single fixed bucket: an EXACT SDK error type, whose `code` is only ever set from a literal by
+    # that SDK's own `_fail(...)`, keeps its code when it has the strict snake_case shape, so a failed deployment names
+    # the step that failed. Subclasses and every other type stay `deployment_failed`.
+    if type(exc) in (image_target.PrebuiltTargetError, static_target.StaticTargetError):
+        code = getattr(exc, "code", None)
+        if type(code) is str and _SDK_CODE.fullmatch(code):
+            return code
     return "deployment_failed"
 
 

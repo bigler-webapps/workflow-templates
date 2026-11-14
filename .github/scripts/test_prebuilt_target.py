@@ -338,6 +338,33 @@ class PrebuiltTargetTests(TargetFixture):
         self.assertEqual(sum("inspect" in call[0] for call in executor.calls), 3)
         self.assert_retained_configuration(executor)
 
+    def test_compose_ps_fields_beyond_the_ones_read_are_ignored_but_the_read_ones_stay_strict(self):
+        # Pilot step 8: Compose 5.7.0 prints twelve more fields per row than the nine this decoder used to allow, and every
+        # real deployment failed with compose_ps_invalid right after migrate. Unknown keys are ignored, never interpreted.
+        extras = {"Name": "x-1", "Command": "run", "Publishers": [], "CreatedAt": "2026-11-14", "Engine": "docker",
+                  "Image": "i", "Labels": "a=b,c=d", "LocalVolumes": "0", "Mounts": "", "Names": "x-1", "Networks": "n",
+                  "Ports": "", "RunningFor": "1s", "Size": "0B", "Status": "Up 1 second", "Future": {"nested": [1, None]}}
+        base = [
+            {"ID": "a"*64, "Project": "sample", "Service": "web", "State": "running", "Health": "healthy", **extras},
+            {"ID": "c"*64, "Project": "sample", "Service": "worker", "State": "running", "Health": "", **extras},
+            {"ID": "d"*64, "Project": "sample", "Service": "db", "State": "running", "Health": "healthy", **extras},
+        ]
+        executor = FakeExecutor(ps=base)
+        result = self.execute(executor=executor)
+        self.assertEqual((result.image, result.services), (IMAGE, ("db", "web", "worker")))
+        self.assertEqual(sum("inspect" in call[0] for call in executor.calls), 3)
+        self.assert_retained_configuration(executor)
+        for changes in ({"Project": "other"}, {"Project": None}, {"ID": "c"*64}, {"Health": "unhealthy"},
+                        {"ExitCode": True}, {"ExitCode": 1}, {"Service": []}, {"State": "exited"}):
+            executor = FakeExecutor(ps=[dict(base[0], **changes), *base[1:]])
+            with self.assertRaises(pt.PrebuiltTargetError):
+                self.execute(executor=executor)
+            self.assertFalse(any("inspect" in call[0] for call in executor.calls))
+        # A duplicated key of any name is still refused by the strict JSON reader.
+        duplicate = (b'{"ID":"' + b"a"*64 + b'","ID":"' + b"a"*64 + b'","Project":"sample","Service":"web","State":"running"}\n')
+        with self.assertRaises(pt.PrebuiltTargetError):
+            pt._decode_ps(duplicate, {"web"}, "sample")
+
     def test_configured_health_requires_observed_healthy_state(self):
         for health, disabled, succeeds in ((None, False, False), ("healthy", False, True), (None, True, True)):
             executor = FakeExecutor()
