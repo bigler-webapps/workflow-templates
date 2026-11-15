@@ -149,7 +149,7 @@ class TargetFixture(unittest.TestCase):
         )
         self.gate_root = self.root / "recovery-state"
         (self.gate_root / "gates" / "sample").mkdir(parents=True)
-        (self.gate_root / "gates" / "sample" / "gate").write_text("open\n", encoding="utf-8")
+        self.write_gate("open")
         patch.object(pt, "_GATE_STATE_ROOT", self.gate_root).start()
         self.resolver_calls = []
 
@@ -157,6 +157,19 @@ class TargetFixture(unittest.TestCase):
             self.resolver_calls.append((namespace, tag))
             return registry_read(namespace, tag)
         self.resolver = resolver
+
+    GATE_METADATA = '{"app":"sample","source":"main-prod","operation_id":"op-1","origin_run_id":"1","origin_attempt":"1","project":"sample"}'
+
+    def write_gate(self, state="open", metadata=None, *, project="sample", raw=None):
+        """The gate state file in the format of stack_recovery._write_startup_gate: state line, JSON line, newline; mode 0644."""
+        directory = self.gate_root / "gates" / project
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "gate"
+        path.write_bytes(raw if raw is not None else (state + "\n" + (metadata or self.GATE_METADATA) + "\n").encode("utf-8"))
+        if os.name != "nt":
+            path.chmod(0o644)
+            directory.chmod(0o775)
+        return path
 
     def tearDown(self):
         self.temp.cleanup()
@@ -970,12 +983,24 @@ class StartupGateTests(TargetFixture):
         self.assertEqual(pt._gate_script(argv), expected)
 
     def test_a_missing_or_malformed_gate_state_rejects_before_pull_and_any_activation(self):
-        for content in (None, "garbage\n", "open\n" + "x" * 100):
-            with self.subTest(content=content):
+        cases = {
+            "absent": None,
+            "garbage": b"garbage\n",
+            "state only, no metadata (the pre-fix format)": b"open\n",
+            "metadata is not an object": b"open\n[1]\n",
+            "metadata is not json": b"open\nnot-json\n",
+            "unknown state": b"closed\n" + self.GATE_METADATA.encode() + b"\n",
+            "another project": ("open\n" + self.GATE_METADATA.replace('"project":"sample"', '"project":"other"') + "\n").encode(),
+            "no project key": b'open\n{"app":"sample"}\n',
+            "oversized": b"open\n" + b'{"project":"sample","pad":"' + b"x" * 5000 + b'"}\n',
+            "not utf-8": b"open\n\xff\xfe\n",
+        }
+        for label, content in cases.items():
+            with self.subTest(case=label):
                 gate = self.gate_root / "gates" / "sample" / "gate"
                 gate.unlink(missing_ok=True)
                 if content is not None:
-                    gate.write_text(content, encoding="utf-8")
+                    self.write_gate(raw=content)
                 executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
                 with self.assertRaises(pt.PrebuiltTargetError) as raised:
                     self.execute(executor=executor)
@@ -984,8 +1009,51 @@ class StartupGateTests(TargetFixture):
                 self.assertFalse(any("pull" in command or "up" in command for command in commands))
                 self.assert_private_temp_empty()
 
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_a_writable_gate_file_or_a_world_writable_gate_directory_is_refused_like_recovery_refuses_it(self):
+        for label, change in (
+                ("group-writable file", lambda gate: gate.chmod(0o664)),
+                ("world-writable file", lambda gate: gate.chmod(0o666)),
+                ("world-writable directory", lambda gate: gate.parent.chmod(0o777))):
+            with self.subTest(case=label):
+                gate = self.write_gate("open")
+                gate.parent.chmod(0o775)
+                change(gate)
+                executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+                with self.assertRaises(pt.PrebuiltTargetError) as raised:
+                    self.execute(executor=executor)
+                self.assertEqual(raised.exception.code, "startup_gate_missing")
+                self.assertFalse(any("pull" in call[0] for call in executor.calls))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs mkfifo")
+    def test_a_fifo_or_a_symlink_in_place_of_the_gate_file_is_refused_without_hanging(self):
+        gate = self.gate_root / "gates" / "sample" / "gate"
+        for label in ("fifo", "symlink"):
+            with self.subTest(case=label):
+                gate.unlink(missing_ok=True)
+                if label == "fifo":
+                    os.mkfifo(gate)
+                else:
+                    target = self.root / "elsewhere"
+                    target.write_text("open\n" + self.GATE_METADATA + "\n", encoding="utf-8")
+                    gate.symlink_to(target)
+                outcome = []
+
+                def attempt():
+                    try:
+                        pt._require_gate_state("sample")
+                        outcome.append("accepted")
+                    except pt.PrebuiltTargetError as error:
+                        outcome.append(error.code)
+
+                worker = threading.Thread(target=attempt, daemon=True)
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), "the gate check must never block on the file type")
+                self.assertEqual(outcome, ["startup_gate_missing"])
+
     def test_a_blocked_gate_rejects_before_pull_because_gated_containers_would_wait_after_the_old_ones_are_gone(self):
-        (self.gate_root / "gates" / "sample" / "gate").write_text("blocked\n", encoding="utf-8")
+        self.write_gate("blocked")
         executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
         with self.assertRaises(pt.PrebuiltTargetError) as raised:
             self.execute(executor=executor)

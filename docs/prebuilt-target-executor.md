@@ -108,8 +108,8 @@ The target's reviewed toolchain must provide this local rootful socket.
    require the exact reviewed services and images, and refuse build configuration. Write the resolved
    model to a target-owned `0600` file in the private generation directory. Reload it without the
    provider's runtime input, require the same Compose model, and remove the render-only override.
-2. Require the project's recovery gate state file (`/var/lib/webapp-recovery/gates/<project>/gate`, reading `open`;
-   this API never writes it), then `docker compose ... pull`.
+2. Require the project's recovery gate state file (`/var/lib/webapp-recovery/gates/<project>/gate`: a first line `open`, then one JSON line naming the project, as
+   `stack_recovery` writes and reads it; this API never writes it), then `docker compose ... pull`.
 3. Put every service that restarts automatically behind the recovery startup gate (see below): `docker image inspect` of each
    such service's pulled image supplies its entrypoint and command, the retained model is rewritten once with the gate
    entrypoint and the read-only gate mount, and the rewritten model must reload to exactly the same Compose model.

@@ -58,6 +58,7 @@ _GATE_STATE_ROOT = Path("/var/lib/webapp-recovery")
 _GATE_TARGET = "/run/webapp-recovery"
 _GATE_MARKER = "webapp-recovery-gate-v1"
 _GATE_SKIPPED_SERVICE = "db"  # recovery never gates the database container
+_GATE_STATE_MAX_BYTES = 4096  # the reader of stack_recovery refuses a larger state file
 _IMAGE_COMMAND_TEMPLATE = "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n"
 _RENDER_OVERRIDE = "override.yaml"
 _INSPECT_TEMPLATE = (
@@ -323,24 +324,38 @@ def _gate_state_file(project: str) -> Path:
 
 
 def _require_gate_state(project: str) -> None:
-    """The project's gate state file exists and reads `open` (recovery or the legacy overlay created it; this API never writes it).
+    """The project's gate state file exists and reads `open`; this API never writes it.
 
+    The format is stack_recovery's (`read_startup_gate` / `_write_startup_gate`): a first line that is the state (`open` or `blocked`),
+    then one JSON object naming the project. Read the same way: no symlink, a regular file, not group/other writable, at most 4096
+    bytes, state in {open, blocked}, metadata a dict whose `project` is this project; the gate directory must not be world-writable
+    (recovery refuses that too). The file is opened non-blocking so a FIFO placed there cannot hang a deploy. Owner checks stay with
+    the recovery tooling.
     A `blocked` gate means a recovery is unresolved: gated containers would wait while the old ones are already replaced."""
     path = _gate_state_file(project)
     try:
         _no_symlink_ancestors(path.parent)
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64:
+        directory = path.parent.lstat()
+        if not stat.S_ISDIR(directory.st_mode) or (os.name != "nt" and directory.st_mode & 0o002):
             raise ValueError()
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as stream:
-            state = stream.read(65).strip()
-    except BaseException:  # an absent directory, a symlink anywhere on the path or an unreadable file: one fixed code
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > _GATE_STATE_MAX_BYTES:
+                raise ValueError()
+            if os.name != "nt" and info.st_mode & 0o022:
+                raise ValueError()
+            raw = stream.read(_GATE_STATE_MAX_BYTES + 1)
+        if len(raw) > _GATE_STATE_MAX_BYTES:
+            raise ValueError()
+        state, metadata = raw.decode("utf-8", errors="strict").split("\n", 1)
+        data = json.loads(metadata)
+        if state not in ("open", "blocked") or type(data) is not dict or data.get("project") != project:
+            raise ValueError()
+    except BaseException:  # an absent directory, a symlink anywhere on the path, an unreadable or malformed file: one fixed code
         _fail("startup_gate_missing")
-    if state == b"blocked":
+    if state == "blocked":
         _fail("startup_gate_blocked")
-    if state != b"open":
-        _fail("startup_gate_missing")
 
 
 def _gate_script(argv: list[str]) -> str:
