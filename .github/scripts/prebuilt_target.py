@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -50,6 +51,14 @@ _ENV_KEYS = {"PATH", "HOME", "LANG", "LC_ALL", "DOCKER_CONFIG"}
 _DOCKER = ("docker", "--host", "unix:///var/run/docker.sock")
 _PROCESS_READER_GATE = threading.Lock()
 _DEPLOYED_COMPOSE = "compose.json"
+# Recovery startup gate (WM-INF-117). The contract is stack_recovery's: a service that restarts automatically starts only behind a
+# wrapper that waits for the host-wide project gate file to read "open", and the recovery tooling recognises it by the entrypoint
+# marker and the read-only gate mount. The gate part is fixed by this reviewed code, never taken from a compose control or the host.
+_GATE_STATE_ROOT = Path("/var/lib/webapp-recovery")
+_GATE_TARGET = "/run/webapp-recovery"
+_GATE_MARKER = "webapp-recovery-gate-v1"
+_GATE_SKIPPED_SERVICE = "db"  # recovery never gates the database container
+_IMAGE_COMMAND_TEMPLATE = "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n"
 _RENDER_OVERRIDE = "override.yaml"
 _INSPECT_TEMPLATE = (
     "{{json .Config.Image}}\n{{json .State.Status}}\n"
@@ -307,6 +316,97 @@ def _private_inputs(target: TargetSpec, app: Path, runtime: Path, docker_config:
         controls[path] = payload
     snapshots[docker_config / "config.json"] = _docker_profile(docker_config)
     return snapshots, controls
+
+
+def _gate_state_file(project: str) -> Path:
+    return _GATE_STATE_ROOT / "gates" / project / "gate"
+
+
+def _require_gate_state(project: str) -> None:
+    """The project's gate state file exists and reads `open` (recovery or the legacy overlay created it; this API never writes it).
+
+    A `blocked` gate means a recovery is unresolved: gated containers would wait while the old ones are already replaced."""
+    path = _gate_state_file(project)
+    try:
+        _no_symlink_ancestors(path.parent)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64:
+            raise ValueError()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            state = stream.read(65).strip()
+    except BaseException:  # an absent directory, a symlink anywhere on the path or an unreadable file: one fixed code
+        _fail("startup_gate_missing")
+    if state == b"blocked":
+        _fail("startup_gate_blocked")
+    if state != b"open":
+        _fail("startup_gate_missing")
+
+
+def _gate_script(argv: list[str]) -> str:
+    """The wrapper of stack_recovery.gated_compose_override, byte for byte (the `$` doubling is Compose's literal-dollar escape)."""
+    return ("set -eu\ntrap 'exit 143' TERM INT\nwhile :; do\n"
+            "  gate_state=blocked\n"
+            f"  IFS= read -r gate_state < {_GATE_TARGET}/gate || gate_state=blocked\n"
+            "  [ \"$gate_state\" = open ] && break\n  sleep 1\ndone\nexec " + shlex.join(argv)).replace("$", "$$")
+
+
+def _argv_list(value: object, *, rendered: bool = False) -> list[str]:
+    """A command as a list of plain strings. `rendered` values come from `compose config` output, which writes a literal `$` as `$$`:
+    they are un-escaped here because the gate script doubles every `$` once itself (an image's command is already raw)."""
+    if value is None:
+        return []
+    if type(value) is not list or any(type(item) is not str or not item or "\0" in item for item in value):
+        _fail("gate_command_unavailable")
+    return [item.replace("$$", "$") for item in value] if rendered else list(value)
+
+
+def _gated_configuration(config: dict, project: str, image_command) -> dict:
+    """Return the canonical configuration with every automatically restarting service behind the startup gate.
+
+    `image_command(image)` returns the (entrypoint, cmd) of an already pulled image. A service keeps the entrypoint and command it
+    would have run: the compose values when set (an entrypoint override clears the image command, as Docker does), else the
+    image's. Services without a restart policy, and the database service, are left exactly as rendered."""
+    services = config["services"]
+    result = {key: value for key, value in config.items() if key != "services"}
+    result["services"] = {}
+    for name, service in services.items():
+        policy = service.get("restart")
+        if policy is None:
+            # Compose also derives the container's restart policy from deploy.restart_policy.condition.
+            deploy = service.get("deploy")
+            restart_policy = deploy.get("restart_policy") if type(deploy) is dict else None
+            condition = restart_policy.get("condition") if type(restart_policy) is dict else None
+            policy = None if condition in (None, "none") else condition
+        if name == _GATE_SKIPPED_SERVICE or policy in (None, "no"):
+            result["services"][name] = service
+            continue
+        image = service.get("image")
+        if type(image) is not str:
+            _fail("gate_command_unavailable")
+        entrypoint = _argv_list(service.get("entrypoint"), rendered=True) if service.get("entrypoint") is not None else None
+        command = _argv_list(service.get("command"), rendered=True) if service.get("command") is not None else None
+        if entrypoint is None:
+            image_entrypoint, image_cmd = image_command(image)
+            entrypoint = image_entrypoint
+            if command is None:
+                command = image_cmd
+        elif command is None:
+            command = []
+        argv = [*entrypoint, *command]
+        if not argv:
+            _fail("gate_command_unavailable")
+        gated = dict(service)
+        gated["entrypoint"] = ["/bin/sh", "-c", _gate_script(argv), _GATE_MARKER]
+        gated["command"] = []
+        volumes = service.get("volumes")
+        if volumes is not None and type(volumes) is not list:
+            _fail("gate_command_unavailable")
+        gated["volumes"] = [*(volumes or []), {
+            "type": "bind", "source": str(_GATE_STATE_ROOT / "gates" / project), "target": _GATE_TARGET,
+            "read_only": True, "bind": {"create_host_path": False}}]
+        result["services"][name] = gated
+    return result
 
 
 def _validate_compose_control(raw: bytes):
@@ -815,7 +915,37 @@ def execute_image_deployment(
             finally:
                 os.close(output_fd)
 
+        _require_gate_state(target.project_name)
         run(command_prefix + ("pull",))
+
+        def image_command(reference: str) -> tuple[list[str], list[str]]:
+            raw_command = run(_DOCKER + ("image", "inspect", "--format", _IMAGE_COMMAND_TEMPLATE, reference), capture=True)
+            command_text = raw_command.decode("utf-8", errors="strict")
+            # The template ends in its own newline and Docker Engine 29 appends one more (measured on the staging host, 2026-11-15,
+            # as for the container inspect below): exactly one extra newline is accepted.
+            if command_text.endswith("\n\n"):
+                command_text = command_text[:-1]
+            lines = command_text.splitlines()
+            if len(lines) != 2:
+                _fail("gate_command_unavailable")
+            return (_argv_list(_safe_json((lines[0] + "\n").encode("utf-8"))),
+                    _argv_list(_safe_json((lines[1] + "\n").encode("utf-8"))))
+
+        gated_config = _gated_configuration(config, target.project_name, image_command)
+        if gated_config != config:
+            replacement = output_dir / (_DEPLOYED_COMPOSE + ".gated")
+            _write_private_file(replacement, json.dumps(gated_config, separators=(",", ":")).encode("utf-8"))
+            os.replace(replacement, deployed_config)
+            if configuration_lock is not None:
+                output_fd = os.open(output_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(output_fd)
+                finally:
+                    os.close(output_fd)
+            snapshots[deployed_config] = _identity(deployed_config, kind="file", required_mode=0o600)
+            reloaded = run(command_prefix + ("config", "--format", "json"), capture=True)
+            if _safe_json(reloaded) != gated_config:
+                _fail("compose_configuration_not_reusable")
         # A failed or interrupted up can already have created some containers.
         # Keep both generations until a later complete deployment replaces them.
         activation_attempted = True

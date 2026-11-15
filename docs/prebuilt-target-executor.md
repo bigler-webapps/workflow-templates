@@ -108,14 +108,18 @@ The target's reviewed toolchain must provide this local rootful socket.
    require the exact reviewed services and images, and refuse build configuration. Write the resolved
    model to a target-owned `0600` file in the private generation directory. Reload it without the
    provider's runtime input, require the same Compose model, and remove the render-only override.
-2. `docker compose ... pull`.
-3. `docker compose ... up --detach --no-build --pull never --force-recreate --remove-orphans`.
-4. Optionally, `docker compose ... exec -T <service> python manage.py migrate --noinput`.
-5. `docker compose ... ps --all --format json`, followed by fixed narrow
+2. Require the project's recovery gate state file (`/var/lib/webapp-recovery/gates/<project>/gate`, reading `open`;
+   this API never writes it), then `docker compose ... pull`.
+3. Put every service that restarts automatically behind the recovery startup gate (see below): `docker image inspect` of each
+   such service's pulled image supplies its entrypoint and command, the retained model is rewritten once with the gate
+   entrypoint and the read-only gate mount, and the rewritten model must reload to exactly the same Compose model.
+4. `docker compose ... up --detach --no-build --pull never --force-recreate --remove-orphans`.
+5. Optionally, `docker compose ... exec -T <service> python manage.py migrate --noinput`.
+6. `docker compose ... ps --all --format json`, followed by fixed narrow
    `docker inspect` templates for image, state, restart flag, health, project
    and service labels, plus the Compose project working directory and config-file labels.
    The latter must identify the application directory and the retained model used for activation.
-6. Compare those IDs with the Engine's complete project-label inventory before
+7. Compare those IDs with the Engine's complete project-label inventory before
    removing older configurations.
 
 Rendered application images and post-up observed container images must both
@@ -154,6 +158,25 @@ it even after the provider rotates its input. The executor never builds,
 logs in, accepts a caller-selected Docker endpoint, joins a
 network, uses SSH/sudo, installs tools, checks out source, executes artifact
 code, rolls back, prunes old images or retires app files.
+
+## Recovery startup gate (WM-INF-117)
+
+The staging refresh and the recovery tooling (`stack_recovery`, ops-scripts) refuse an application whose automatically
+restarting services are not startup-gated. A service is gated when its entrypoint ends in `webapp-recovery-gate-v1` and
+`/var/lib/webapp-recovery/gates/<project>` is mounted read-only at `/run/webapp-recovery`. The legacy deploy gets that from the
+overlay `stack_recovery.gated_compose_override` writes; this SDK renders the same contract itself, from reviewed code only:
+the wrapper script, marker, mount and the services it applies to (every service with a restart policy other than `no`, except
+the `db` service, which recovery never gates) are fixed here and are never read from a compose control, the application
+repository or the host. The wrapper waits until the gate file reads `open` (the default state) and then `exec`s the command the
+service would have run: the compose `entrypoint`/`command` when set (an entrypoint override clears the image command, as
+Docker does), otherwise the image's entrypoint and command. A restart policy is `restart`, or `deploy.restart_policy.condition`
+when `restart` is absent. A missing or malformed gate file rejects with `startup_gate_missing`, and a `blocked` gate (an unresolved
+recovery) with `startup_gate_blocked`, both before `pull`; an image or service without a runnable command rejects with `gate_command_unavailable`;
+neither activates anything. The gate directory itself is created by `stack_recovery` (the legacy overlay or the first recovery
+transaction writes the initial `open` state); a project whose first ever deploy is a prebuilt one needs that state placed by the
+operator-run provider apply first, because this API never writes under the recovery state root. The refusal on the recovery side
+is unchanged: there is no exemption for prebuilt targets.
+`webapp-management` pins this file and tests that its gate equals `stack_recovery`'s byte for byte.
 
 ## Evidence and remaining integration
 

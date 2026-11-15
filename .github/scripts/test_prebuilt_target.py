@@ -57,6 +57,9 @@ class FakeExecutor:
         self.inspected = []
         self.extra_project_ids = extra_project_ids
         self.inspect_suffix = b""
+        self.image_commands = {}
+        self.image_inspected = []
+        self.image_suffix = b""
 
     def run(self, argv, *, cwd, env, timeout, capture=False):
         self.calls.append((argv, cwd, dict(env), timeout, capture))
@@ -89,6 +92,10 @@ class FakeExecutor:
             else:
                 data = json.dumps(rows, separators=(",", ":")).encode()
             return pt._CommandResult(0, data)
+        if "image" in argv and "inspect" in argv:
+            self.image_inspected.append(argv[-1])
+            entrypoint, cmd = self.image_commands.get(argv[-1], (["docker-entrypoint.sh"], ["serve", "--port=8000"]))
+            return pt._CommandResult(0, (json.dumps(entrypoint) + "\n" + json.dumps(cmd) + "\n").encode() + self.image_suffix)
         if "inspect" in argv:
             self.inspected.append(argv[-1])
             service = "web" if argv[-1] == "a" * 64 else "worker" if argv[-1] == "c" * 64 else "db"
@@ -140,6 +147,10 @@ class TargetFixture(unittest.TestCase):
         self.raw = rm.produce_image_manifest(
             IDENTITY, expected_namespace=NAMESPACE, pushed_tag=TAG, resolve_pushed_image=registry_read,
         )
+        self.gate_root = self.root / "recovery-state"
+        (self.gate_root / "gates" / "sample").mkdir(parents=True)
+        (self.gate_root / "gates" / "sample" / "gate").write_text("open\n", encoding="utf-8")
+        patch.object(pt, "_GATE_STATE_ROOT", self.gate_root).start()
         self.resolver_calls = []
 
         def resolver(namespace, tag):
@@ -861,6 +872,170 @@ class PrebuiltTargetTests(TargetFixture):
             with self.assertRaises(pt.PrebuiltTargetError):
                 self.execute(executor=executor)
             self.assert_retained_configuration(executor)
+
+
+class StartupGateTests(TargetFixture):
+    """WM-INF-117: every automatically restarting service of a prebuilt target runs behind the recovery startup gate."""
+
+    RESTARTING = {
+        "services": {
+            "web": {"image": IMAGE, "restart": "unless-stopped", "environment": {"A": "1"},
+                    "volumes": [{"type": "volume", "source": "media", "target": "/media", "volume": {}}]},
+            "worker": {"image": IMAGE, "restart": "no"},
+            "db": {"image": SIDECAR, "restart": "unless-stopped"},
+        },
+    }
+
+    def deployed(self, executor):
+        return json.loads(executor.activated.read_bytes())
+
+    def test_a_restarting_service_gets_the_gate_entrypoint_the_read_only_mount_and_keeps_its_original_command(self):
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        executor.image_commands[IMAGE] = (["docker-entrypoint.sh"], ["serve", "--port=8000", "--home=$HOME"])
+        self.execute(executor=executor)
+        web = self.deployed(executor)["services"]["web"]
+        self.assertEqual(web["entrypoint"][:2], ["/bin/sh", "-c"])
+        self.assertEqual(web["entrypoint"][3], "webapp-recovery-gate-v1")
+        self.assertEqual(web["command"], [])
+        script = web["entrypoint"][2]
+        self.assertIn("IFS= read -r gate_state < /run/webapp-recovery/gate || gate_state=blocked", script)
+        self.assertIn('[ "$$gate_state" = open ] && break', script)
+        self.assertTrue(script.endswith("exec docker-entrypoint.sh serve --port=8000 '--home=$$HOME'"))
+        self.assertEqual(web["volumes"][0], {"type": "volume", "source": "media", "target": "/media", "volume": {}})
+        self.assertEqual(web["volumes"][1], {
+            "type": "bind", "source": str(self.gate_root / "gates" / "sample"), "target": "/run/webapp-recovery",
+            "read_only": True, "bind": {"create_host_path": False}})
+        self.assertEqual(web["environment"], {"A": "1"})
+        self.assertEqual(web["restart"], "unless-stopped")
+
+    def test_services_without_a_restart_policy_and_the_database_stay_as_rendered(self):
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        self.execute(executor=executor)
+        deployed = self.deployed(executor)["services"]
+        self.assertEqual(deployed["worker"], self.RESTARTING["services"]["worker"])
+        self.assertEqual(deployed["db"], self.RESTARTING["services"]["db"])
+        self.assertEqual(executor.image_inspected, [IMAGE])  # only the gated service's image is inspected
+
+    def test_an_entrypoint_override_in_the_configuration_clears_the_image_command_and_is_kept(self):
+        config = {"services": {"web": {"image": IMAGE, "restart": "always", "entrypoint": ["/app/run"]},
+                               "worker": {"image": IMAGE, "restart": "always", "command": ["work", "--n=2"]},
+                               "db": {"image": SIDECAR}}}
+        executor = FakeExecutor(config=config)
+        executor.image_commands[IMAGE] = (["image-entry"], ["image-cmd"])
+        self.execute(executor=executor)
+        deployed = self.deployed(executor)["services"]
+        self.assertTrue(deployed["web"]["entrypoint"][2].endswith("exec /app/run"))
+        self.assertTrue(deployed["worker"]["entrypoint"][2].endswith("exec image-entry work --n=2"))
+
+    def test_compose_rendered_dollar_escapes_are_undone_so_the_service_gets_the_argv_docker_would_run(self):
+        # `compose config` writes a literal `$` as `$$`; the gate doubles once, so the installed command still has one `$$`
+        # in the model (= one literal `$` for Docker), never `$$$$`.
+        config = {"services": {"web": {"image": IMAGE, "restart": "always", "entrypoint": ["sh", "-c", "echo $$HOME"]},
+                               "worker": {"image": IMAGE}, "db": {"image": SIDECAR}}}
+        executor = FakeExecutor(config=config)
+        self.execute(executor=executor)
+        script = self.deployed(executor)["services"]["web"]["entrypoint"][2]
+        self.assertTrue(script.endswith("exec sh -c 'echo $$HOME'"))
+        self.assertNotIn("$$$$", script)
+
+    def test_docker_engines_extra_trailing_newline_after_the_image_command_template_is_accepted_exactly_once(self):
+        # Measured on the staging host: `docker image inspect --format` of a two-line template ends in "\n\n".
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        executor.image_suffix = b"\n"
+        self.execute(executor=executor)
+        self.assertEqual(self.deployed(executor)["services"]["web"]["entrypoint"][3], "webapp-recovery-gate-v1")
+        for suffix in (b"\n\n", b"x\n"):
+            with self.subTest(suffix=suffix):
+                strict = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+                strict.image_suffix = suffix
+                with self.assertRaises(pt.PrebuiltTargetError) as raised:
+                    self.execute(executor=strict)
+                self.assertEqual(raised.exception.code, "gate_command_unavailable")
+
+    def test_a_gate_directory_that_does_not_exist_is_startup_gate_missing(self):
+        import shutil
+        shutil.rmtree(self.gate_root / "gates")
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        with self.assertRaises(pt.PrebuiltTargetError) as raised:
+            self.execute(executor=executor)
+        self.assertEqual(raised.exception.code, "startup_gate_missing")
+        self.assertFalse(any("pull" in call[0] for call in executor.calls))
+
+    def test_the_gate_script_is_the_one_stack_recovery_generates(self):
+        argv = ["a b", "c'd", "$X", "plain"]
+        import shlex
+        expected = ("set -eu\ntrap 'exit 143' TERM INT\nwhile :; do\n  gate_state=blocked\n"
+                    "  IFS= read -r gate_state < /run/webapp-recovery/gate || gate_state=blocked\n"
+                    "  [ \"$gate_state\" = open ] && break\n  sleep 1\ndone\nexec " + shlex.join(argv)).replace("$", "$$")
+        self.assertEqual(pt._gate_script(argv), expected)
+
+    def test_a_missing_or_malformed_gate_state_rejects_before_pull_and_any_activation(self):
+        for content in (None, "garbage\n", "open\n" + "x" * 100):
+            with self.subTest(content=content):
+                gate = self.gate_root / "gates" / "sample" / "gate"
+                gate.unlink(missing_ok=True)
+                if content is not None:
+                    gate.write_text(content, encoding="utf-8")
+                executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+                with self.assertRaises(pt.PrebuiltTargetError) as raised:
+                    self.execute(executor=executor)
+                self.assertEqual(raised.exception.code, "startup_gate_missing")
+                commands = [call[0] for call in executor.calls]
+                self.assertFalse(any("pull" in command or "up" in command for command in commands))
+                self.assert_private_temp_empty()
+
+    def test_a_blocked_gate_rejects_before_pull_because_gated_containers_would_wait_after_the_old_ones_are_gone(self):
+        (self.gate_root / "gates" / "sample" / "gate").write_text("blocked\n", encoding="utf-8")
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        with self.assertRaises(pt.PrebuiltTargetError) as raised:
+            self.execute(executor=executor)
+        self.assertEqual(raised.exception.code, "startup_gate_blocked")
+        self.assertFalse(any("pull" in call[0] or "up" in call[0] for call in executor.calls))
+
+    def test_a_deploy_restart_policy_without_a_restart_key_is_gated_too(self):
+        config = {"services": {
+            "web": {"image": IMAGE, "deploy": {"restart_policy": {"condition": "any"}}},
+            "worker": {"image": IMAGE, "deploy": {"restart_policy": {"condition": "none"}}},
+            "db": {"image": SIDECAR}}}
+        executor = FakeExecutor(config=config)
+        self.execute(executor=executor)
+        deployed = self.deployed(executor)["services"]
+        self.assertEqual(deployed["web"]["entrypoint"][3], "webapp-recovery-gate-v1")
+        self.assertNotIn("entrypoint", deployed["worker"])
+
+    def test_an_image_without_a_command_fails_closed_before_up(self):
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        executor.image_commands[IMAGE] = ([], [])
+        with self.assertRaises(pt.PrebuiltTargetError) as raised:
+            self.execute(executor=executor)
+        self.assertEqual(raised.exception.code, "gate_command_unavailable")
+        self.assertFalse(any("up" in call[0] for call in executor.calls))
+
+    def test_the_retained_labelled_configuration_is_the_gated_one_and_nothing_else_remains(self):
+        executor = FakeExecutor(config=json.loads(json.dumps(self.RESTARTING)))
+        self.execute(executor=executor)
+        configuration = executor.activated
+        self.assertEqual(list(configuration.parent.iterdir()), [configuration])
+        self.assertEqual(configuration.parent.parent, self.tmp)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(configuration.stat().st_mode), 0o600)
+        self.assertEqual(self.deployed(executor)["services"]["web"]["entrypoint"][3], "webapp-recovery-gate-v1")
+
+    def test_a_gated_configuration_that_does_not_reload_identically_is_refused_before_up(self):
+        class Drifting(FakeExecutor):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if "config --format json" in " ".join(argv) and "--env-file" not in argv and self.image_inspected:
+                    data = json.loads(result.stdout)
+                    data["services"]["web"]["environment"] = {"DRIFT": "1"}
+                    return pt._CommandResult(0, json.dumps(data).encode())
+                return result
+
+        executor = Drifting(config=json.loads(json.dumps(self.RESTARTING)))
+        with self.assertRaises(pt.PrebuiltTargetError) as raised:
+            self.execute(executor=executor)
+        self.assertEqual(raised.exception.code, "compose_configuration_not_reusable")
+        self.assertFalse(any("up" in call[0] for call in executor.calls))
 
 
 class SubprocessAdapterTests(unittest.TestCase):
