@@ -58,6 +58,11 @@ _GATE_STATE_ROOT = Path("/var/lib/webapp-recovery")
 _GATE_TARGET = "/run/webapp-recovery"
 _GATE_MARKER = "webapp-recovery-gate-v1"
 _GATE_SKIPPED_SERVICE = "db"  # recovery never gates the database container
+_ONE_SHOT_NAME_MAX = 30  # "one_shot_running_" plus the name stays within the 48-character receipt code shape
+# A service with a healthcheck is still `starting` right after `up` (a java engine takes up to its start_period). The deployment waits for
+# it, bounded, instead of failing on a state every healthy start passes through; `unhealthy` and every other state fail at once.
+HEALTH_WAIT_SECONDS = 180.0
+HEALTH_POLL_SECONDS = 3.0
 _GATE_STATE_MAX_BYTES = 4096  # the reader of stack_recovery refuses a larger state file
 _IMAGE_COMMAND_TEMPLATE = "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n"
 _RENDER_OVERRIDE = "override.yaml"
@@ -107,6 +112,13 @@ class TargetSpec:
     docker_config_dir: str
     temporary_parent: str
     migrate_service: str | None = None
+    # WM-INF-122: further released images and one-shot helpers, both optional (a single-image target is unchanged).
+    # ``additional_image_services`` are (service, manifest key, image namespace) triples: the service receives
+    # ``output.additional_images[key]`` and the namespace is the trusted one the manifest digest must belong to.
+    # ``one_shot_services`` are services of the reviewed controls that run once and exit (restart "no"); they pass when they
+    # have exited with code 0 and fail the deployment by name otherwise. Every other service must keep running.
+    additional_image_services: tuple[tuple[str, str, str], ...] = ()
+    one_shot_services: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -224,15 +236,45 @@ def _validate_target(target: object, expected: object) -> tuple[Path, Path, Path
         _fail("service_conflict")
     if not target.image_services and not sidecars:
         _fail("service_shape_empty")
-    if len(target.image_services) + len(sidecars) > MAX_SERVICES:
+    additional = target.additional_image_services
+    if type(additional) is not tuple or len(additional) > release_manifest.MAX_ADDITIONAL_IMAGES:
+        _fail("additional_services_invalid")
+    additional_names: list[str] = []
+    for item in additional:
+        if type(item) is not tuple or len(item) != 3:
+            _fail("additional_services_invalid")
+        service, key, namespace = item
+        if (not _plain_text(service, _SERVICE) or not _plain_text(key, release_manifest._ADDITIONAL_KEY)
+                or not _plain_text(namespace, release_manifest._IMAGE_NAMESPACE) or len(namespace) > 256):
+            _fail("additional_services_invalid")
+        additional_names.append(service)
+    try:
+        release_manifest.checked_additional_namespaces({item[1]: item[2] for item in additional})
+    except release_manifest.ManifestError:
+        _fail("additional_services_invalid")
+    if (len({item[1] for item in additional}) != len(additional) or len(set(additional_names)) != len(additional_names)
+            or set(additional_names) & (set(target.image_services) | set(sidecar_names))):
+        _fail("service_conflict")
+    if len(target.image_services) + len(additional_names) + len(sidecars) > MAX_SERVICES:
         _fail("service_count_invalid")
     if target.migrate_service is not None and (
         type(target.migrate_service) is not str or target.migrate_service not in target.image_services
     ):
         _fail("migrate_service_invalid")
-    expected_services = tuple(sorted((*target.image_services, *sidecar_names)))
+    expected_services = tuple(sorted((*target.image_services, *additional_names, *sidecar_names)))
     if not expected_services:
         _fail("service_shape_empty")
+    one_shot = target.one_shot_services
+    if type(one_shot) is not tuple or len(one_shot) > MAX_SERVICES:
+        _fail("one_shot_services_invalid")
+    for name in one_shot:
+        # The failure code names the service, so the name must fit the fixed code vocabulary of the entry receipt.
+        if not _plain_text(name, _SERVICE) or len(name) > _ONE_SHOT_NAME_MAX or name not in expected_services:
+            _fail("one_shot_services_invalid")
+        if name == target.migrate_service or name == _GATE_SKIPPED_SERVICE:
+            _fail("one_shot_services_invalid")
+    if len(set(one_shot)) != len(one_shot):
+        _fail("one_shot_services_invalid")
     return app, runtime, docker_config, temp_parent, tuple(sorted(sidecars))
 
 
@@ -647,7 +689,73 @@ class _SubprocessExecutor:
                 reader.join(timeout=.05)
 
 
-def _decode_ps(raw: bytes, services: set[str], project: str) -> dict[str, tuple[str, str, str]]:
+def _one_shot_code(kind: str, service: str) -> str:
+    """The deployment failure that names a one-shot service (fixed vocabulary plus a name of the reviewed target)."""
+    return f"one_shot_{kind}_" + service.replace("-", "_")
+
+
+def _one_shot_state_code(service: str, state: object, exit_code: object) -> str | None:
+    """None when the one-shot container has exited with code 0; else the code of its failure."""
+    if state == "exited" and type(exit_code) is int and exit_code == 0:
+        return None
+    if state in ("running", "restarting", "created", "paused"):
+        return _one_shot_code("running", service)
+    return _one_shot_code("failed", service)
+
+
+def _named_one_shot_failure(raw: bytes, services: set[str], project: str, one_shot: frozenset[str]) -> str | None:
+    """Best effort after a failed `up`: the code of a declared one-shot service that failed, else None."""
+    try:
+        for row in _ps_rows(raw):
+            service = row.get("Service")
+            if type(service) is str and service in one_shot and row.get("Project") == project and service in services:
+                code = _one_shot_state_code(service, row.get("State"), row.get("ExitCode"))
+                if code is not None and row.get("State") == "exited":
+                    return code
+    except BaseException:
+        return None
+    return None
+
+
+def _decode_ps(raw: bytes, services: set[str], project: str,
+               one_shot: frozenset[str] = frozenset()) -> dict[str, tuple[str, str, str]]:
+    rows = _ps_rows(raw)
+    seen: dict[str, tuple[str, str, str]] = {}
+    health_pending = False
+    # Compose adds fields between versions (Image, Labels, Networks, Status, ...). Only the keys read below are trusted and
+    # validated; every other key is ignored, never interpreted or echoed. Duplicate keys were rejected by _safe_json.
+    for row in rows:
+        if type(row) is not dict:
+            _fail("compose_ps_invalid")
+        cid, service, state, health = (row.get("ID"), row.get("Service"), row.get("State"), row.get("Health"))
+        if (type(cid) is not str or not _CONTAINER_ID.fullmatch(cid) or type(service) is not str
+                or service not in services or row.get("Project") != project):
+            _fail("compose_ps_identity_invalid")
+        if service in one_shot:
+            code = _one_shot_state_code(service, state, row.get("ExitCode"))
+            if code is not None:
+                _fail(code)
+        elif (state != "running" or health not in ("", None, "healthy", "starting")
+                or ("ExitCode" in row and (type(row["ExitCode"]) is not int or row["ExitCode"] != 0))):
+            _fail("compose_ps_state_invalid")
+        elif health == "starting":
+            # Not a failure yet: reported only when every other row is sound, so that a real failure wins over the wait.
+            health_pending = True
+        if service in seen or cid in {value[0] for value in seen.values()}:
+            _fail("compose_ps_duplicate_service")
+        seen[service] = (cid, state, health or "")
+    if set(seen) != services:
+        _fail("compose_ps_coverage_invalid")
+    if health_pending:
+        _fail("compose_ps_health_pending")
+    return seen
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _ps_rows(raw: bytes) -> list:
     if type(raw) is not bytes or len(raw) > MAX_METADATA_BYTES:
         _fail("compose_ps_invalid")
     try:
@@ -671,25 +779,7 @@ def _decode_ps(raw: bytes, services: set[str], project: str) -> dict[str, tuple[
             rows.append(row)
     if type(rows) is not list or not 1 <= len(rows) <= MAX_SERVICES:
         _fail("compose_ps_invalid")
-    seen: dict[str, tuple[str, str, str]] = {}
-    # Compose adds fields between versions (Image, Labels, Networks, Status, ...). Only the keys read below are trusted and
-    # validated; every other key is ignored, never interpreted or echoed. Duplicate keys were rejected by _safe_json.
-    for row in rows:
-        if type(row) is not dict:
-            _fail("compose_ps_invalid")
-        cid, service, state, health = (row.get("ID"), row.get("Service"), row.get("State"), row.get("Health"))
-        if (type(cid) is not str or not _CONTAINER_ID.fullmatch(cid) or type(service) is not str
-                or service not in services or row.get("Project") != project):
-            _fail("compose_ps_identity_invalid")
-        if (state != "running" or health not in ("", None, "healthy")
-                or ("ExitCode" in row and (type(row["ExitCode"]) is not int or row["ExitCode"] != 0))):
-            _fail("compose_ps_state_invalid")
-        if service in seen or cid in {value[0] for value in seen.values()}:
-            _fail("compose_ps_duplicate_service")
-        seen[service] = (cid, state, health or "")
-    if set(seen) != services:
-        _fail("compose_ps_coverage_invalid")
-    return seen
+    return rows
 
 
 def _finite_number(value):
@@ -799,9 +889,14 @@ def execute_image_deployment(
         if not _finite_number(deadline) or deadline <= start:
             _fail("deadline_invalid")
         whole_deadline = min(float(deadline), float(start) + MAX_DEPLOY_SECONDS)
+    # The further images of the release are named by this trusted target only (a manifest cannot add or drop one).
+    additional_namespaces = {key: namespace for _, key, namespace in target.additional_image_services}
+    if expected_image_namespace in additional_namespaces.values():
+        _fail("additional_services_invalid")
     try:
         preflight = release_manifest.validate_manifest_structure(raw_manifest,
-            expected=expected_identity, expected_image_namespace=expected_image_namespace)
+            expected=expected_identity, expected_image_namespace=expected_image_namespace,
+            expected_additional_namespaces=additional_namespaces)
         if preflight["kind"] != "image":
             _fail("image_manifest_required")
     except release_manifest.ManifestError:
@@ -824,6 +919,7 @@ def execute_image_deployment(
             raw_manifest, expected=expected_identity,
             expected_image_namespace=expected_image_namespace,
             resolve_pushed_image=bounded_resolver,
+            expected_additional_namespaces=additional_namespaces,
         )
     except release_manifest.ManifestError:
         _fail("manifest_invalid")
@@ -841,6 +937,11 @@ def execute_image_deployment(
     if manifest.get("kind") != "image":
         _fail("image_manifest_required")
     image = manifest["output"]["image"]
+    # service -> immutable image of this release, for every service that runs a released image
+    released = {service: image for service in target.image_services}
+    for service, key, _ in target.additional_image_services:
+        released[service] = manifest["output"]["additional_images"][key]
+    one_shot = frozenset(target.one_shot_services)
     if expected_identity.ref != _ENVIRONMENTS[target.environment]:
         _fail("environment_ref_mismatch")
     output_dir: Path | None = None
@@ -860,9 +961,9 @@ def execute_image_deployment(
         override = output_dir / _RENDER_OVERRIDE
         # !reset removes a base build mapping; plain null would inherit it.
         override_data = ("services:\n" + "".join(
-            f"  {service}:\n    image: {json.dumps(image)}\n    build: !reset null\n"
+            f"  {service}:\n    image: {json.dumps(released[service])}\n    build: !reset null\n"
             f"    env_file: [{json.dumps(str(runtime))}]\n"
-            for service in target.image_services)).encode("ascii")
+            for service in (*target.image_services, *(item[0] for item in target.additional_image_services)))).encode("ascii")
         _write_private_file(override, override_data)
         override_identity = _identity(override, kind="file")
         snapshots[output_dir] = output_identity
@@ -888,19 +989,26 @@ def execute_image_deployment(
         if type(config) is not dict or type(config.get("services")) is not dict:
             _fail("compose_config_invalid")
         service_config = config["services"]
-        expected_services = set(target.image_services) | {name for name, _ in sidecars}
+        expected_services = set(released) | {name for name, _ in sidecars}
         if set(service_config) != expected_services:
             _fail("compose_services_mismatch")
-        sidecar_map = dict(sidecars)
+        wanted_images = {**dict(sidecars), **released}
         health_required = set()
         for service, rendered in service_config.items():
             if type(rendered) is not dict or "build" in rendered:
                 _fail("compose_build_rejected")
             if "env_file" in rendered:
                 _fail("compose_configuration_not_reusable")
-            wanted = image if service in target.image_services else sidecar_map[service]
+            wanted = wanted_images[service]
             if rendered.get("image") != wanted:
                 _fail("compose_image_mismatch")
+            if service in one_shot:
+                # A one-shot helper must not restart by itself: it runs once, exits, and is judged by its exit code.
+                deploy = rendered.get("deploy")
+                restart_policy = deploy.get("restart_policy") if type(deploy) is dict else None
+                condition = restart_policy.get("condition") if type(restart_policy) is dict else None
+                if rendered.get("restart") not in (None, "no") or condition not in (None, "none"):
+                    _fail("one_shot_restart_invalid")
             healthcheck = rendered.get("healthcheck")
             if healthcheck is not None:
                 if (type(healthcheck) is not dict or ("disable" in healthcheck
@@ -964,14 +1072,37 @@ def execute_image_deployment(
         # A failed or interrupted up can already have created some containers.
         # Keep both generations until a later complete deployment replaces them.
         activation_attempted = True
-        run(command_prefix + ("up", "--detach", "--no-build", "--pull", "never",
-                              "--force-recreate", "--remove-orphans"))
+        try:
+            run(command_prefix + ("up", "--detach", "--no-build", "--pull", "never",
+                                  "--force-recreate", "--remove-orphans"))
+        except PrebuiltTargetError as exc:
+            # A helper that exits non-zero makes `up` fail on its dependants: name it instead of the bare command failure.
+            if one_shot and exc.code == "command_failed":
+                try:
+                    named = _named_one_shot_failure(
+                        run(command_prefix + ("ps", "--all", "--format", "json", "--no-trunc"), capture=True),
+                        expected_services, target.project_name, one_shot)
+                except BaseException:
+                    named = None
+                if named is not None:
+                    _fail(named)
+            raise
         migrated = target.migrate_service is not None
         if migrated:
             run(command_prefix + ("exec", "-T", target.migrate_service, "python", "manage.py",
                                   "migrate", "--noinput"))
-        ps_raw = run(command_prefix + ("ps", "--all", "--format", "json", "--no-trunc"), capture=True)
-        observed = _decode_ps(ps_raw, expected_services, target.project_name)
+        health_started = _now(clock)
+        while True:
+            ps_raw = run(command_prefix + ("ps", "--all", "--format", "json", "--no-trunc"), capture=True)
+            try:
+                observed = _decode_ps(ps_raw, expected_services, target.project_name, one_shot)
+                break
+            except PrebuiltTargetError as exc:
+                if exc.code != "compose_ps_health_pending":
+                    raise
+                if _now(clock) + HEALTH_POLL_SECONDS >= min(whole_deadline, health_started + HEALTH_WAIT_SECONDS):
+                    _fail("health_wait_timeout")
+            _pause(HEALTH_POLL_SECONDS)
         for service in sorted(expected_services):
             cid, _, _ = observed[service]
             inspect_raw = _run(
@@ -993,11 +1124,16 @@ def execute_image_deployment(
             values = [_safe_json((field + "\n").encode("utf-8")) for field in fields]
             (actual_image, state, restarting, health, actual_project, actual_service,
              working_directory, configuration_files) = values
-            wanted = image if service in target.image_services else sidecar_map[service]
+            wanted = wanted_images[service]
             if actual_image != wanted or actual_project != target.project_name or actual_service != service:
                 _fail("container_identity_mismatch")
             if working_directory != str(app) or configuration_files != str(deployed_config):
                 _fail("container_configuration_mismatch")
+            if service in one_shot:
+                # Already judged by its exit code in _decode_ps; here it must still be stopped and not restarting.
+                if state != "exited" or restarting is not False:
+                    _fail(_one_shot_code("running", service))
+                continue
             if (state != "running" or restarting is not False or health not in (None, "healthy")
                     or (service in health_required and health != "healthy")):
                 _fail("container_unhealthy")

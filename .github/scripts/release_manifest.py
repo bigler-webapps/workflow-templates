@@ -28,6 +28,9 @@ _IMAGE_NAMESPACE = re.compile(r"ghcr\.io/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?/[a-z0-9
 _WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9][A-Za-z0-9._-]*\.yml\Z")
 _TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z")
 _SAFE_ARTIFACT = re.compile(r"release-static-[1-9][0-9]*-[1-9][0-9]*\Z")
+# A release may carry further images next to the primary one (WM-INF-122): each is named by a key of the trusted policy.
+_ADDITIONAL_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+MAX_ADDITIONAL_IMAGES = 8
 _TOP_KEYS = {
     "version", "kind", "source_repository", "source_sha", "source_ref",
     "source_workflow", "run_id", "run_attempt", "output",
@@ -152,20 +155,46 @@ def _resolved_image(identity, expected_namespace, pushed_tag, resolve_pushed_ima
     return image
 
 
+def checked_additional_namespaces(value: object, *, primary: str | None = None) -> dict[str, str]:
+    """Trusted `key -> namespace` map of the further images a release carries; empty or None means a single-image release."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or len(value) > MAX_ADDITIONAL_IMAGES:
+        _fail("invalid_additional_images")
+    result: dict[str, str] = {}
+    for key, namespace in value.items():
+        if (not isinstance(key, str) or not _ADDITIONAL_KEY.fullmatch(key)
+                or not isinstance(namespace, str) or not _IMAGE_NAMESPACE.fullmatch(namespace)):
+            _fail("invalid_additional_images")
+        result[key] = namespace
+    namespaces = list(result.values())
+    if len(set(namespaces)) != len(namespaces) or (primary is not None and primary in namespaces):
+        _fail("invalid_additional_images")
+    return result
+
+
 def produce_image_manifest(
     identity: ReleaseIdentity,
     *,
     expected_namespace: str,
     pushed_tag: str,
     resolve_pushed_image: Callable[[str, str], Mapping[str, object]],
+    additional_namespaces: Mapping[str, str] | None = None,
 ) -> bytes:
     """Resolve the just-pushed tag via an injected read client, then emit digest.
 
     The resolver must return repository, tag, and digest from registry metadata;
-    a caller-supplied digest string is not accepted as an alternative.
+    a caller-supplied digest string is not accepted as an alternative. Further images of the same release
+    (`additional_namespaces`, key -> namespace) are pushed under the same tag and resolved the same way.
     """
+    extra = checked_additional_namespaces(additional_namespaces, primary=expected_namespace)
     image = _resolved_image(identity, expected_namespace, pushed_tag, resolve_pushed_image)
-    return _encode_manifest(_base(identity, "image", {"image": image}))
+    output: dict = {"image": image}
+    if extra:
+        output["additional_images"] = {
+            key: _resolved_image(identity, namespace, pushed_tag, resolve_pushed_image)
+            for key, namespace in sorted(extra.items())}
+    return _encode_manifest(_base(identity, "image", output))
 
 
 def static_artifact_name(identity: ReleaseIdentity) -> str:
@@ -280,11 +309,15 @@ def validate_manifest_structure(
     expected: ReleaseIdentity,
     expected_image_namespace: str | None = None,
     expected_static_artifact: StaticArtifactSelection | None = None,
+    expected_additional_namespaces: Mapping[str, str] | None = None,
 ) -> dict:
     """Pure preflight only; image digests are NOT verified against a registry."""
     _validate_identity(expected)
     if (expected_image_namespace is None) == (expected_static_artifact is None):
         _fail("exactly_one_output_expectation_required")
+    extra = checked_additional_namespaces(expected_additional_namespaces, primary=expected_image_namespace)
+    if extra and expected_image_namespace is None:
+        _fail("invalid_additional_images")
     manifest = _parse_manifest(raw)
     actual = (
         manifest["source_repository"], manifest["source_sha"], manifest["source_ref"],
@@ -295,7 +328,7 @@ def validate_manifest_structure(
         _fail("release_identity_mismatch")
     output = manifest["output"]
     if manifest["kind"] == "image":
-        if set(output) != {"image"}:
+        if set(output) != ({"image", "additional_images"} if extra else {"image"}):
             _fail("image_output_fields_invalid")
         if not isinstance(expected_image_namespace, str) or not _IMAGE_NAMESPACE.fullmatch(expected_image_namespace):
             _fail("expected_image_namespace_required")
@@ -305,6 +338,17 @@ def validate_manifest_structure(
         prefix = expected_image_namespace + "@"
         if not image.startswith(prefix):
             _fail("image_namespace_mismatch")
+        if extra:
+            additional = output["additional_images"]
+            # Exactly the trusted keys: an extra image the policy does not name, or a missing one, never validates.
+            if type(additional) is not dict or set(additional) != set(extra):
+                _fail("additional_images_mismatch")
+            for key, namespace in extra.items():
+                reference = additional[key]
+                if not isinstance(reference, str) or not _IMAGE.fullmatch(reference):
+                    _fail("immutable_image_required")
+                if not reference.startswith(namespace + "@"):
+                    _fail("image_namespace_mismatch")
     else:
         if set(output) != {"artifact_name", "artifact_id", "byte_length", "sha256"}:
             _fail("static_output_fields_invalid")
@@ -333,15 +377,21 @@ def validate_manifest(
     expected_image_namespace: str | None = None,
     expected_static_artifact: StaticArtifactSelection | None = None,
     resolve_pushed_image: Callable[[str, str], Mapping[str, object]] | None = None,
+    expected_additional_namespaces: Mapping[str, str] | None = None,
 ) -> dict:
     """Validate identity and bind image output to an independent registry read."""
     manifest = validate_manifest_structure(raw, expected=expected,
-        expected_image_namespace=expected_image_namespace, expected_static_artifact=expected_static_artifact)
+        expected_image_namespace=expected_image_namespace, expected_static_artifact=expected_static_artifact,
+        expected_additional_namespaces=expected_additional_namespaces)
     if manifest["kind"] == "image":
         observed = _resolved_image(expected, expected_image_namespace,
                                    release_image_tag(expected), resolve_pushed_image)
         if manifest["output"]["image"] != observed:
             _fail("image_digest_mismatch")
+        for key, namespace in checked_additional_namespaces(expected_additional_namespaces).items():
+            observed = _resolved_image(expected, namespace, release_image_tag(expected), resolve_pushed_image)
+            if manifest["output"]["additional_images"][key] != observed:
+                _fail("image_digest_mismatch")
     return manifest
 
 

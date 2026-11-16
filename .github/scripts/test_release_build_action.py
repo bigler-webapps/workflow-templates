@@ -321,7 +321,8 @@ elif args[:3]==["buildx","imagetools","inspect"]: print(json.dumps({"name":args[
             self.assertEqual(definition["outputs"]["image"]["value"], "${{ steps.release.outputs.image || steps.publish.outputs.image }}")
             expected_environment = {
                 "RELEASE_CONTRACT":"release_contract", "RELEASE_IMAGE_NAMESPACE":"release_image_namespace",
-                "RELEASE_WORKFLOW_REF":"release_workflow_ref", "GITHUB_TOKEN":"github_token",
+                "RELEASE_WORKFLOW_REF":"release_workflow_ref", "RELEASE_ADDITIONAL_IMAGES":"release_additional_images",
+                "GITHUB_TOKEN":"github_token",
                 "BACKEND_DOCKERFILE":"backend_dockerfile", "BACKEND_BUILD_CONTEXT":"backend_build_context",
                 "HRAM_ENGINE_READ_TOKEN":"hram_engine_read_token", "EXISTING_IMAGE":"existing_image",
                 "VITE_APP_MUI_LICENSE_KEY":"vite_app_mui_license_key",

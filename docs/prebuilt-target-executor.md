@@ -32,6 +32,27 @@ resolver; the target executor always performs that full validation afterward.
 | `docker_config_dir` | Existing private provider-created directory containing only the scoped `config.json` profile below. |
 | `temporary_parent` | Existing private directory for generated Compose inputs and retained deployment configurations. |
 | `migrate_service` | Optional reviewed application service for the fixed Django migration command. |
+| `additional_image_services` | Optional tuple of `(service, key, namespace)` triples (WM-INF-122). The service receives `output.additional_images[key]` of the manifest; `namespace` is the trusted GHCR backend namespace that digest must belong to. Empty for a single-image release. |
+| `one_shot_services` | Optional tuple of service names (WM-INF-122) that are declared one-shot in the reviewed controls (`restart: "no"`). |
+
+### Several images per release and one-shot helpers (WM-INF-122)
+
+A release may carry further images next to the primary one (`release-deployment-contract.md`, "Several images per release"). The
+set of additional images is named by the trusted `TargetSpec` only: a manifest that adds, drops or re-namespaces one is rejected
+before any command, each digest is checked against the registry like the primary one, and the compose override pins each service
+to its own digest. Everything else is unchanged: no build on the target, every service image is immutable.
+
+A service named in `one_shot_services` is expected to run once and exit. It must not restart by itself (`one_shot_restart_invalid`
+before activation). After `up`, a one-shot service passes only when it has exited with code 0; one that exited non-zero fails the
+deployment as `one_shot_failed_<service>` and one that is still running (or restarting or created) as `one_shot_running_<service>`
+(hyphens in the name become underscores; the name is at most 30 characters). A failed `up` caused by a helper that exited non-zero is
+reported the same way. A service not declared one-shot that is stopped still fails (`compose_ps_state_invalid`). The one-shot
+services are part of the observed service set and of the project inventory check.
+
+A service whose rendered configuration has a healthcheck is `starting` right after `up` (a java engine takes up to its start_period). The
+deployment waits for it: it re-reads `compose ps` every `HEALTH_POLL_SECONDS` (3 s) for at most `HEALTH_WAIT_SECONDS` (180 s, and never past
+the whole-deployment deadline) and fails as `health_wait_timeout` when it is still starting. Any other failing row (`unhealthy`, a stopped
+service, a failed one-shot helper) fails at once and wins over a service that is still starting; a stack without a healthcheck never waits.
 
 Call `execute_image_deployment(raw_manifest, *, expected_identity,
 expected_image_namespace, resolve_pushed_image, target, executor=None,

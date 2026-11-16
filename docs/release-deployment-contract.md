@@ -48,6 +48,25 @@ Example static output:
 {"version":1,"kind":"static","source_repository":"bigler-webapps/sample-app","source_sha":"0123456789abcdef0123456789abcdef01234567","source_ref":"refs/heads/develop","source_workflow":".github/workflows/release.yml","run_id":123456,"run_attempt":2,"output":{"artifact_name":"release-static-123456-2","artifact_id":998877,"byte_length":32768,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
 ```
 
+## Several images per release (WM-INF-122)
+
+A release can carry further images next to the primary `image` (an app whose stack runs more than one released image). The image
+output then has exactly two fields, `image` and `additional_images`, an object of `key -> immutable image reference`; a key is
+`[a-z][a-z0-9_]{0,31}` and at most eight are allowed. Each reference is `ghcr.io/<owner>/<name>-backend@sha256:<digest>` in its own
+namespace, pushed under the same derived tag `release-<run id>-<attempt>-<source SHA>` from the same source commit. Without
+`additional_images` the output is the single-field form above and stays valid: a release with one image is the default.
+
+The keys and namespaces are never taken from the manifest. `produce_image_manifest(..., additional_namespaces={key: namespace})` and
+`validate_manifest(..., expected_additional_namespaces={key: namespace})` receive them from trusted policy (the producer's action
+input, the target policy, the enrolment). A manifest with a key the policy does not name, without one it names, with a reference
+outside its namespace or whose digest differs from an independent registry read of that namespace and tag is rejected
+(`image_output_fields_invalid`, `additional_images_mismatch`, `image_namespace_mismatch`, `image_digest_mismatch`). The composite
+`publish-backend-image` action accepts `release_additional_images` (a bounded JSON list of `{key, namespace, dockerfile, context}`,
+namespaces owned by the repository owner and distinct from the primary one); each image is built from the same checkout with the same
+control-file hygiene, pushed under the same tag, and read back from the registry. The BuildKit engine secret and the Vite values reach
+the primary build only; an additional image is built without any build secret or build argument. The manifest stays within its
+16 KiB bound.
+
 ## Python interface
 
 `ReleaseIdentity(repository, sha, ref, workflow, run_id, attempt)` carries

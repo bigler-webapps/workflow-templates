@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 
+import release_manifest
 from release_manifest import ReleaseIdentity, produce_image_manifest, release_image_tag
 
 TIMEOUT_SECONDS = 1800
@@ -167,7 +168,7 @@ def _read_build_control(path: Path) -> bytes:
         raise ReleaseBuildError("build_control_invalid") from None
 
 
-def _prepare_build_control(dockerfile: str, context: str, private: Path) -> Path:
+def _prepare_build_control(dockerfile: str, context: str, private: Path, name: str = "Release.Dockerfile") -> Path:
     original = Path(dockerfile)
     if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+\.)?Dockerfile(?:\.[A-Za-z0-9_-]+)?", original.name):
         raise ReleaseBuildError("build_control_invalid")
@@ -180,13 +181,54 @@ def _prepare_build_control(dockerfile: str, context: str, private: Path) -> Path
         ignore.decode("utf-8", "strict")
     except UnicodeError:
         raise ReleaseBuildError("build_control_invalid") from None
-    target = private / "Release.Dockerfile"
+    target = private / name
     target.write_bytes(raw)
     os.chmod(target, 0o600)
     protected = Path(str(target) + ".dockerignore")
     protected.write_bytes(ignore + b"\n" + "\n".join(_CONTEXT_EXCLUSIONS).encode("ascii") + b"\n")
     os.chmod(protected, 0o600)
     return target
+
+
+def _checked_build_paths(dockerfile: str, context: str) -> None:
+    if not _scalar(dockerfile, _PATH) or not _scalar(context, _PATH) or any(p in ("", ".", "..") for p in dockerfile.split("/")):
+        raise ReleaseBuildError("build_path_invalid")
+    if context != "." and any(p in ("", ".", "..") for p in context.split("/")):
+        raise ReleaseBuildError("build_path_invalid")
+    for value in (dockerfile, context):
+        if len(value) > 512 or any(part.startswith("-") or part.lower().startswith(".env") for part in value.split("/")):
+            raise ReleaseBuildError("build_path_invalid")
+        if not (Path.cwd() / value).resolve().is_relative_to(Path.cwd().resolve()):
+            raise ReleaseBuildError("build_path_invalid")
+
+
+_ADDITIONAL_FIELDS = {"key", "namespace", "dockerfile", "context"}
+MAX_ADDITIONAL_SPEC_BYTES = 4096
+
+
+def _additional_images(env: dict[str, str], owner: str, primary: str) -> list[dict[str, str]]:
+    """The further images of one release (WM-INF-122): a bounded JSON list, every field checked like the primary image's."""
+    raw = env.get("RELEASE_ADDITIONAL_IMAGES", "")
+    if not raw:
+        return []
+    try:
+        if len(raw.encode("utf-8")) > MAX_ADDITIONAL_SPEC_BYTES:
+            raise ValueError
+        value = json.loads(raw)
+        if (type(value) is not list or not 1 <= len(value) <= release_manifest.MAX_ADDITIONAL_IMAGES
+                or any(type(item) is not dict or set(item) != _ADDITIONAL_FIELDS
+                       or any(type(field) is not str for field in item.values()) for item in value)):
+            raise ValueError
+        for item in value:
+            if (not _scalar(item["key"], release_manifest._ADDITIONAL_KEY) or not _scalar(item["namespace"], _NAMESPACE)
+                    or item["namespace"].split("/")[1].lower() != owner.lower()):
+                raise ValueError
+        release_manifest.checked_additional_namespaces({item["key"]: item["namespace"] for item in value}, primary=primary)
+        if len({item["key"] for item in value}) != len(value):
+            raise ValueError
+        return value
+    except (ValueError, json.JSONDecodeError, release_manifest.ManifestError):
+        raise ReleaseBuildError("additional_images_invalid") from None
 
 
 def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, bytes]:
@@ -204,17 +246,17 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
         raise ReleaseBuildError("source_identity_invalid")
     tag = release_image_tag(identity)
     dockerfile, context = env.get("BACKEND_DOCKERFILE", "backend/Dockerfile"), env.get("BACKEND_BUILD_CONTEXT", ".")
+    # Order kept from the single-image producer: the primary paths are judged first, then the credential.
     if not _scalar(dockerfile, _PATH) or not _scalar(context, _PATH) or any(p in ("", ".", "..") for p in dockerfile.split("/")):
         raise ReleaseBuildError("build_path_invalid")
     if context != "." and any(p in ("", ".", "..") for p in context.split("/")):
         raise ReleaseBuildError("build_path_invalid")
     if not env.get("GITHUB_TOKEN"):
         raise ReleaseBuildError("required_credential_missing")
-    for value in (dockerfile, context):
-        if len(value) > 512 or any(part.startswith("-") or part.lower().startswith(".env") for part in value.split("/")):
-            raise ReleaseBuildError("build_path_invalid")
-        if not (Path.cwd() / value).resolve().is_relative_to(Path.cwd().resolve()):
-            raise ReleaseBuildError("build_path_invalid")
+    _checked_build_paths(dockerfile, context)
+    additional = _additional_images(env, identity.repository.split("/", 1)[0], namespace)
+    for item in additional:
+        _checked_build_paths(item["dockerfile"], item["context"])
     if any(ancestor.is_symlink() for ancestor in (output_dir.parent, *output_dir.parent.parents)):
         raise ReleaseBuildError("output_path_invalid")
     output_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -245,6 +287,18 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
         run(build, env=build_env, capture=False)
         stage = "docker_push"
         run(["docker", "push", tag_ref], env=docker_env, timeout=600, capture=False)
+        # Further images of the same release: same tag and source commit, no engine token and no Vite build values.
+        for item in additional:
+            stage = "build_control"
+            extra_control = _prepare_build_control(item["dockerfile"], item["context"], config_dir,
+                                                   f"Release.{item['key']}.Dockerfile")
+            extra_ref = f"{item['namespace']}:{tag}"
+            stage = "docker_build"
+            run(["docker", "build", "--pull",
+                 "--label", f"org.opencontainers.image.source=https://github.com/{identity.repository}",
+                 "-t", extra_ref, "-f", str(extra_control), item["context"]], env=docker_env, capture=False)
+            stage = "docker_push"
+            run(["docker", "push", extra_ref], env=docker_env, timeout=600, capture=False)
 
         def resolve(repository: str, pushed_tag: str):
             nonlocal stage, detail_seen
@@ -267,7 +321,8 @@ def produce(env: dict[str, str], *, output_dir: Path, run=_run) -> tuple[str, by
             return {"repository": repository, "tag": pushed_tag, "digest": digest}
 
         stage = "manifest"
-        manifest = produce_image_manifest(identity, expected_namespace=namespace, pushed_tag=tag, resolve_pushed_image=resolve)
+        manifest = produce_image_manifest(identity, expected_namespace=namespace, pushed_tag=tag, resolve_pushed_image=resolve,
+                                          additional_namespaces={item["key"]: item["namespace"] for item in additional})
         (output_dir / "release.json").write_bytes(manifest)
         (output_dir / "image.txt").write_text(namespace + "@" + json.loads(manifest)["output"]["image"].split("@", 1)[1], encoding="ascii")
         os.chmod(output_dir / "release.json", 0o600)

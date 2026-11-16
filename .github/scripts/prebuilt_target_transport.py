@@ -272,6 +272,7 @@ def _validate_config(config: object) -> tuple[TransportConfig, tuple[_FileSnapsh
                 raise ValueError
             image_target._validate_target(c.target, c.expected_identity)
             services = tuple(sorted((*c.target.image_services,
+                                     *(item[0] for item in c.target.additional_image_services),
                                      *(name for name, _ in c.target.sidecar_images))))
         else:
             if (type(c.target) is not static_target.StaticTargetSpec
@@ -302,6 +303,8 @@ def _frame(config: TransportConfig, manifest: bytes, bundle: bytes) -> tuple[byt
                 manifest, expected=config.expected_identity,
                 expected_image_namespace=config.image_namespace,
                 resolve_pushed_image=config.resolve_pushed_image,
+                # The further images of the release are named by the trusted target, never by the manifest (WM-INF-122).
+                expected_additional_namespaces={key: namespace for _, key, namespace in config.target.additional_image_services},
             )
             if parsed["kind"] != "image":
                 raise ValueError

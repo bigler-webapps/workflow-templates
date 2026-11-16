@@ -14,6 +14,10 @@ inputs:
     description: 'GitHub workflow_ref from the trusted caller context.'
     required: false
     default: ''
+  release_additional_images:
+    description: 'Release-contract-v1 only: JSON list of further images of the same release, each {key, namespace, dockerfile, context} (key a-z0-9_, namespace a GHCR backend namespace of the repository owner). Empty keeps a single-image release.'
+    required: false
+    default: ''
   image_tag:
     description: 'Immutable image tag resolved from the checked-out working tree.'
     required: true
@@ -78,6 +82,7 @@ runs:
         RELEASE_CONTRACT: ${{ inputs.release_contract }}
         RELEASE_IMAGE_NAMESPACE: ${{ inputs.release_image_namespace }}
         RELEASE_WORKFLOW_REF: ${{ inputs.release_workflow_ref }}
+        RELEASE_ADDITIONAL_IMAGES: ${{ inputs.release_additional_images }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         BACKEND_DOCKERFILE: ${{ inputs.backend_dockerfile }}
         BACKEND_BUILD_CONTEXT: ${{ inputs.backend_build_context }}
