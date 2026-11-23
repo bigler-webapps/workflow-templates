@@ -254,11 +254,7 @@ class WftCi30StructuralTests(unittest.TestCase):
         self.assertIn('for container in "$E2E_DB_CONTAINER" "$E2E_REDIS_CONTAINER"', deps)
 
     def test_assertion_fails_if_redis_loses_its_health_check(self):
-        mutated = E2E_JOB.replace(
-            "          docker run -d --name \"$E2E_REDIS_CONTAINER\" --network \"$E2E_NETWORK\" \\\n            --health-cmd='redis-cli ping' \\\n            --health-interval=10s --health-timeout=5s --health-retries=10 \\\n            redis:7\n",
-            "          docker run -d --name \"$E2E_REDIS_CONTAINER\" --network \"$E2E_NETWORK\" redis:7\n",
-            1,
-        )
+        mutated = E2E_JOB.replace("--health-cmd='redis-cli ping'", "", 1)
         self.assertNotEqual(mutated, E2E_JOB, "fixture setup did not match live redis run command")
         deps = step_body(mutated, "Create E2E network and dependencies")
         self.assertNotIn("--health-cmd='redis-cli ping'", deps)
@@ -315,7 +311,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_enumeration_failure_check_is_dropped(self):
         mutated = E2E_JOB.replace(
-            'cells_status=$?\n          if [ "$cells_status" -ne 0 ]; then\n            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."\n            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then exit "$cells_status"; else exit 0; fi\n          fi\n',
+            'cells_status=$?\n          if [ "$cells_status" -ne 0 ]; then\n            echo "Capture evidence unavailable: manifest enumeration failed." >> "$GITHUB_STEP_SUMMARY"\n            cell="*"; capture_summary false || true\n            echo "::warning::E2E capture: manifest enumeration itself failed (exit $cells_status), not treated as zero cells."\n            if [ "${{ inputs.e2e-capture-gate }}" = "true" ]; then exit "$cells_status"; else exit 0; fi\n          fi\n',
             "",
             1,
         )
@@ -334,7 +330,7 @@ class WftCi30StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_capture_stops_skipping_on_reseed_failure(self):
         mutated = E2E_JOB.replace(
-            'reseed_status=$?\n            if [ "$reseed_status" -ne 0 ]; then\n              echo "::warning::reseed failed before capture cell $cell -- skipping this cell rather than capturing stale data"\n              worst=$reseed_status\n              continue\n            fi\n',
+            'reseed_status=$?\n            if [ "$reseed_status" -ne 0 ]; then\n              echo "::warning::reseed failed before capture cell $cell -- skipping this cell rather than capturing stale data"\n              worst=$reseed_status\n              capture_summary false || true\n              continue\n            fi\n',
             "",
             1,
         )
@@ -583,7 +579,7 @@ class WftCi30StructuralTests(unittest.TestCase):
         self.assertIn("inputs.e2e-capture-command", capture)
         self.assertIn("        if: always()\n        continue-on-error: ${{ !inputs.e2e-capture-gate }}", capture)
         upload = step_body(E2E_JOB, "Upload E2E capture artifact")
-        self.assertIn("if: always()", upload)
+        self.assertIn("inputs.e2e-upload-artifacts", upload)
         self.assertIn("inputs.e2e-capture-output-path", upload)
 
     def test_specs_and_quarantine_reseed_before_each_file_with_runner_env_set(self):
@@ -805,7 +801,7 @@ class WftCi32StructuralTests(unittest.TestCase):
         upload = find_step(load_e2e_steps(), "Upload E2E failure artifacts")
         self.assertEqual(
             upload["if"],
-            "${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
+            "${{ always() && inputs.e2e-upload-artifacts && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
         )
         self.assertEqual(upload["with"]["name"], "e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(upload["with"]["path"], "${{ inputs.frontend-path }}/test-results")
@@ -856,7 +852,7 @@ class WftCi32StructuralTests(unittest.TestCase):
         step = find_step(load_e2e_steps(), "Save app container log for failed specs")
         self.assertEqual(
             step["if"],
-            "${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
+            "${{ always() && inputs.e2e-upload-artifacts && (failure() || steps.quarantine.outputs.had_failure == 'true') }}",
         )
         self.assertIn('docker logs "$E2E_APP_CONTAINER" > test-results/docker-logs-app.log', step["run"])
 
@@ -882,7 +878,7 @@ class WftCi32StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_the_two_conditions_diverge(self):
         mutated_text = CI_WORKFLOW.replace(
-            "        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n"
+            "        if: ${{ always() && inputs.e2e-upload-artifacts && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n"
             "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0",
             "        if: ${{ failure() }}\n"
             "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0",
@@ -912,7 +908,7 @@ class WftCi32StructuralTests(unittest.TestCase):
 
     def test_assertion_fails_if_upload_step_loses_its_conditional(self):
         mutated_text = CI_WORKFLOW.replace(
-            "        if: ${{ always() && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",
+            "        if: ${{ always() && inputs.e2e-upload-artifacts && (failure() || steps.quarantine.outputs.had_failure == 'true') }}\n        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",
             "        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0\n        with:\n          name: e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}",
             1,
         )
@@ -928,18 +924,16 @@ class WftCi32StructuralTests(unittest.TestCase):
             names.index("Upload E2E failure artifacts"),
         )
         self.assertLess(
+            names.index("Stop E2E stack"),
             names.index("Upload E2E failure artifacts"),
-            names.index("Capture E2E screens and report"),
         )
 
     def test_job_summary_names_the_artifact_next_to_the_failed_spec(self):
         steps = load_e2e_steps()
         gating = find_step(steps, "Playwright specs")["run"]
         quarantine = find_step(steps, "Playwright quarantine specs")["run"]
-        self.assertIn("Trace + error context: artifact", gating)
-        self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", gating)
-        self.assertIn("Trace + error context: artifact", quarantine)
-        self.assertIn("e2e-failures-${{ github.run_id }}-${{ github.run_attempt }}", quarantine)
+        self.assertNotIn("Trace + error context: artifact", gating)
+        self.assertNotIn("Trace + error context: artifact", quarantine)
 
 
 class WftCi35MailDirectoryTests(unittest.TestCase):
@@ -958,7 +952,7 @@ class WftCi35MailDirectoryTests(unittest.TestCase):
         outside_setup = E2E_JOB.replace(setup, "")
         self.assertNotIn(":/e2e-mail", outside_setup)
         cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
-        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi', cleanup)
+        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR" || true; fi', cleanup)
         self.assertNotIn("RUNNER_TEMP", cleanup)
         self.assertIn("E2E_MAIL_APP_ARGS", outside_setup)
         self.assertIn("E2E_MAIL_PW_ARGS", outside_setup)
@@ -977,7 +971,7 @@ class WftCi35MailDirectoryTests(unittest.TestCase):
 
     def test_cleanup_removes_mail_directory_when_created(self):
         cleanup = step_body(E2E_JOB, "Cleanup E2E containers, network, and image")
-        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR"; fi', cleanup)
+        self.assertIn('if [ -n "${E2E_MAIL_HOST_DIR:-}" ]; then rm -rf "$E2E_MAIL_HOST_DIR" || true; fi', cleanup)
         self.assertNotIn("RUNNER_TEMP", cleanup)
 
 
@@ -1094,14 +1088,14 @@ class WftCi37CaptureGateTests(unittest.TestCase):
         upload = step_body(E2E_JOB, "Upload E2E capture artifact")
         self.assertIn("if: always()", capture)
         self.assertIn("continue-on-error: ${{ !inputs.e2e-capture-gate }}", capture)
-        self.assertIn("if: always()", upload)
+        self.assertIn("inputs.e2e-upload-artifacts", upload)
         self.assertIn("inputs.e2e-capture-output-path", upload)
         steps = load_e2e_steps()
         names = [step.get("name") for step in steps]
         self.assertLess(names.index("Capture E2E screens and report"), names.index("Upload E2E capture artifact"))
         self.assertLess(names.index("Upload E2E capture artifact"), names.index("Cleanup E2E containers, network, and image"))
         parsed_upload = find_step(steps, "Upload E2E capture artifact")
-        self.assertEqual(parsed_upload["if"], "always()")
+        self.assertEqual(parsed_upload["if"], "${{ always() && inputs.e2e-upload-artifacts }}")
         self.assertTrue(parsed_upload["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(parsed_upload["with"]["name"], "e2e-capture-${{ github.run_id }}-${{ github.run_attempt }}")
         self.assertEqual(parsed_upload["with"]["path"], "${{ inputs.frontend-path }}/${{ inputs.e2e-capture-output-path }}")
@@ -1419,11 +1413,11 @@ class WftCi41SpecSelectionTests(unittest.TestCase):
         )[0]
         self.assertRegex(
             dispatch,
-            r"    inputs:\n      e2e-spec-files:\n        description: [^\n]+\n        required: false\n        type: string\n        default: ''",
+            r"      e2e-specs:\n        description: [^\n]+\n        required: false\n        type: string\n        default: ''",
         )
-        self.assertIn("e2e-spec-files: ${{ inputs.e2e-spec-files }}", caller)
+        self.assertIn("e2e-spec-files: ${{ inputs.e2e-specs }}", caller)
         self.assertEqual(
-            len(re.findall(r"(?m)^\s+e2e-spec-files:\s*$", caller)),
+            len(re.findall(r"(?m)^\s+e2e-specs:\s*$", caller)),
             1,
             "the selection input must be declared only for workflow_dispatch",
         )
