@@ -108,3 +108,23 @@ Run the smallest relevant fresh CI proof after the published WFT-CI-53 helper is
 ## Gate record
 
 Gate #1 approved by the operator on 2026-11-24 for the documented scope after WS-GOV-135 landed (chat response to commission WFT-CI-54 in a Terra 6.1 Medium session).
+
+## Completion
+
+<!-- acceptance:begin -->
+Acceptance (tests, )
+
+| ID | Type | Status | Run time | Evidence | Reason |
+|---|---|---|---|---|---|
+| WFT-CI-54-T1 | T | pass | 2026-11-24 15:09 | .claude/scratch/acceptance-WFT-CI-54 @6a93523+dd60d55b; scope app-ci-e2e, 111 tests |  |
+<!-- acceptance:end -->
+
+Implementation: codex/gpt-6.1-terra, high. Candidate workflow commit a820d73; Spesix caller candidate b5edd51 on develop 2c7f2f4 points only to ci-test/WFT-CI-54. WFT-CI-53 helper pin 999c339 is present.
+
+Scope: tests.py app-ci-e2e passed 111 tests, 0 failures, 2 skipped; T1 passed. Review round 1: envelope, regression, tests and sec_review codex/gpt-6.1-terra; duplication codex/gpt-6-luna; 0 findings. Part B: accurate.
+
+CI evidence remains open: Spesix run 45401709341 was in progress when checked. The candidate caller is changed workflow code, requiring operator dispatch; verify selected files, failures and default uploads before landing. After landing, Spesix and Photogallery may use workflow-templates main at the landing commit; until then a820d73 is candidate only.
+
+Foreign paths: workflow-templates staging-health.yml, test_staging_health_probe.py and WFT-CI-44.md (WFT-CI-44), scratchpad/ (WFT-CI-45); Spesix receipt-upload-drafts.spec.js and backend/media/ (owner unknown).
+
+CI proof: Spesix run 45411285342 on caller b5edd51 and workflow candidate a820d73 resolved on netcup-ci. The log records reseeding for 34 regular files, from account-lifecycle.spec.js through workflow-multi-stage.spec.js, with no test-management spec selected; see the run's reseeding notices for the complete file list. The genuine responsive-corrections.spec.js desktop EUR layout failure remained visible and made E2E red. Quarantine step succeeded. Backend, security, image-build and validation passed. The independent Spesix frontend MobilePwaPage.test.jsx German receipt-review test failed; capture reported non-blocking mechanical failures. No artifact was uploaded (GitHub API total_count 0); both upload steps skipped. These app failures require Spesix follow-up and do not cover template selection logic.
