@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -79,6 +80,15 @@ def test_workflow_wires_shared_worker_helper():
     assert test_line.strip() == 'VITEST_MAX_WORKERS="$worker_limit" pnpm test'  # env only, no CLI flag
     assert "PYTEST_XDIST_AUTO_NUM_WORKERS=\"$(python3 .wt-checkout/.github/scripts/ci_test_workers.py resolve" in source
     assert "ci_test_workers.py pytest-args" in source
+    # The helper checkout must point at a commit that contains the empty-args fix (WFT-CI-53, 999c339),
+    # not the original WM-INF-101 commit whose helper emitted one empty argument.
+    pin = re.search(r"repository: bigler-webapps/workflow-templates\s+ref: ([0-9a-f]{40})\b", source)
+    assert pin, "helper checkout must be pinned to a full commit SHA"
+    assert pin.group(1) != "9ce4476de8568a3d3373203f9c42bd1450aeb097"
+    assert pin.group(1) == "999c339c80c8d44ef1d9403c27abbfd104a81ec8" or subprocess.run(
+        ["git", "merge-base", "--is-ancestor", "999c339c80c8d44ef1d9403c27abbfd104a81ec8", pin.group(1)],
+        cwd=SCRIPT.parent, capture_output=True,
+    ).returncode == 0
     # pytest runs with the CLAMPED arguments, never with the raw input, and no worker input is interpolated
     # into script text (they travel through env).
     pytest_line = next(line for line in source.splitlines() if line.strip().startswith("pytest --import-mode="))
