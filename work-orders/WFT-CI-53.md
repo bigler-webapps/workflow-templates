@@ -87,3 +87,7 @@ Cause, derived from the code and to be confirmed by the first test: `ci_test_wor
 1. The fix lands in two commits, because the pin must name the helper commit: first the helper and its tests, then the pin bump with the workflow test. Prove both on `ci-test/WFT-CI-53` with one consumer pointing at `app-ci.yml@ci-test/WFT-CI-53` (AGENTS.md exception b). Use bigler-consult; its ci-test run must show no collection error and its declared `testpaths` count.
 2. After landing on `main`, start one fresh bigler-consult `ci.yml` run on `develop`. A rerun of 45373369250 may reuse the old resolved template and proves nothing. Record the result and the collected count.
 3. Record in Completion which of the six apps still fail in the backend job and with what. Those are separate causes outside this WO.
+
+## Gate record
+
+Gate #1 approved by the operator 2026-11-24 (click in session local_1e5f212a-77db-4423-a507-983adf826bc4).
