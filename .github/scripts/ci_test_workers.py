@@ -63,7 +63,9 @@ def main() -> int:
         print(workers)
     else:
         args = " ".join(values.pytest_args)
-        sys.stdout.buffer.write("\0".join(clamp_pytest_args(args, workers)).encode() + b"\0")
+        tokens = clamp_pytest_args(args, workers)
+        if tokens:
+            sys.stdout.buffer.write("\0".join(tokens).encode() + b"\0")
     return 0
 
 

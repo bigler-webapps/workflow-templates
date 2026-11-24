@@ -1,6 +1,10 @@
 import subprocess
 import sys
+import json
+import shutil
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT = Path(__file__).with_name("ci_test_workers.py")
@@ -39,6 +43,32 @@ def test_pytest_xdist_counts_are_bounded_and_auto_is_preserved():
     assert pytest_args("2", "-n auto") == ["-n", "auto"]
     assert pytest_args("2", "-n logical") == ["-n", "logical"]
     assert pytest_args("2", "-q") == ["-q"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", []),
+        (" \t  ", []),
+        ("-q", ["-q"]),
+        ("-q tests", ["-q", "tests"]),
+        ('-k "one or two"', ["-k", "one or two"]),
+        ("-n 8", ["-n", "2"]),
+        ("-n8", ["-n2"]),
+        ("--numprocesses 8", ["--numprocesses", "2"]),
+        ("--numprocesses=8", ["--numprocesses=2"]),
+    ],
+)
+def test_pytest_args_through_workflow_mapfile(raw, expected):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("Bash is required for the workflow mapfile test")
+    result = subprocess.check_output(
+        [bash, "-c", 'mapfile -d "" -t pytest_args < <("$1" "$2" pytest-args 4 2 "$3"); "$1" -c "import json, sys; print(json.dumps(sys.argv[1:]))" "${pytest_args[@]}"',
+         "bash", sys.executable, str(SCRIPT), raw],
+        text=True,
+    )
+    assert json.loads(result) == expected
 
 
 def test_workflow_wires_shared_worker_helper():
