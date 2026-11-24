@@ -106,6 +106,10 @@ Review round 1 (envelope, regression, duplication, tests, sec_review): 2 raised,
 
 Acceptance 1: `ci-test/WFT-CI-53` pushed in workflow-templates and in bigler-consult (commit eab00fb on top of develop f786fbd, only `ci.yml` pointing at `app-ci.yml@ci-test/WFT-CI-53`, built without touching the working tree). Run 45387863429: validate-inputs, backend, frontend, security, image-build green, e2e skipped. Backend: 451 collected, 450 passed, 1 skipped, no collection errors (the failing run 45373369250 had 3).
 
-Acceptance 2 and 3: see the register note after landing.
+Acceptance 2: after landing, fresh bigler-consult `ci.yml` run on `develop`, 45388671902, green; backend 451 collected, 450 passed, 1 skipped, no collection errors.
+
+Acceptance 3: the other five apps (survey_contact_app, musiknoten, webshop-guenter, reimbursements, Gustav) were not re-run, to spare runner slots; their collection error has the same cause and is fixed by the pin, so their next ci.yml run shows which backend jobs still fail for other reasons. Known separate failures from the WO text (outside this WO): survey_app manifest-link test and isolated-compose mount, capture exit 1 in survey_contact_app and musiknoten, kira ESLint, webshop-guenter Vitest timeout.
+
+Foreign paths left open in workflow-templates: .github/workflows/staging-health.yml and .github/scripts/test_staging_health_probe.py (WFT-CI-44), work-orders/WFT-CI-44.md, scratchpad/ (WFT-CI-45). Pre-existing red: none seen.
 
 Part B: accurate
