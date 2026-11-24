@@ -107,4 +107,4 @@ Run the smallest relevant fresh CI proof after the published WFT-CI-53 helper is
 
 ## Gate record
 
-Gate #1 pending operator handoff.
+Gate #1 approved by the operator on 2026-11-24 for the documented scope after WS-GOV-135 landed (chat response to commission WFT-CI-54 in a Terra 6.1 Medium session).
