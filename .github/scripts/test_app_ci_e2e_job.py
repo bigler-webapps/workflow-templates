@@ -1396,6 +1396,59 @@ class WftCi38SpecFailureTests(unittest.TestCase):
 
 
 class WftCi41SpecSelectionTests(unittest.TestCase):
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_isolated_inventory_is_excluded_from_regular_and_quarantine(self):
+        files = (
+            "tests/z.spec.js", "tests/a.spec.js", "tests/quarantine.spec.js",
+            "tests/test-management-profiles.spec.js",
+            "tests/nested/test-management-recovery.spec.js",
+            "tests/test-management-quarantine.spec.js",
+            "tests/test-managementish.spec.js",
+        )
+        result, calls, _ = WftCi38SpecFailureTests._run_regular(
+            self, collect=True, spec_files=files, run_quarantine=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(WftCi38SpecFailureTests._spec_calls(calls), [
+            "tests/a.spec.js", "tests/test-managementish.spec.js", "tests/z.spec.js",
+            "tests/quarantine.spec.js",
+        ])
+        self.assertEqual(WftCi38SpecFailureTests._reseed_count(calls), 4)
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_isolated_explicit_selection_is_rejected_before_execution(self):
+        for path in ("tests/test-management-profiles.spec.js",
+                     "tests/nested/test-management-recovery.spec.js"):
+            with self.subTest(path=path):
+                result, calls, _ = WftCi38SpecFailureTests._run_regular(
+                    self, collect=False, spec_files=(path,), selection=path,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("reserved for the isolated controller", result.stdout)
+                self.assertEqual(calls, [])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_isolated_only_inventory_fails_as_empty_regular_selection(self):
+        result, calls, _ = WftCi38SpecFailureTests._run_regular(
+            self, collect=False, spec_files=("tests/test-management-profiles.spec.js",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no non-quarantined spec files found", result.stdout)
+        self.assertEqual(calls, [])
+
+    @unittest.skipIf(CAPTURE_BASH is None, "requires bash or Windows Git Bash")
+    def test_isolated_inventory_keeps_explicit_regular_failure_blocking(self):
+        for fail_spec in ("", "tests/regular.spec.js"):
+            with self.subTest(fail_spec=fail_spec):
+                result, calls, _ = WftCi38SpecFailureTests._run_regular(
+                    self, collect=False,
+                    spec_files=("tests/regular.spec.js", "tests/test-management-profiles.spec.js"),
+                    selection="tests/regular.spec.js", fail_spec=fail_spec,
+                )
+                self.assertEqual(result.returncode == 0, not fail_spec, result.stdout + result.stderr)
+                self.assertEqual(WftCi38SpecFailureTests._spec_calls(calls), ["tests/regular.spec.js"])
+                self.assertEqual(WftCi38SpecFailureTests._reseed_count(calls), 1)
+
     def test_input_defaults_to_full_suite_and_uses_environment_data(self):
         self.assertRegex(
             INPUTS_BLOCK,

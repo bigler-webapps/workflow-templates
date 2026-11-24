@@ -816,14 +816,12 @@ jobs:
           # bucketed by grepping its OWN source for the literal "@quarantine" substring.
           GATING_FILES=()
           while IFS= read -r f; do
+            # Consumer regular projects reserve these files for the isolated controller.
+            [[ "${f##*/}" == test-management-*.spec.js ]] && continue
             if ! grep -qE 'test\(.*@quarantine' "$f"; then
               GATING_FILES+=("$f")
             fi
           done < <(find tests -name '*.spec.js' | sort)
-          if [ "${#GATING_FILES[@]}" -eq 0 ]; then
-            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"
-            exit 1
-          fi
           REQUESTED_FILES=()
           # Split only on whitespace, with glob expansion disabled; this is data, never shell syntax.
           set -f
@@ -832,6 +830,10 @@ jobs:
           for requested in "${REQUESTED_FILES[@]}"; do
             if [[ ! "$requested" =~ ^tests(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.spec\.js$ ]]; then
               echo "::error::invalid E2E spec path '$requested' (expected a regular tests/**/*.spec.js path)"
+              exit 1
+            fi
+            if [[ "${requested##*/}" == test-management-*.spec.js ]]; then
+              echo "::error::E2E spec path '$requested' is reserved for the isolated controller; run it through isolated acceptance"
               exit 1
             fi
             found=0
@@ -846,6 +848,10 @@ jobs:
               exit 1
             fi
           done
+          if [ "${#GATING_FILES[@]}" -eq 0 ]; then
+            echo "::error::no non-quarantined spec files found under tests/**/*.spec.js"
+            exit 1
+          fi
           SELECTED_FILES=()
           if [ "${#REQUESTED_FILES[@]}" -eq 0 ]; then
             SELECTED_FILES=("${GATING_FILES[@]}")
@@ -904,6 +910,7 @@ jobs:
           set +e
           QUARANTINE_FILES=""
           while IFS= read -r f; do
+            [[ "${f##*/}" == test-management-*.spec.js ]] && continue
             if grep -qE 'test\(.*@quarantine' "$f"; then
               QUARANTINE_FILES="$QUARANTINE_FILES $f"
             fi
