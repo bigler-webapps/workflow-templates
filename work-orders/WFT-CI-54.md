@@ -97,6 +97,12 @@ Use the configured roles and affected scopes. `WFT-CI-54-T1` uses the `app-ci-e2
 
 The T protocol requires the active WS-GOV-135 runner. Validate it through `acceptance.py` before implementation dispatch and record the result. Validator evidence does not run application tests.
 
+### Coordination with WS-GOV-136 and WFT-CI-55
+
+WS-GOV-135 is the shared test-evidence prerequisite. WS-GOV-136 may proceed in parallel after it lands. Controller-only specs remain in isolated acceptance. The regular CI proof covers selection and failure behaviour on the workflow and consumer refs. It does not call the LLM judge or exchange its captures and verdicts.
+
+WFT-CI-54 and WFT-CI-55 share `app-ci.yml` and E2E tests. Use one owner for those paths at a time. Apply the second change to the first landed revision and repeat its candidate proof on that combined base.
+
 Run the smallest relevant fresh CI proof after the published WFT-CI-53 helper is resolved. Keep default artifact uploads disabled and record run IDs, checked revision, failures by cause, and the review outcome. No production promotion is part of this work order.
 
 ## Gate record

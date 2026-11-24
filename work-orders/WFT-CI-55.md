@@ -96,6 +96,12 @@ Raw failure strings can carry local paths, identifiers, credentials or request d
 
 `WFT-CI-55-T1` is the existing `app-ci-e2e` scope with the new bounded summary tests. The T protocol requires the active WS-GOV-135 runner. Validate it through `acceptance.py` before implementation dispatch.
 
+### Coordination with WS-GOV-136 and WFT-CI-54
+
+WS-GOV-135 is the shared test-evidence prerequisite. WS-GOV-136 may proceed in parallel after it lands. The CI report exposes only its allowlisted mechanical capture categories. LLM judgement, images, free-text reasons and WS-GOV-133 run history stay in workspace acceptance. Keep default uploads off and retain the existing two-ref workflow proof.
+
+WFT-CI-54 and WFT-CI-55 share `app-ci.yml` and E2E tests. Use one owner for those paths at a time. Apply the second change to the first landed revision and repeat its candidate proof on that combined base.
+
 Prove candidate resolution on both CI refs. Record one synthetic red response that shows a fixed cause class and no sentinel data. Check both gate policies with targeted evidence, reusing local structural tests where sufficient. Verify GitHub reports zero default uploads and retain the app follow-ups for actual product failures.
 
 ## Gate record
