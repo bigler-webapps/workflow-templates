@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "wo": "WFT-CI-54",
+  "criteria": [
+    {
+      "id": "WFT-CI-54-T1",
+      "type": "T",
+      "scope": "app-ci-e2e"
+    }
+  ]
+}
