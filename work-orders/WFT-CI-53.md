@@ -91,3 +91,21 @@ Cause, derived from the code and to be confirmed by the first test: `ci_test_wor
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-24 (click in session local_1e5f212a-77db-4423-a507-983adf826bc4).
+
+## Completion
+
+Commits: 999c339 (helper prints nothing for an empty argument list; new mapfile-based tests) and 503da8f (helper checkout pin in `app-ci.yml` set to 999c339c80c8d44ef1d9403c27abbfd104a81ec8, plus the workflow pin test).
+
+Cause confirmed: the helper wrote one NUL for an empty list, `mapfile -d ''` read it as one empty argument, pytest took it as a path. The new test reads the helper output through the same `mapfile -d ''` and fails on the old code path.
+
+Implementer: codex/gpt-6.1-terra effort medium (step-down from configured level, see register). It wrote the helper change and tests; the pin and its test were mine, because the pin must name the helper commit.
+
+Tests: `tests.py --repo workflow-templates` app-ci-e2e 107 tests, 0 failures (before the pin commit); helper file selection 12 tests, 0 skipped, after the pin commit.
+
+Review round 1 (envelope, regression, duplication, tests, sec_review): 2 raised, both about the missing pin bump and its test, which were the planned second commit; both resolved by 503da8f, no further round. regression, duplication, tests, sec_review: no findings. The pin commit was read by me against Part A; it was not part of the reviewed payload.
+
+Acceptance 1: `ci-test/WFT-CI-53` pushed in workflow-templates and in bigler-consult (commit eab00fb on top of develop f786fbd, only `ci.yml` pointing at `app-ci.yml@ci-test/WFT-CI-53`, built without touching the working tree). Run 45387863429: validate-inputs, backend, frontend, security, image-build green, e2e skipped. Backend: 451 collected, 450 passed, 1 skipped, no collection errors (the failing run 45373369250 had 3).
+
+Acceptance 2 and 3: see the register note after landing.
+
+Part B: accurate
