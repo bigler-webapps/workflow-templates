@@ -99,4 +99,4 @@ Package WS-GOV-155: run by the WS-GOV-155 Orchestrator session. Prove the candid
 
 ## Gate record
 
-Gate #1 pending operator approval (plan agreed 2026-11-26).
+Gate #1 approved by the operator 2026-11-26 (Expertenchat chat, AskUserQuestion answer "Freigeben, Übergabetext ausgeben" for WS-GOV-153, WS-GOV-154 and the package WS-GOV-155 with WFT-CI-56 and PG-CI-16).
