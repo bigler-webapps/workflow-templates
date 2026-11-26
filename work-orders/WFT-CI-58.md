@@ -50,3 +50,7 @@ Implemented by codex (implementation role, level high); Orchestrator fixed the r
 - Deviation from the WM-INF-153 test plan: no `ci-test/WM-INF-153` proof on a caller. reimbursements `release-build.yml` triggers only on pushes to `develop` and `main` and has no dispatch, and the ci-test script refuses a changed `.github/actions`. The caller proof is the reimbursements `develop` build on the new pin (RMB-CI-8): its artifact `expires_at` is recorded there (non-main ref, 7 days). The 90-day branch is proven by the executed-shell tests and confirmed in production after the next reimbursements promotion (carried in WM-INF-153).
 - Part B: accurate
 - Hook canary: unverified (implementer reported it unavailable).
+
+### Retention proof (2026-11-26)
+
+Promotion reimbursements v0.7.1 (PR 106, merge f0e4febb, tag v0.7.1). The `main` release build run 45895190919 ran on workflow-templates v2.19.0 and its artifact `release-manifest-45895190919-1` expires 2027-02-24T21:01:25Z, 90 days after creation (builds before the pin: 7 days). Status: done.
