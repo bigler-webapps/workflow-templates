@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+# Session scratch (review logs, test output): never committed
+/scratchpad/
