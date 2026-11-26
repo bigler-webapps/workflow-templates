@@ -100,3 +100,13 @@ Package WS-GOV-155: run by the WS-GOV-155 Orchestrator session. Prove the candid
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-26 (Expertenchat chat, AskUserQuestion answer "Freigeben, Übergabetext ausgeben" for WS-GOV-153, WS-GOV-154 and the package WS-GOV-155 with WFT-CI-56 and PG-CI-16).
+
+## Completion
+
+Landed 2026-11-26 by the WS-GOV-155 Orchestrator. Implementer codex/gpt-6.1-terra (medium), `RESULT: DONE`, canary not recognised in the sandbox (unverified coverage, work continued under every gate).
+
+- Built as specified: `run-frontend` (boolean, default true) gates the `frontend` job; `validate-inputs` fails with a clear message when `run-backend`, `run-frontend`, `run-e2e` and `run-security` are all false; `e2e-spec-files` and `pytest-args` descriptions state the value forms. New structural test `.github/scripts/test_app_ci_job_selection.py`, registered in the `app-ci-e2e` scope of `project.yaml` (Part B did not name `project.yaml`).
+- Tests: `tests.py --repo workflow-templates` PASS, 113 tests, 0 failures.
+- Review: round 1 of five lenses (envelope, regression, duplication, tests, sec_review), no findings. Own diff reading: does what Part A asks, nothing beyond it, nothing missing.
+- Two-sided proof on `ci-test/WFT-CI-56` (7ef8ba9, the landed commit) with Photogallery caller on `ci-test/PG-CI-16`: run 45781000215 `jobs=backend` (frontend and e2e skipped), 45781655615 `jobs=frontend` (only frontend ran), 45781888051 `jobs=e2e` with one spec (only e2e ran, success), 45783574589 `jobs=all` (every selected job ran, e2e off by default). The pre-existing reds in those runs (Photogallery `security`: 48 dependency vulnerabilities; `frontend` lint error in a PG-CI-12 file) are recorded in Photogallery, not in this WO.
+- Part B: errors: project.yaml test scope not named, found by the Orchestrator.
