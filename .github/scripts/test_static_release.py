@@ -60,6 +60,39 @@ def git_ok(calls=None, sha=SHA, root=None):
 
 
 class StaticReleaseTests(unittest.TestCase):
+    def test_upload_retention_and_public_contract(self):
+        import yaml
+        action = yaml.safe_load((ROOT / '.github/actions/publish-static-release/action.yml').read_text(encoding='utf-8'))
+        self.assertEqual(set(action['inputs']), {'release_contract', 'release_workflow_ref', 'asset_path', 'asset_root'})
+        self.assertEqual({name: output['value'] for name, output in action['outputs'].items()}, {
+            'artifact_name': '${{ steps.prepare.outputs.bundle_name }}',
+            'artifact_id': '${{ steps.bundle_upload.outputs.artifact-id }}',
+            'manifest_name': '${{ steps.finalize.outputs.manifest_name }}',
+            'manifest_artifact_id': '${{ steps.manifest_upload.outputs.artifact-id }}',
+        })
+        uploads = {step['id']: step for step in action['runs']['steps'] if step.get('id') in ('bundle_upload', 'manifest_upload')}
+        self.assertEqual(set(uploads), {'bundle_upload', 'manifest_upload'})
+        for step_id, name in (('bundle_upload', '${{ steps.prepare.outputs.bundle_name }}'),
+                              ('manifest_upload', '${{ steps.finalize.outputs.manifest_name }}')):
+            with self.subTest(step=step_id):
+                self.assertEqual(uploads[step_id]['with']['name'], name)
+                self.assertEqual(uploads[step_id]['with']['retention-days'], '${{ steps.prepare.outputs.days }}')
+        prepare = next(step for step in action['runs']['steps'] if step.get('id') == 'prepare')
+        import os, shutil, subprocess
+        snippet = prepare['run'][prepare['run'].index("if [[ \"$GITHUB_REF\""):]
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('bash unavailable')
+        for ref, days in (('refs/heads/main', '90'), ('refs/heads/develop', '7'), ('refs/heads/ci-test/x', '7'),
+                          ('refs/heads/main2', '7'), ('refs/tags/main', '7')):
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / 'out'
+                out.write_text('', encoding='utf-8')
+                result = subprocess.run([bash, '-c', snippet], env={'GITHUB_REF': ref, 'GITHUB_OUTPUT': str(out),
+                                        'PATH': os.environ.get('PATH', '')}, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(out.read_text(encoding='utf-8'), 'days=' + days + '\n')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="static-release-test-")
         self.root = Path(self.temp.name)

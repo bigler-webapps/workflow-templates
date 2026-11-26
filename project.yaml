@@ -6,3 +6,7 @@ tests:
     runner: wsl
     command: python3 -m pytest -q -p no:cacheprovider .github/scripts/test_restic_floor_actions.py
     cwd: .
+  release-actions:
+    runner: wsl
+    command: python3 -m pytest -q -p no:cacheprovider .github/scripts/test_release_build_action.py .github/scripts/test_static_release.py
+    cwd: .

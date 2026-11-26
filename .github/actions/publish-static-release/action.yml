@@ -45,6 +45,11 @@ runs:
       run: |
         set -euo pipefail
         python3 -I "$ACTION_PATH/../../scripts/static_release.py" prepare --asset-path "$STATIC_ASSET_PATH" --asset-root "$STATIC_ASSET_ROOT"
+        if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+          echo 'days=90' >> "$GITHUB_OUTPUT"
+        else
+          echo 'days=7' >> "$GITHUB_OUTPUT"
+        fi
     - name: Upload static release bundle
       id: bundle_upload
       uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
@@ -53,7 +58,7 @@ runs:
         path: ${{ steps.prepare.outputs.bundle_path }}
         if-no-files-found: error
         overwrite: false
-        retention-days: 7
+        retention-days: ${{ steps.prepare.outputs.days }}
     - name: Finalize static release manifest
       id: finalize
       shell: bash
@@ -74,7 +79,7 @@ runs:
         path: ${{ steps.finalize.outputs.manifest_path }}
         if-no-files-found: error
         overwrite: false
-        retention-days: 7
+        retention-days: ${{ steps.prepare.outputs.days }}
     - name: Remove private static release output
       if: ${{ always() }}
       shell: bash

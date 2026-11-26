@@ -102,6 +102,11 @@ runs:
         printf 'manifest_path=%s/release.json\n' "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
         printf 'artifact_name=release-manifest-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         printf 'image=%s\n' "$(cat "$OUTPUT_DIR/image.txt")" >> "$GITHUB_OUTPUT"
+        if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+          echo 'days=90' >> "$GITHUB_OUTPUT"
+        else
+          echo 'days=7' >> "$GITHUB_OUTPUT"
+        fi
     - name: Upload release manifest
       id: manifest_upload
       if: ${{ inputs.release_contract == 'v1' }}
@@ -111,7 +116,7 @@ runs:
         path: ${{ steps.release.outputs.manifest_path }}
         if-no-files-found: error
         overwrite: false
-        retention-days: 7
+        retention-days: ${{ steps.release.outputs.days }}
     - name: Remove private release output directory
       if: ${{ always() && inputs.release_contract == 'v1' }}
       shell: bash

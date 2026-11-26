@@ -66,6 +66,39 @@ class CommandStub:
 
 
 class ReleaseBuildActionTests(unittest.TestCase):
+    def test_manifest_retention_and_public_contract(self):
+        action = yaml.safe_load((ROOT / '.github/actions/publish-backend-image/action.yml').read_text(encoding='utf-8'))
+        self.assertEqual(set(action['inputs']), {
+            'release_contract', 'release_image_namespace', 'release_workflow_ref', 'release_additional_images',
+            'image_tag', 'github_token', 'backend_dockerfile', 'backend_build_context', 'backend_target',
+            'hram_engine_read_token', 'vite_app_mui_license_key', 'vite_survey_app_api_base_url',
+            'vite_survey_app_site_slug', 'existing_image',
+        })
+        self.assertEqual({name: output['value'] for name, output in action['outputs'].items()}, {
+            'image': '${{ steps.release.outputs.image || steps.publish.outputs.image }}',
+            'manifest_path': '${{ steps.release.outputs.manifest_path }}',
+            'artifact_name': '${{ steps.release.outputs.artifact_name }}',
+            'artifact_id': '${{ steps.manifest_upload.outputs.artifact-id }}',
+        })
+        upload = next(step for step in action['runs']['steps'] if step.get('id') == 'manifest_upload')
+        self.assertEqual(upload['with']['name'], '${{ steps.release.outputs.artifact_name }}')
+        self.assertEqual(upload['with']['retention-days'], '${{ steps.release.outputs.days }}')
+        release = next(step for step in action['runs']['steps'] if step.get('id') == 'release')
+        start = release['run'].index("if [[ \"$GITHUB_REF\"")
+        snippet = release['run'][start:]
+        bash = shutil.which('bash')
+        if bash is None:
+            self.skipTest('bash unavailable')
+        for ref, days in (('refs/heads/main', '90'), ('refs/heads/develop', '7'), ('refs/heads/ci-test/x', '7'),
+                          ('refs/heads/main2', '7'), ('refs/tags/main', '7')):
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / 'out'
+                out.write_text('', encoding='utf-8')
+                result = subprocess.run([bash, '-c', snippet], env={'GITHUB_REF': ref, 'GITHUB_OUTPUT': str(out),
+                                        'PATH': os.environ.get('PATH', '')}, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(out.read_text(encoding='utf-8'), 'days=' + days + '\n')
+
     def setUp(self):
         self.fixture = tempfile.TemporaryDirectory()
         self.old_cwd = Path.cwd()
@@ -174,7 +207,7 @@ class ReleaseBuildActionTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08", action)
         self.assertIn("if-no-files-found: error", action)
         self.assertIn("overwrite: false", action)
-        self.assertIn("retention-days: 7", action)
+        self.assertIn("retention-days: ${{ steps.release.outputs.days }}", action)
         self.assertIn("always() && inputs.release_contract == 'v1'", action)
         self.assertIn("if: ${{ inputs.release_contract == '' }}", action)
         self.assertIn("printf 'image=%s:%s\\n' \"$PUBLISHED_IMAGE\" \"$IMAGE_TAG\"", action)
@@ -317,7 +350,7 @@ elif args[:3]==["buildx","imagetools","inspect"]: print(json.dumps({"name":args[
             self.assertEqual(options["name"], "${{ steps.release.outputs.artifact_name }}")
             self.assertEqual(options["if-no-files-found"], "error")
             self.assertIs(options["overwrite"], False)
-            self.assertEqual(options["retention-days"], 7)
+            self.assertEqual(options["retention-days"], "${{ steps.release.outputs.days }}")
             self.assertEqual(definition["outputs"]["image"]["value"], "${{ steps.release.outputs.image || steps.publish.outputs.image }}")
             expected_environment = {
                 "RELEASE_CONTRACT":"release_contract", "RELEASE_IMAGE_NAMESPACE":"release_image_namespace",
