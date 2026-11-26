@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-11-26
+
+### Changed
+
+`restic-check-b2`, `restic-init` and `restore-source-export` check right after the restic install that restic is at least 0.16 and refuse to open a B2 repository otherwise (`restic_version_floor`). From 0.16 restic refreshes its locks, which makes a plain `restic unlock` safe for stale locks.
+
 ## [2.17.0] - 2026-11-02
 
 ### Fixed
