@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-11-26
+
+### Changed
+
+`publish-backend-image` (release contract v1) and `publish-static-release` upload the release manifest and the static bundle with 90 days of artifact retention when the run ref is `refs/heads/main`, and 7 days for every other ref. The value is decided inside the action from the run's own ref; no input changes it. A production release stays redeployable and rollbackable for 90 days (WM-INF-153).
+
 ## [2.18.0] - 2026-11-26
 
 ### Changed
