@@ -39,3 +39,14 @@ Proof through `ci-test/WM-INF-153` here and the caller ref in reimbursements; ta
 ## Gate record
 
 Gate #1 is recorded in `webapp-management/work-orders/WM-INF-153.md`.
+
+## Completion
+
+Implemented by codex (implementation role, level high); Orchestrator fixed the review finding and the two existing tests that pinned the old constant.
+
+- Change: both actions write `days=90` or `days=7` from the run's own `GITHUB_REF` (`refs/heads/main` exactly) into a step output and pass it as `retention-days` to the manifest upload and, for the static release, the bundle upload. No input reaches the value; inputs, outputs and artifact names unchanged. New scope `release-actions` in `project.yaml` (WSL pytest) covers `test_release_build_action.py` and `test_static_release.py`, which no scope ran before. CHANGELOG 2.19.0.
+- Tests: `tests.py --repo workflow-templates --scope release-actions`: 46 passed, 0 failed. The retention tests execute the shell step with five refs (`main` 90; `develop`, `ci-test/x`, `main2`, `refs/tags/main` 7).
+- Review: codex/gpt-6-luna · lenses: envelope, regression, duplication, tests, sec_review · 2 rounds · 1 raised · 1 accepted · worst accepted: defect (retention test only matched text; now executes the snippet). Round 2: no findings.
+- Deviation from the WM-INF-153 test plan: no `ci-test/WM-INF-153` proof on a caller. reimbursements `release-build.yml` triggers only on pushes to `develop` and `main` and has no dispatch, and the ci-test script refuses a changed `.github/actions`. The caller proof is the reimbursements `develop` build on the new pin (RMB-CI-8): its artifact `expires_at` is recorded there (non-main ref, 7 days). The 90-day branch is proven by the executed-shell tests and confirmed in production after the next reimbursements promotion (carried in WM-INF-153).
+- Part B: accurate
+- Hook canary: unverified (implementer reported it unavailable).
