@@ -132,6 +132,28 @@ runs:
         echo "restic: $(restic version)"
         echo "jq: $(jq --version)"
 
+    - name: Check restic version floor
+      shell: bash
+      run: |
+        if ! output="$(restic version 2>&1)"; then
+          echo "restic_version_floor: unable to run restic version" >&2
+          exit 1
+        fi
+        if [[ ! "$output" =~ ^restic[[:space:]]+([0-9]+)\.([0-9]+)\.([0-9]+)([[:space:]]|$) ]]; then
+          echo "restic_version_floor: unparseable restic version" >&2
+          exit 1
+        fi
+        found="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+        major="${BASH_REMATCH[1]}"
+        minor="${BASH_REMATCH[2]}"
+        if [[ "$major" =~ ^0+$ && "$minor" =~ ^0*([1-9][0-9]*|0)$ ]]; then
+          minor="${BASH_REMATCH[1]}"
+          if (( ${#minor} < 2 )) || { (( ${#minor} == 2 )) && [[ "$minor" < 16 ]]; }; then
+            echo "restic_version_floor: restic ${found} is below 0.16, refusing to open a B2 repository" >&2
+            exit 1
+          fi
+        fi
+
     - name: 🛡️  Prepare work dir (mode 700, RUNNER_TEMP)
       id: workdir
       shell: bash

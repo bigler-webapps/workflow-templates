@@ -2,3 +2,7 @@ tests:
   app-ci-e2e:
     command: python -m pytest -q -p no:cacheprovider .github/scripts/test_app_ci_e2e_job.py .github/scripts/test_app_ci_e2e_stack.py .github/scripts/test_app_ci_e2e_reporting.py .github/scripts/test_app_ci_job_selection.py
     cwd: .
+  restic-floor:
+    runner: wsl
+    command: python3 -m pytest -q -p no:cacheprovider .github/scripts/test_restic_floor_actions.py
+    cwd: .
