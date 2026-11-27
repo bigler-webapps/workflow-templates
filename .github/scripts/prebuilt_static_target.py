@@ -500,14 +500,20 @@ def execute_static_deployment(
                 deadline=end, clock=clock, snapshots=snapshots)
             if _now(clock) >= end:
                 _fail("deadline_exceeded")
-            fields = inspect_raw.decode("utf-8", errors="strict").splitlines()
-            if len(fields) != 6:
+            inspect_text = inspect_raw.decode("utf-8", errors="strict")
+            if inspect_text.endswith("\n\n"):
+                inspect_text = inspect_text[:-1]
+            fields = inspect_text.splitlines()
+            if len(fields) != 8:
                 _fail("container_inspect_invalid")
             values = [target_exec._safe_json((line + "\n").encode("utf-8")) for line in fields]
-            image, state, restarting, health, project, actual_service = values
+            image, state, restarting, health, project, actual_service, working_directory, configuration_files = values
             wanted = target.static_image if service == target.static_service else sidecars[service]
             if image != wanted or project != target.project_name or actual_service != service:
                 _fail("container_identity_mismatch")
+            expected_files = ",".join(str(app / control.filename) for control in target.compose) + "," + str(override)
+            if working_directory != str(app) or configuration_files != expected_files:
+                _fail("container_configuration_mismatch")
             if (state != "running" or restarting is not False or health not in (None, "healthy")
                     or (service in health_required and health != 'healthy')):
                 _fail("container_unhealthy")

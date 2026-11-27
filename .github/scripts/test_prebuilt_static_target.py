@@ -67,6 +67,8 @@ class FakeExecutor:
         if self.fail_at and self.fail_at in joined:
             return prebuilt_target._CommandResult(17, b"synthetic private error")
         if args[-3:] == ("config", "--format", "json"):
+            self.configuration_files = ",".join(str(Path(cwd) / args[index + 1])
+                                                for index, arg in enumerate(args) if arg == "--file")
             override = Path(args[args.index("--file", args.index("--file") + 1) + 1])
             text = override.read_text(encoding="utf-8")
             lines = text.splitlines()
@@ -107,8 +109,8 @@ class FakeExecutor:
         if args[0:2] == ("inspect", "--format"):
             health = "unhealthy" if self.unhealthy else "healthy"
             service = self.container_services[argv[-1]]
-            values = [self.images[service], "running", False, health, self.project, service]
-            return prebuilt_target._CommandResult(0, "\n".join(json.dumps(x) for x in values).encode())
+            values = [self.images[service], "running", False, health, self.project, service, cwd, self.configuration_files]
+            return prebuilt_target._CommandResult(0, ("\n".join(json.dumps(x) for x in values) + "\n\n").encode())
         return prebuilt_target._CommandResult(0, b"")
 
 
@@ -152,6 +154,63 @@ class StaticTargetTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def _deploy_with_inspect(self, variant):
+        class InspectVariant(FakeExecutor):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if 'inspect' not in argv:
+                    return result
+                lines = result.stdout.decode().rstrip(chr(10)).splitlines()
+                if variant == 'one_newline':
+                    return prebuilt_target._CommandResult(0, result.stdout[:-1])
+                if variant == 'extra_empty':
+                    return prebuilt_target._CommandResult(0, result.stdout + b'\n')
+                if variant == 'missing_field':
+                    del lines[7]
+                elif variant == 'wrong_directory':
+                    lines[6] = json.dumps('wrong-directory')
+                elif variant == 'wrong_files':
+                    lines[7] = json.dumps('wrong-files')
+                elif variant == 'files_reordered':
+                    lines[7] = json.dumps(','.join(reversed(json.loads(lines[7]).split(','))))
+                elif variant == 'files_without_override':
+                    lines[7] = json.dumps(json.loads(lines[7]).split(',')[0])
+                if variant != 'real':
+                    return prebuilt_target._CommandResult(0, ('\n'.join(lines[:8]) + '\n\n').encode())
+                return result
+        return static_target.execute_static_deployment(self.manifest, expected_identity=IDENTITY,
+            selected_artifact=self.selection, bundle=self.archive, target=self.spec, executor=InspectVariant())
+
+    def test_real_inspect_shape_with_docker_trailing_newline_is_accepted(self):
+        result = self._deploy_with_inspect('real')
+        self.assertTrue(Path(result.asset_directory).is_dir())
+
+    def test_exactly_one_extra_trailing_newline_is_tolerated(self):
+        result = self._deploy_with_inspect('one_newline')
+        self.assertTrue(Path(result.asset_directory).is_dir())
+
+    def _assert_inspect_rejected(self, variant, code):
+        with self.assertRaisesRegex(static_target.StaticTargetError, code):
+            self._deploy_with_inspect(variant)
+
+    def test_a_further_empty_line_is_container_inspect_invalid(self):
+        self._assert_inspect_rejected('extra_empty', 'container_inspect_invalid')
+
+    def test_a_missing_inspect_field_is_container_inspect_invalid(self):
+        self._assert_inspect_rejected('missing_field', 'container_inspect_invalid')
+
+    def test_wrong_working_directory_is_a_configuration_mismatch(self):
+        self._assert_inspect_rejected('wrong_directory', 'container_configuration_mismatch')
+
+    def test_wrong_configuration_files_is_a_configuration_mismatch(self):
+        self._assert_inspect_rejected('wrong_files', 'container_configuration_mismatch')
+
+    def test_configuration_files_must_keep_invocation_order(self):
+        self._assert_inspect_rejected('files_reordered', 'container_configuration_mismatch')
+
+    def test_configuration_files_must_include_the_generated_override(self):
+        self._assert_inspect_rejected('files_without_override', 'container_configuration_mismatch')
 
     def test_valid_release_uses_pinned_image_and_persists_readable_assets(self):
         fake = FakeExecutor(preserved=((str(self.app / "Caddyfile"), "/etc/caddy/Caddyfile"),))
