@@ -12,6 +12,12 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+## [2.19.1] - 2026-11-27
+
+### Fixed
+
+The static prebuilt target's post-deploy container check expected six inspect fields and did not tolerate the extra newline Docker Engine appends, so every real static deployment failed with `container_inspect_invalid` after `up`. It now parses like the image target (one extra trailing newline tolerated, exactly eight fields) and additionally checks the container's working directory and Compose configuration files (`container_configuration_mismatch`) (WFT-CI-61).
+
 ### Changed
 
 The base role manages Ubuntu apt sources using the main archive and security mirrors, and removes duplicate Ubuntu archive entries from the legacy sources list (WFT-INF-1).
