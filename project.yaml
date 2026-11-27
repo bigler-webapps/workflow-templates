@@ -10,3 +10,6 @@ tests:
     runner: wsl
     command: python3 -m pytest -q -p no:cacheprovider .github/scripts/test_release_build_action.py .github/scripts/test_static_release.py
     cwd: .
+  base-role:
+    command: python -m pytest -q -p no:cacheprovider ansible/roles/base/tests
+    cwd: .

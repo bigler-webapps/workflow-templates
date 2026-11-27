@@ -2,6 +2,25 @@
 - name: Base server bootstrap (requires root)
   become: true
   block:
+    - name: Manage Ubuntu apt sources
+      when:
+        - base_ubuntu_sources_managed | bool
+        - ansible_facts.distribution | default('Ubuntu') == 'Ubuntu'
+      block:
+        - name: Configure Ubuntu deb822 sources
+          ansible.builtin.template:
+            src: ubuntu.sources.j2
+            dest: /etc/apt/sources.list.d/ubuntu.sources
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Remove duplicate Ubuntu archive lines from the legacy sources list
+          ansible.builtin.lineinfile:
+            path: /etc/apt/sources.list
+            state: absent
+            regexp: '^\s*deb\s+(?:\[[^]]*\]\s+)?https?://(?:(?:[a-zA-Z0-9-]+\.)?archive|security)\.ubuntu\.com/ubuntu/?(?:\s|$)'
+
     # INF-5: some packages must NOT be upgraded by this play, because their
     # postinst restarts a daemon the play itself is running over. `tailscale`
     # is the proven case: CI connects via Tailscale SSH (the session is served

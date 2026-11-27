@@ -1,0 +1,11 @@
+Types: deb
+URIs: {{ base_ubuntu_archive_uri }}
+Suites: {{ base_ubuntu_archive_suites | join(' ') }}
+Components: {{ base_ubuntu_components | join(' ') }}
+Signed-By: {{ base_ubuntu_keyring }}
+
+Types: deb
+URIs: {{ base_ubuntu_security_uri }}
+Suites: {{ base_ubuntu_security_suites | join(' ') }}
+Components: {{ base_ubuntu_components | join(' ') }}
+Signed-By: {{ base_ubuntu_keyring }}

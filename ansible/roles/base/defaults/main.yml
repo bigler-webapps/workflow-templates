@@ -1,4 +1,22 @@
 ---
+# Manage the Ubuntu archive sources independently of third-party repositories.
+base_ubuntu_sources_managed: true
+base_ubuntu_archive_uri: http://archive.ubuntu.com/ubuntu/
+base_ubuntu_security_uri: http://security.ubuntu.com/ubuntu/
+base_ubuntu_release: "{{ ansible_facts.distribution_release | default('noble') }}"
+base_ubuntu_archive_suites:
+  - "{{ base_ubuntu_release }}"
+  - "{{ base_ubuntu_release }}-updates"
+  - "{{ base_ubuntu_release }}-backports"
+base_ubuntu_security_suites:
+  - "{{ base_ubuntu_release }}-security"
+base_ubuntu_components:
+  - main
+  - restricted
+  - universe
+  - multiverse
+base_ubuntu_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
 base_apt_upgrade: dist
 base_apt_cache_valid_time: 3600
 

@@ -12,6 +12,10 @@ tag, not `@main`. The current stable tag is documented below.
 
 ## [Unreleased]
 
+### Changed
+
+The base role manages Ubuntu apt sources using the main archive and security mirrors, and removes duplicate Ubuntu archive entries from the legacy sources list (WFT-INF-1).
+
 ## [2.19.0] - 2026-11-26
 
 ### Changed
